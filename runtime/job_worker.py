@@ -397,6 +397,8 @@ def run_worker(connection_id: str):
             time.sleep(3)
             continue
 
+        mt5_ready = True
+
     if not mt5_ready:
         logger.error("MT5 failed to initialize after %d attempts. Cooling down.", INIT_RETRIES)
         db.log_event("error", "worker", f"MT5 init failed after {INIT_RETRIES} attempts", connection_id)

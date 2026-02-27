@@ -1,0 +1,94 @@
+CONNECTIONS
+[
+  {
+    "id": "49ff88b0-c07d-4a26-a861-7771feb5d77e",
+    "user_id": "e010d481-40a7-4655-839a-d950bcd65f42",
+    "account_login": "5046840954",
+    "broker_server": "MetaQuotes-Demo",
+    "password_ciphertext_b64": "LJP8UCU5re8qCjhiOVXyQ7eNvZCnxuW1",
+    "password_nonce_b64": "fFlwa4mEwODsyJk6",
+    "is_active": true,
+    "status": "offline",
+    "last_seen_at": null,
+    "last_error": null,
+    "last_ok_at": null,
+    "test_request_id": null,
+    "last_test_ok": null,
+    "last_test_error": null,
+    "last_test_latency_ms": null,
+    "last_test_result": null,
+    "last_test_at": null,
+    "created_at": "2026-02-27T21:44:44.468668+00:00",
+    "updated_at": "2026-02-27T21:44:44.468668+00:00"
+  }
+]
+
+EVENTS
+[
+  {
+    "id": 441,
+    "connection_id": "49ff88b0-c07d-4a26-a861-7771feb5d77e",
+    "level": "error",
+    "component": "worker",
+    "message": "MT5 init failed after 3 attempts",
+    "details": {},
+    "created_at": "2026-02-27T21:47:58.583694+00:00"
+  },
+  {
+    "id": 440,
+    "connection_id": "49ff88b0-c07d-4a26-a861-7771feb5d77e",
+    "level": "warn",
+    "component": "supervisor",
+    "message": "Stale heartbeat (41s) \u2014 killing worker",
+    "details": {
+      "pid": 17836
+    },
+    "created_at": "2026-02-27T21:47:39.484346+00:00"
+  },
+  {
+    "id": 439,
+    "connection_id": "49ff88b0-c07d-4a26-a861-7771feb5d77e",
+    "level": "error",
+    "component": "worker",
+    "message": "MT5 init failed after 3 attempts",
+    "details": {},
+    "created_at": "2026-02-27T21:46:57.758127+00:00"
+  },
+  {
+    "id": 438,
+    "connection_id": "49ff88b0-c07d-4a26-a861-7771feb5d77e",
+    "level": "warn",
+    "component": "supervisor",
+    "message": "Stale heartbeat (28s) \u2014 killing worker",
+    "details": {
+      "pid": 30952
+    },
+    "created_at": "2026-02-27T21:46:36.02376+00:00"
+  },
+  {
+    "id": 437,
+    "connection_id": "49ff88b0-c07d-4a26-a861-7771feb5d77e",
+    "level": "error",
+    "component": "worker",
+    "message": "MT5 init failed after 3 attempts",
+    "details": {},
+    "created_at": "2026-02-27T21:46:07.237979+00:00"
+  }
+]
+
+HEARTBEATS
+[
+  {
+    "connection_id": "49ff88b0-c07d-4a26-a861-7771feb5d77e",
+    "pid": 11444,
+    "host": "DESKTOP-6RNPSMF",
+    "status": "error",
+    "started_at": "2026-02-27T21:47:40.055578+00:00",
+    "last_seen_at": "2026-02-27T21:47:57.541571+00:00",
+    "terminal_path": "C:\\mt5system\\terminals\\49ff88b0-c07d-4a26-a861-7771feb5d77e",
+    "mt5_initialized": false,
+    "account_login": null,
+    "last_metrics": {}
+  }
+]
+

@@ -1,0 +1,50 @@
+Arguments: (WindowsPath('C:/mt5system/terminals/49ff88b0-c07d-4a26-a861-7771feb5d77e'),)
+2026-02-28 02:45:45,221 [INFO] [provisioner] Portable mode marker created: C:\mt5system\terminals\49ff88b0-c07d-4a26-a861-7771feb5d77e\portable
+2026-02-28 02:45:45,222 [INFO] [provisioner] Terminal provisioned successfully: C:\mt5system\terminals\49ff88b0-c07d-4a26-a861-7771feb5d77e
+2026-02-28 02:45:46,137 [INFO] HTTP Request: GET https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 200 OK"
+2026-02-28 02:45:46,507 [INFO] HTTP Request: POST https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_worker_heartbeats?on_conflict=connection_id "HTTP/2 201 Created"
+2026-02-28 02:45:46,784 [INFO] HTTP Request: GET https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_user_connections?select=id&id=eq.49ff88b0-c07d-4a26-a861-7771feb5d77e&limit=1 "HTTP/2 200 OK"
+2026-02-28 02:45:46,784 [INFO] MT5 init attempt 1/3 ...
+2026-02-28 02:45:55,686 [INFO] MT5 init attempt 2/3 ...
+2026-02-28 02:46:00,701 [INFO] MT5 init attempt 3/3 ...
+2026-02-28 02:46:05,716 [ERROR] MT5 failed to initialize after 3 attempts. Cooling down.
+2026-02-28 02:46:06,038 [INFO] HTTP Request: POST https://agipjfxfdygfilriffxv.supabase.co/rest/v1/rpc/log_mt5_runtime_event "HTTP/2 204 No Content"
+2026-02-28 02:46:06,039 [ERROR] [worker][49ff88b0-c07d-4a26-a861-7771feb5d77e] MT5 init failed after 3 attempts | details=None
+2026-02-28 02:46:06,261 [INFO] HTTP Request: GET https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_user_connections?select=id&id=eq.49ff88b0-c07d-4a26-a861-7771feb5d77e&limit=1 "HTTP/2 200 OK"
+2026-02-28 02:46:06,528 [INFO] HTTP Request: POST https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_worker_heartbeats?on_conflict=connection_id "HTTP/2 200 OK"
+2026-02-28 02:46:36,726 [INFO] === Worker starting for connection 49ff88b0-c07d-4a26-a861-7771feb5d77e ===
+2026-02-28 02:46:37,595 [INFO] HTTP Request: GET https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 200 OK"
+2026-02-28 02:46:37,831 [INFO] HTTP Request: POST https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_worker_heartbeats?on_conflict=connection_id "HTTP/2 200 OK"
+2026-02-28 02:46:38,059 [INFO] HTTP Request: GET https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_user_connections?select=id&id=eq.49ff88b0-c07d-4a26-a861-7771feb5d77e&limit=1 "HTTP/2 200 OK"
+2026-02-28 02:46:38,060 [INFO] MT5 init attempt 1/3 ...
+2026-02-28 02:46:45,802 [INFO] MT5 init attempt 2/3 ...
+2026-02-28 02:46:50,811 [INFO] MT5 init attempt 3/3 ...
+2026-02-28 02:46:55,822 [ERROR] MT5 failed to initialize after 3 attempts. Cooling down.
+2026-02-28 02:46:56,500 [INFO] HTTP Request: POST https://agipjfxfdygfilriffxv.supabase.co/rest/v1/rpc/log_mt5_runtime_event "HTTP/2 204 No Content"
+2026-02-28 02:46:56,502 [ERROR] [worker][49ff88b0-c07d-4a26-a861-7771feb5d77e] MT5 init failed after 3 attempts | details=None
+2026-02-28 02:46:56,720 [INFO] HTTP Request: GET https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_user_connections?select=id&id=eq.49ff88b0-c07d-4a26-a861-7771feb5d77e&limit=1 "HTTP/2 200 OK"
+2026-02-28 02:46:56,960 [INFO] HTTP Request: POST https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_worker_heartbeats?on_conflict=connection_id "HTTP/2 200 OK"
+2026-02-28 02:47:40,055 [INFO] === Worker starting for connection 49ff88b0-c07d-4a26-a861-7771feb5d77e ===
+2026-02-28 02:47:40,888 [INFO] HTTP Request: GET https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 200 OK"
+2026-02-28 02:47:41,125 [INFO] HTTP Request: POST https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_worker_heartbeats?on_conflict=connection_id "HTTP/2 200 OK"
+2026-02-28 02:47:41,340 [INFO] HTTP Request: GET https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_user_connections?select=id&id=eq.49ff88b0-c07d-4a26-a861-7771feb5d77e&limit=1 "HTTP/2 200 OK"
+2026-02-28 02:47:41,342 [INFO] MT5 init attempt 1/3 ...
+2026-02-28 02:47:47,000 [INFO] MT5 init attempt 2/3 ...
+2026-02-28 02:47:52,008 [INFO] MT5 init attempt 3/3 ...
+2026-02-28 02:47:57,017 [ERROR] MT5 failed to initialize after 3 attempts. Cooling down.
+2026-02-28 02:47:57,318 [INFO] HTTP Request: POST https://agipjfxfdygfilriffxv.supabase.co/rest/v1/rpc/log_mt5_runtime_event "HTTP/2 204 No Content"
+2026-02-28 02:47:57,318 [ERROR] [worker][49ff88b0-c07d-4a26-a861-7771feb5d77e] MT5 init failed after 3 attempts | details=None
+2026-02-28 02:47:57,540 [INFO] HTTP Request: GET https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_user_connections?select=id&id=eq.49ff88b0-c07d-4a26-a861-7771feb5d77e&limit=1 "HTTP/2 200 OK"
+2026-02-28 02:47:57,775 [INFO] HTTP Request: POST https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_worker_heartbeats?on_conflict=connection_id "HTTP/2 200 OK"
+2026-02-28 02:48:43,264 [INFO] === Worker starting for connection 49ff88b0-c07d-4a26-a861-7771feb5d77e ===
+2026-02-28 02:48:44,033 [INFO] HTTP Request: GET https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 200 OK"
+2026-02-28 02:48:44,267 [INFO] HTTP Request: POST https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_worker_heartbeats?on_conflict=connection_id "HTTP/2 200 OK"
+2026-02-28 02:48:44,486 [INFO] HTTP Request: GET https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_user_connections?select=id&id=eq.49ff88b0-c07d-4a26-a861-7771feb5d77e&limit=1 "HTTP/2 200 OK"
+2026-02-28 02:48:44,487 [INFO] MT5 init attempt 1/3 ...
+2026-02-28 02:48:49,498 [INFO] MT5 init attempt 2/3 ...
+2026-02-28 02:48:54,517 [INFO] MT5 init attempt 3/3 ...
+2026-02-28 02:48:59,530 [ERROR] MT5 failed to initialize after 3 attempts. Cooling down.
+2026-02-28 02:48:59,789 [INFO] HTTP Request: POST https://agipjfxfdygfilriffxv.supabase.co/rest/v1/rpc/log_mt5_runtime_event "HTTP/2 204 No Content"
+2026-02-28 02:48:59,790 [ERROR] [worker][49ff88b0-c07d-4a26-a861-7771feb5d77e] MT5 init failed after 3 attempts | details=None
+2026-02-28 02:49:00,004 [INFO] HTTP Request: GET https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_user_connections?select=id&id=eq.49ff88b0-c07d-4a26-a861-7771feb5d77e&limit=1 "HTTP/2 200 OK"
+2026-02-28 02:49:00,243 [INFO] HTTP Request: POST https://agipjfxfdygfilriffxv.supabase.co/rest/v1/mt5_worker_heartbeats?on_conflict=connection_id "HTTP/2 200 OK"
