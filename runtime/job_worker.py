@@ -185,13 +185,13 @@ def check_terminal_health(logger: logging.Logger) -> bool:
         logger.warning("Health check: terminal_info() returned None — %s", mt5.last_error())
         return False
 
-    if not term.trade_allowed:
-        logger.warning("Health check: trade_allowed is False.")
-        return False
-
     if not term.connected:
         logger.warning("Health check: terminal not connected to broker.")
         return False
+
+    # trade_allowed can be False during off-hours/weekends — log it but don't restart
+    if not term.trade_allowed:
+        logger.info("Health check: trade_allowed is False (market likely closed or off-hours). Terminal still connected OK.")
 
     return True
 
