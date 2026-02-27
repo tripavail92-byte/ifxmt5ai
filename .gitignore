@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Environment Variables (CRUCIAL - DO NOT COMMIT)
+.env
+.env.local
+.env.*.local
+
+# MT5 Terminals (Massive folder, auto-provisioned)
+terminals/
+
+# Logs
+runtime/logs/
+*.log
+
+# Frontend (Next.js)
+frontend/.next/
+frontend/node_modules/
+frontend/.DS_Store
+frontend/out/

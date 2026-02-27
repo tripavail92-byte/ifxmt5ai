@@ -1,0 +1,23 @@
+﻿2026-02-27 01:32:29,911 [INFO] === IFX MT5 Supervisor starting ===
+2026-02-27 01:32:30,640 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:32:30,652 [ERROR] Failed to fetch active connections: {'message': 'column mt5_user_connections.is_active does not exist', 'code': '42703', 'hint': None, 'details': None}
+2026-02-27 01:32:40,873 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:32:40,875 [ERROR] Failed to fetch active connections: {'message': 'column mt5_user_connections.is_active does not exist', 'code': '42703', 'hint': None, 'details': None}
+2026-02-27 01:32:51,096 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:32:51,105 [ERROR] Failed to fetch active connections: {'message': 'column mt5_user_connections.is_active does not exist', 'code': '42703', 'hint': None, 'details': None}
+2026-02-27 01:33:01,329 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:33:01,332 [ERROR] Failed to fetch active connections: {'message': 'column mt5_user_connections.is_active does not exist', 'code': '42703', 'hint': None, 'details': None}
+2026-02-27 01:33:11,590 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:33:11,593 [ERROR] Failed to fetch active connections: {'message': 'column mt5_user_connections.is_active does not exist', 'code': '42703', 'hint': None, 'details': None}
+2026-02-27 01:33:21,839 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:33:21,841 [ERROR] Failed to fetch active connections: {'message': 'column mt5_user_connections.is_active does not exist', 'code': '42703', 'hint': None, 'details': None}
+2026-02-27 01:33:32,078 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:33:32,082 [ERROR] Failed to fetch active connections: {'message': 'column mt5_user_connections.is_active does not exist', 'code': '42703', 'hint': None, 'details': None}
+2026-02-27 01:33:42,319 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:33:42,321 [ERROR] Failed to fetch active connections: {'message': 'column mt5_user_connections.is_active does not exist', 'code': '42703', 'hint': None, 'details': None}
+2026-02-27 01:33:52,582 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:33:52,584 [ERROR] Failed to fetch active connections: {'message': 'column mt5_user_connections.is_active does not exist', 'code': '42703', 'hint': None, 'details': None}
+2026-02-27 01:34:02,868 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:34:02,872 [ERROR] Failed to fetch active connections: {'message': 'column mt5_user_connections.is_active does not exist', 'code': '42703', 'hint': None, 'details': None}
+2026-02-27 01:34:13,199 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:34:13,204 [ERROR] Failed to fetch active connections: {'message': 'column mt5_user_connections.is_active does not exist', 'code': '42703', 'hint': None, 'details': None}

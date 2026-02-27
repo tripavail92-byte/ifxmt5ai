@@ -1,0 +1,56 @@
+﻿2026-02-27 01:45:45,102 [INFO] === IFX MT5 Supervisor starting ===
+2026-02-27 01:45:45,783 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:45:45,794 [WARNING] is_active column missing — falling back to MT5_CONNECTION_IDS env var. Run patch_connections_table.sql in Supabase to fix permanently.
+2026-02-27 01:45:46,018 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&id=in.%2845777f48-0805-4b72-a9b3-bdd2b80b61fb%2C5ccf12ce-9646-4d78-ba7a-590a27ec9c95%2Ced058652-a141-42fc-bc9b-ec58766bc341%29 "HTTP/2 200 OK"
+2026-02-27 01:45:46,241 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_worker_heartbeats?select=%2A "HTTP/2 404 Not Found"
+2026-02-27 01:45:46,243 [ERROR] Failed to fetch heartbeats: {'message': "Could not find the table 'public.mt5_worker_heartbeats' in the schema cache", 'code': 'PGRST205', 'hint': "Perhaps you meant the table 'public.mt5_workers'", 'details': None}
+2026-02-27 01:45:46,243 [INFO] [45777f48] No worker running — spawning.
+2026-02-27 01:45:46,247 [INFO] [45777f48] Spawned worker PID 30996.
+2026-02-27 01:45:46,248 [INFO] [5ccf12ce] No worker running — spawning.
+2026-02-27 01:45:46,253 [INFO] [5ccf12ce] Spawned worker PID 31132.
+2026-02-27 01:45:46,253 [INFO] [ed058652] No worker running — spawning.
+2026-02-27 01:45:46,259 [INFO] [ed058652] Spawned worker PID 29772.
+2026-02-27 01:45:56,478 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:45:56,479 [WARNING] is_active column missing — falling back to MT5_CONNECTION_IDS env var. Run patch_connections_table.sql in Supabase to fix permanently.
+2026-02-27 01:45:56,676 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&id=in.%2845777f48-0805-4b72-a9b3-bdd2b80b61fb%2C5ccf12ce-9646-4d78-ba7a-590a27ec9c95%2Ced058652-a141-42fc-bc9b-ec58766bc341%29 "HTTP/2 200 OK"
+2026-02-27 01:45:56,878 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_worker_heartbeats?select=%2A "HTTP/2 404 Not Found"
+2026-02-27 01:45:56,880 [ERROR] Failed to fetch heartbeats: {'message': "Could not find the table 'public.mt5_worker_heartbeats' in the schema cache", 'code': 'PGRST205', 'hint': "Perhaps you meant the table 'public.mt5_workers'", 'details': None}
+2026-02-27 01:45:56,882 [INFO] [45777f48] No worker running — spawning.
+2026-02-27 01:45:56,889 [INFO] [45777f48] Spawned worker PID 26968.
+2026-02-27 01:45:56,890 [INFO] [5ccf12ce] No worker running — spawning.
+2026-02-27 01:45:56,895 [INFO] [5ccf12ce] Spawned worker PID 32316.
+2026-02-27 01:45:56,896 [INFO] [ed058652] No worker running — spawning.
+2026-02-27 01:45:56,903 [INFO] [ed058652] Spawned worker PID 32380.
+2026-02-27 01:46:07,131 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:46:07,133 [WARNING] is_active column missing — falling back to MT5_CONNECTION_IDS env var. Run patch_connections_table.sql in Supabase to fix permanently.
+2026-02-27 01:46:07,330 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&id=in.%2845777f48-0805-4b72-a9b3-bdd2b80b61fb%2C5ccf12ce-9646-4d78-ba7a-590a27ec9c95%2Ced058652-a141-42fc-bc9b-ec58766bc341%29 "HTTP/2 200 OK"
+2026-02-27 01:46:07,521 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_worker_heartbeats?select=%2A "HTTP/2 404 Not Found"
+2026-02-27 01:46:07,522 [ERROR] Failed to fetch heartbeats: {'message': "Could not find the table 'public.mt5_worker_heartbeats' in the schema cache", 'code': 'PGRST205', 'hint': "Perhaps you meant the table 'public.mt5_workers'", 'details': None}
+2026-02-27 01:46:07,522 [INFO] [45777f48] No worker running — spawning.
+2026-02-27 01:46:07,525 [INFO] [45777f48] Spawned worker PID 16256.
+2026-02-27 01:46:07,526 [INFO] [5ccf12ce] No worker running — spawning.
+2026-02-27 01:46:07,528 [INFO] [5ccf12ce] Spawned worker PID 5920.
+2026-02-27 01:46:07,528 [INFO] [ed058652] No worker running — spawning.
+2026-02-27 01:46:07,531 [INFO] [ed058652] Spawned worker PID 12676.
+2026-02-27 01:46:17,782 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:46:17,784 [WARNING] is_active column missing — falling back to MT5_CONNECTION_IDS env var. Run patch_connections_table.sql in Supabase to fix permanently.
+2026-02-27 01:46:17,973 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&id=in.%2845777f48-0805-4b72-a9b3-bdd2b80b61fb%2C5ccf12ce-9646-4d78-ba7a-590a27ec9c95%2Ced058652-a141-42fc-bc9b-ec58766bc341%29 "HTTP/2 200 OK"
+2026-02-27 01:46:18,170 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_worker_heartbeats?select=%2A "HTTP/2 404 Not Found"
+2026-02-27 01:46:18,171 [ERROR] Failed to fetch heartbeats: {'message': "Could not find the table 'public.mt5_worker_heartbeats' in the schema cache", 'code': 'PGRST205', 'hint': "Perhaps you meant the table 'public.mt5_workers'", 'details': None}
+2026-02-27 01:46:18,171 [INFO] [45777f48] No worker running — spawning.
+2026-02-27 01:46:18,174 [INFO] [45777f48] Spawned worker PID 26872.
+2026-02-27 01:46:18,174 [INFO] [5ccf12ce] No worker running — spawning.
+2026-02-27 01:46:18,177 [INFO] [5ccf12ce] Spawned worker PID 26056.
+2026-02-27 01:46:18,177 [INFO] [ed058652] No worker running — spawning.
+2026-02-27 01:46:18,179 [INFO] [ed058652] Spawned worker PID 27232.
+2026-02-27 01:46:28,408 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&is_active=eq.True "HTTP/2 400 Bad Request"
+2026-02-27 01:46:28,417 [WARNING] is_active column missing — falling back to MT5_CONNECTION_IDS env var. Run patch_connections_table.sql in Supabase to fix permanently.
+2026-02-27 01:46:28,616 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_user_connections?select=%2A&id=in.%2845777f48-0805-4b72-a9b3-bdd2b80b61fb%2C5ccf12ce-9646-4d78-ba7a-590a27ec9c95%2Ced058652-a141-42fc-bc9b-ec58766bc341%29 "HTTP/2 200 OK"
+2026-02-27 01:46:28,806 [INFO] HTTP Request: GET https://pathizyxatirjcrjhrie.supabase.co/rest/v1/mt5_worker_heartbeats?select=%2A "HTTP/2 404 Not Found"
+2026-02-27 01:46:28,807 [ERROR] Failed to fetch heartbeats: {'message': "Could not find the table 'public.mt5_worker_heartbeats' in the schema cache", 'code': 'PGRST205', 'hint': "Perhaps you meant the table 'public.mt5_workers'", 'details': None}
+2026-02-27 01:46:28,808 [INFO] [45777f48] No worker running — spawning.
+2026-02-27 01:46:28,810 [INFO] [45777f48] Spawned worker PID 9748.
+2026-02-27 01:46:28,812 [INFO] [5ccf12ce] No worker running — spawning.
+2026-02-27 01:46:28,815 [INFO] [5ccf12ce] Spawned worker PID 10056.
+2026-02-27 01:46:28,816 [INFO] [ed058652] No worker running — spawning.
+2026-02-27 01:46:28,819 [INFO] [ed058652] Spawned worker PID 13216.

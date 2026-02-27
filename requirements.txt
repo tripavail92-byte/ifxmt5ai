@@ -1,0 +1,17 @@
+# IFX MT5 Runtime — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Supabase
+supabase>=2.0.0
+
+# Cryptography (AES-256-GCM)
+cryptography>=42.0.0
+
+# Process management (supervisor watchdog)
+psutil>=5.9.0
+
+# Phase 2: Windows Credential Manager (uncomment when moving to Phase 3 security)
+# keyring>=25.0.0
+
+# MT5 (install separately from MetaTrader 5 official package)
+# MetaTrader5>=5.0.0
