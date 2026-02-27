@@ -43,3 +43,29 @@ export async function addConnection(formData: FormData) {
 
   revalidatePath("/connections");
 }
+
+export async function deleteConnection(formData: FormData) {
+  const supabase = await createClient();
+  
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) {
+    throw new Error("Unauthorized");
+  }
+
+  const id = formData.get("id") as string;
+  if (!id) throw new Error("Connection ID required");
+
+  // Securely delete only if the user owns it
+  const { error } = await supabase
+    .from("mt5_user_connections")
+    .delete()
+    .eq("id", id)
+    .eq("user_id", user.id);
+
+  if (error) {
+    console.error("Failed to delete connection:", error);
+    throw new Error("Failed to delete connection. Check logs.");
+  }
+
+  revalidatePath("/connections");
+}
