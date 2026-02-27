@@ -9,7 +9,7 @@ Usage:
   python main.py poller              # start poller
 
 This script adds the correct module paths before importing.
-Always run from C:\mt5system with the .venv active.
+Always run from C:\\mt5system with the .venv active.
 """
 
 import sys
