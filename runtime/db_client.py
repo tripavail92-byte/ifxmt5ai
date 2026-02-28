@@ -175,7 +175,17 @@ def claim_trade_job(
     data = resp.data
     if not data:
         return None
-    return data if isinstance(data, dict) else data[0]
+
+    job = data if isinstance(data, dict) else data[0]
+    if not isinstance(job, dict):
+        return None
+
+    # Some RPC implementations can return a null-record shape instead of no row.
+    # Treat that as "no job" so workers do not busy-loop on phantom claims.
+    if not job.get("id"):
+        return None
+
+    return job
 
 
 def mark_trade_job_executing(job_id: str) -> Optional[dict]:

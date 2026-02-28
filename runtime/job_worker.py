@@ -551,6 +551,7 @@ def run_worker(connection_id: str):
         job_id = job.get("id")
         if not job_id:
             logger.warning("Claimed job has no id — skipping phantom row.")
+            time.sleep(2)
             backoff.reset()
             continue
 
