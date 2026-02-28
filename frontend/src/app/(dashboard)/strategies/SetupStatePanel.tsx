@@ -83,9 +83,14 @@ export function SetupStatePanel({ connectionId }: { connectionId: string }) {
   const [setups, setSetups]   = useState<TradingSetup[]>([]);
   const [loading, setLoading] = useState(true);
   const [now, setNow]         = useState(Date.now());
+  // Prevent SSR — avoids React hydration mismatch (#418)
+  // createBrowserClient behaves differently server-side
+  const [mounted, setMounted] = useState(false);
 
   // Stable supabase client ref — avoids recreating on every render
   const supabase = useRef(createClient()).current;
+
+  useEffect(() => { setMounted(true); }, []);
 
   // ── Initial load ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -147,6 +152,9 @@ export function SetupStatePanel({ connectionId }: { connectionId: string }) {
   }, []);
 
   // ── Render ────────────────────────────────────────────────────────────────
+
+  // Don't render anything server-side or before hydration — avoids #418
+  if (!mounted) return null;
 
   if (loading) {
     return (
