@@ -419,6 +419,30 @@ def run_worker(connection_id: str):
     )
     db.update_connection_status(connection_id, "online")
 
+    # Sync live symbol list from broker to Supabase (for frontend dropdown)
+    try:
+        all_symbols = mt5.symbols_get()
+        if all_symbols:
+            rows = [
+                {
+                    "connection_id": connection_id,
+                    "symbol": s.name,
+                    "description": s.description,
+                    "currency_base": s.currency_base,
+                    "category": s.path.split("\\")[0] if s.path else "",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+                for s in all_symbols
+            ]
+            # Batch upsert in chunks of 500
+            for i in range(0, len(rows), 500):
+                db.get_client().table("mt5_symbols").upsert(
+                    rows[i:i+500], on_conflict="connection_id,symbol"
+                ).execute()
+            logger.info("Synced %d symbols to Supabase.", len(rows))
+    except Exception as exc:
+        logger.warning("Symbol sync failed (non-fatal): %s", exc)
+
     # ------------------------------------------------------------------ #
     # Step 4: Main execution loop
     # ------------------------------------------------------------------ #

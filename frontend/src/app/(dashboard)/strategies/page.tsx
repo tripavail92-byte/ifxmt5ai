@@ -6,7 +6,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { createClient } from "@/utils/supabase/server";
-import { saveStrategy, placeManualTrade } from "./actions";
+import { saveStrategy } from "./actions";
+import { ManualTradeCard } from "./ManualTradeCard";
 
 export default async function StrategiesPage() {
   const supabase = await createClient();
@@ -119,80 +120,8 @@ export default async function StrategiesPage() {
         </Card>
       </div>
 
-      {/* ── MANUAL TRADE PANEL ─────────────────────────────── */}
-      <Card className="border-2 border-orange-500/40 shadow-md bg-orange-500/5">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            🧪 Manual Trade — Live Test
-          </CardTitle>
-          <CardDescription>
-            Inject a trade job directly. The live worker will claim and execute it within seconds.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form action={placeManualTrade} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6 items-end">
-            {/* Connection */}
-            <div className="space-y-2 lg:col-span-2">
-              <Label>Account</Label>
-              <Select name="connection_id" required>
-                <SelectTrigger><SelectValue placeholder="Select account" /></SelectTrigger>
-                <SelectContent>
-                  {connections?.map((c) => (
-                    <SelectItem key={c.id} value={c.id}>
-                      {c.broker_server} — {c.account_login}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Symbol */}
-            <div className="space-y-2">
-              <Label>Symbol</Label>
-              <Input name="symbol" placeholder="EURUSD" required />
-            </div>
-
-            {/* Side */}
-            <div className="space-y-2">
-              <Label>Side</Label>
-              <Select name="side" required>
-                <SelectTrigger><SelectValue placeholder="Buy / Sell" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="buy">🟢 Buy</SelectItem>
-                  <SelectItem value="sell">🔴 Sell</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Volume */}
-            <div className="space-y-2">
-              <Label>Volume (lots)</Label>
-              <Input name="volume" type="number" step="0.01" min="0.01" placeholder="0.01" required />
-            </div>
-
-            {/* SL / TP */}
-            <div className="space-y-2">
-              <Label>SL (optional)</Label>
-              <Input name="sl" type="number" step="0.00001" placeholder="0.0" />
-            </div>
-
-            <div className="space-y-2">
-              <Label>TP (optional)</Label>
-              <Input name="tp" type="number" step="0.00001" placeholder="0.0" />
-            </div>
-
-            {/* Submit */}
-            <div className="lg:col-span-6">
-              <Button type="submit" variant="default" className="w-full bg-orange-600 hover:bg-orange-700 text-white font-bold">
-                🚀 Place Trade Now
-              </Button>
-            </div>
-          </form>
-          <p className="mt-3 text-xs text-muted-foreground">
-            After placing, check the <a href="/trades" className="underline">Trades page</a> and <a href="/logs" className="underline">System Logs</a> to see execution status in real-time.
-          </p>
-        </CardContent>
-      </Card>
+      {/* MANUAL TRADE — client component with live broker symbol dropdown */}
+      <ManualTradeCard connections={connections ?? []} />
     </div>
   );
 }
