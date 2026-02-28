@@ -2,10 +2,10 @@
 //|  IFX_PriceBridge_v3.mq5                                         |
 //|  Industrial-grade multi-symbol tick bridge for IFX terminal      |
 //|  Architecture: OnTick() + EventSetMillisecondTimer(50)           |
-//|  Target: localhost:8082 relay (NOT directly to Railway)          |
+//|  Target: 127.0.0.1:8082 relay (NOT directly to Railway)           |
 //|                                                                  |
 //|  SETUP: In MT5 → Tools → Options → Expert Advisors              |
-//|    Add  http://localhost:8082  to "Allow WebRequest for listed   |
+//|    Add  http://127.0.0.1:8082  to "Allow WebRequest for listed   |
 //|    URL" list — required for the relay connection to work.        |
 //+------------------------------------------------------------------+
 #property strict
@@ -15,7 +15,7 @@
 //==========================================================================
 // SECTION 1 — INPUTS
 //==========================================================================
-input string  BackendRelayUrl      = "http://localhost:8082";   // Relay URL (NOT Railway direct)
+input string  BackendRelayUrl      = "http://127.0.0.1:8082";   // Relay URL (NOT Railway direct)
 input string  ConnectionId         = "<connection_id>";          // Your MT5 connection UUID
 input string  SigningSecret        = "<signing_secret>";         // HMAC-SHA256 key
 input int     TickBatchMs          = 150;                        // Tick flush interval (ms)
@@ -51,7 +51,7 @@ int     g_batch_count = 0;
 int OnInit()
 {
    Print("=== IFX Price Bridge v3.0 ===");
-   Print("Relay: ", BackendRelayUrl);
+   Print("Relay: ", BackendRelayUrl, " (must be whitelisted in MT5 Options → Expert Advisors)");
    Print("ConnectionId: ", ConnectionId);
 
    // Fetch symbol list from relay (GET /config)
