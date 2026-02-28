@@ -329,31 +329,61 @@ def execute_order(job: dict, logger: logging.Logger) -> dict:
         raise RuntimeError(f"Cannot get tick for {symbol}: {mt5.last_error()}")
 
     price = tick.ask if side == "buy" else tick.bid
-    filling = mt5.symbol_info(symbol).filling_mode
+    symbol_info = mt5.symbol_info(symbol)
+    if symbol_info is None:
+        raise RuntimeError(f"Cannot get symbol info for {symbol}: {mt5.last_error()}")
 
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": symbol,
-        "volume": volume,
-        "type": order_type,
-        "price": price,
-        "sl": sl,
-        "tp": tp,
-        "comment": build_job_comment_marker(job_id),
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": filling,
-    }
+    preferred_filling = symbol_info.filling_mode
+    filling_modes = [
+        preferred_filling,
+        mt5.ORDER_FILLING_IOC,
+        mt5.ORDER_FILLING_FOK,
+        mt5.ORDER_FILLING_RETURN,
+    ]
+    # preserve order while removing duplicates
+    deduped_filling_modes: list[int] = []
+    for mode in filling_modes:
+        if mode not in deduped_filling_modes:
+            deduped_filling_modes.append(mode)
 
-    result = mt5.order_send(request)
+    last_result = None
+    for mode in deduped_filling_modes:
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": volume,
+            "type": order_type,
+            "price": price,
+            "sl": sl,
+            "tp": tp,
+            "comment": build_job_comment_marker(job_id),
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mode,
+        }
 
-    if result is None:
-        raise RuntimeError(f"order_send returned None: {mt5.last_error()}")
+        result = mt5.order_send(request)
+        if result is None:
+            raise RuntimeError(f"order_send returned None: {mt5.last_error()}")
 
+        last_result = result
+        # 10030 => unsupported filling mode; try next mode.
+        if result.retcode == 10030:
+            logger.warning("order_send unsupported filling mode=%s for %s; trying next mode", mode, symbol)
+            continue
+
+        return {
+            "order_id": result.order,
+            "retcode": result.retcode,
+            "message": result.comment,
+            "request_id": result.request_id,
+        }
+
+    # All tested modes rejected with unsupported filling mode.
     return {
-        "order_id": result.order,
-        "retcode": result.retcode,
-        "message": result.comment,
-        "request_id": result.request_id,
+        "order_id": last_result.order if last_result else 0,
+        "retcode": last_result.retcode if last_result else 10030,
+        "message": last_result.comment if last_result else "Unsupported filling mode",
+        "request_id": last_result.request_id if last_result else 0,
     }
 
 
