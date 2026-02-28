@@ -260,6 +260,16 @@ def ensure_symbol_selected(symbol: str, logger: logging.Logger) -> str | None:
     return None
 
 
+def build_job_comment_marker(job_id: str) -> str:
+    """
+    Build an MT5-safe comment marker for a job.
+    MT5 comment length is broker-dependent and often capped near 31 chars,
+    so we keep this short and deterministic.
+    """
+    compact = "".join(ch for ch in (job_id or "") if ch.isalnum())
+    return f"IFX{compact[:20]}"
+
+
 # ---------------------------------------------------------------------------
 # Idempotency: check if trade already placed
 # ---------------------------------------------------------------------------
@@ -269,7 +279,7 @@ def find_existing_order_by_job_id(job_id: str) -> dict | None:
     Search open positions and pending orders for a comment containing job_id.
     Returns the first match or None.
     """
-    comment_marker = f"IFX:{job_id}"
+    comment_marker = build_job_comment_marker(job_id)
 
     positions = mt5.positions_get() or []
     for p in positions:
@@ -329,7 +339,7 @@ def execute_order(job: dict, logger: logging.Logger) -> dict:
         "price": price,
         "sl": sl,
         "tp": tp,
-        "comment": f"IFX:{job_id}",
+        "comment": build_job_comment_marker(job_id),
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": filling,
     }
