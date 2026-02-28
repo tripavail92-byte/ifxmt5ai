@@ -103,6 +103,12 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   const [showEntryZones, setShowEntryZones] = useState<boolean>(true);
   const [showTPZones, setShowTPZones] = useState<boolean>(true);
 
+  // Setup tracking state
+  const [setupSaving, setSetupSaving] = useState(false);
+  const [setupResult, setSetupResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  // symbol → setup_id for upsert (persisted in memory per session)
+  const [slotSetupIds, setSlotSetupIds] = useState<Record<string, string>>({});
+
   // Live feed
   const { forming, lastClose, prices, isConnected } = usePriceFeed();
 
@@ -190,6 +196,33 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     });
   }
 
+  async function handleTrackSetup() {
+    if (!validEp || !autoConn) return;
+    setSetupSaving(true);
+    setSetupResult(null);
+    try {
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error("Not authenticated");
+      const { data: newId, error } = await supabase.rpc("upsert_trading_setup", {
+        p_user_id:       user.id,
+        p_connection_id: autoConn.id,
+        p_symbol:        formSymbol,
+        p_side:          side,
+        p_entry_price:   ep,
+        p_zone_percent:  zonePercent,
+        p_setup_id:      slotSetupIds[formSymbol] ?? null,
+      });
+      if (error) throw error;
+      setSlotSetupIds(prev => ({ ...prev, [formSymbol]: newId as string }));
+      setSetupResult({ ok: true, msg: `Setup tracked — state machine LIVE for ${formSymbol}` });
+    } catch (err: unknown) {
+      setSetupResult({ ok: false, msg: err instanceof Error ? err.message : "Save failed" });
+    } finally {
+      setSetupSaving(false);
+    }
+  }
+
   // Reset zone % when symbol changes
   useEffect(() => {
     const sym = slots[activeSlot];
@@ -197,6 +230,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     setEntryPrice("");
     setSlValue(undefined);
     setTpValue(undefined);
+    setSetupResult(null);
   }, [slots[activeSlot]]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const chartSym  = hydrated ? slots[activeSlot] : DEFAULT_SYMBOLS[0];
@@ -360,12 +394,17 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
               <div className="bg-[#141414] rounded-lg p-2.5 space-y-1.5">
                 <div className="flex justify-between items-center">
                   <span className="text-[10px] text-gray-500">Suggested Entry Zone</span>
-                  <span className="text-[10px] font-mono font-semibold text-blue-400">
-                    {fmtZ(zone.low)} – {fmtZ(zone.high)}
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {slotSetupIds[formSymbol] && (
+                      <span className="text-[9px] px-1 py-0.5 rounded bg-orange-500/15 text-orange-400 border border-orange-500/20 font-semibold">TRACKED</span>
+                    )}
+                    <span className="text-[10px] font-mono font-semibold text-blue-400">
+                      {fmtZ(zone.low)} – {fmtZ(zone.high)}
+                    </span>
+                  </div>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-[10px] text-gray-500">{side === "buy" ? "Loss Edge (SL)" : "Loss Edge (SL)"}</span>
+                  <span className="text-[10px] text-gray-500">Loss Edge (SL)</span>
                   <span className="text-[10px] font-mono font-semibold text-red-400">
                     {side === "buy" ? fmtZ(zone.low) : fmtZ(zone.high)}
                   </span>
@@ -376,6 +415,36 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                     {side === "buy" ? fmtZ(zone.high) : fmtZ(zone.low)}
                   </span>
                 </div>
+              </div>
+            )}
+
+            {/* Track Setup button */}
+            {validEp && (
+              <button
+                type="button"
+                onClick={handleTrackSetup}
+                disabled={setupSaving || !autoConn}
+                className="w-full h-8 rounded text-[11px] font-bold transition-colors disabled:opacity-40
+                  bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30
+                  disabled:cursor-not-allowed"
+              >
+                {setupSaving
+                  ? "Saving…"
+                  : slotSetupIds[formSymbol]
+                    ? `↻ Update ${formSymbol} Setup`
+                    : `⊕ Track ${formSymbol} Zone`
+                }
+              </button>
+            )}
+
+            {/* Setup feedback */}
+            {setupResult && (
+              <div className={`px-2.5 py-1.5 rounded text-[11px] font-medium border
+                ${setupResult.ok
+                  ? "bg-blue-500/10 text-blue-400 border-blue-500/20"
+                  : "bg-red-500/10 text-red-400 border-red-500/20"
+                }`}>
+                {setupResult.msg}
               </div>
             )}
           </div>
