@@ -585,22 +585,22 @@ class RelayHandler(BaseHTTPRequestHandler):
                 sym_names.append(sym)
                 total_bars += len(bars)
 
-# Store all bars in the ring buffer — merge-insert (historical may predate live bars)
-            with _state_lock:
-                buf = candle_buffer[conn_id][sym]
-                existing_ts = {b["t"] for b in buf}
-                # Insert bars that are not already present (avoid dupes)
-                for b in bars:
-                    bar = {"t": b["t"], "o": b["o"], "h": b["h"],
-                           "l": b["l"], "c": b["c"], "v": b.get("v", 0)}
-                    if bar["t"] not in existing_ts:
-                        existing_ts.add(bar["t"])
-                        buf.append(bar)
-                # Re-sort the deque by time (historical arrives mixed with live)
-                sorted_bars = sorted(buf, key=lambda x: x["t"])
-                buf.clear()
-                for b in sorted_bars:
-                    buf.append(b)
+                # Store bars in the ring buffer — merge-insert inside the loop (one sym at a time)
+                with _state_lock:
+                    buf = candle_buffer[conn_id][sym]
+                    existing_ts = {b["t"] for b in buf}
+                    # Insert bars that are not already present (avoid dupes)
+                    for b in bars:
+                        bar = {"t": b["t"], "o": b["o"], "h": b["h"],
+                               "l": b["l"], "c": b["c"], "v": b.get("v", 0)}
+                        if bar["t"] not in existing_ts:
+                            existing_ts.add(bar["t"])
+                            buf.append(bar)
+                    # Re-sort the deque by time (historical arrives mixed with live)
+                    sorted_bars = sorted(buf, key=lambda x: x["t"])
+                    buf.clear()
+                    for b in sorted_bars:
+                        buf.append(b)
 
             # Register symbols for this connection
             if sym_names:
