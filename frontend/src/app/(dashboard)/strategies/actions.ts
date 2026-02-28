@@ -72,8 +72,8 @@ export async function placeManualTrade(formData: FormData) {
     volume,
     sl: isNaN(sl_raw) ? null : sl_raw,
     tp: isNaN(tp_raw) ? null : tp_raw,
+    idempotency_key: `${connection_id}:${Date.now()}:${crypto.randomUUID()}`,
     status: "queued",
-    source: "manual",
     created_at: new Date().toISOString(),
   });
 
