@@ -273,23 +273,13 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
       <div className="border-t border-[#1e1e1e] bg-[#0d0d0d] px-4 py-4">
         <form onSubmit={handleSubmit} className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4 lg:grid-cols-6 items-end">
 
-          {/* Symbol */}
+          {/* Symbol — locked to active chart slot */}
+          <input type="hidden" name="symbol" value={formSymbol} />
           <div className="space-y-1 lg:col-span-1">
             <Label className="text-[11px] text-gray-500 uppercase tracking-wide">Symbol</Label>
-            <Select name="symbol" required value={formSymbol} onValueChange={(v) => { setFormSymbol(v); }}>
-              <SelectTrigger className="h-8 text-xs bg-[#0a0a0a] border-[#2a2a2a] text-white">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent className="max-h-64 bg-[#161616] border-[#2a2a2a]">
-                {/* Pinned slots first */}
-                {slots.map((s) => (
-                  <SelectItem key={s} value={s} className="text-xs font-mono text-orange-400">{s}</SelectItem>
-                ))}
-                {symbols.filter(s => !slots.includes(s.symbol)).slice(0, 50).map((s) => (
-                  <SelectItem key={s.symbol} value={s.symbol} className="text-xs font-mono">{s.symbol}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <div className="h-8 flex items-center px-2 rounded border border-[#2a2a2a] bg-[#111] text-xs font-mono font-bold text-orange-400 select-none">
+              {formSymbol || "—"}
+            </div>
           </div>
 
           {/* Side */}
