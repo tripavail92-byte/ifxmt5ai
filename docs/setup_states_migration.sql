@@ -23,7 +23,7 @@ create table if not exists public.trading_setups (
 
   -- Ownership
   user_id          uuid not null references auth.users(id) on delete cascade,
-  connection_id    uuid not null references public.mt5_user_connections(id) on delete cascade,
+  connection_id    uuid not null,  -- FK added below if mt5_user_connections exists
 
   -- Instrument + direction
   symbol           text not null,
@@ -76,6 +76,22 @@ create index if not exists idx_trading_setups_active_symbol
 
 create index if not exists idx_trading_setups_user
   on public.trading_setups(user_id);
+
+-- Add FK to mt5_user_connections only if that table exists
+do $$ begin
+  if exists (select 1 from information_schema.tables
+             where table_schema = 'public'
+               and table_name   = 'mt5_user_connections')
+  and not exists (select 1 from information_schema.table_constraints
+                  where constraint_name = 'trading_setups_connection_id_fkey'
+                    and table_name      = 'trading_setups') then
+    alter table public.trading_setups
+      add constraint trading_setups_connection_id_fkey
+      foreign key (connection_id)
+      references public.mt5_user_connections(id)
+      on delete cascade;
+  end if;
+end $$;
 
 -- Auto-updated_at
 drop trigger if exists trg_trading_setups_updated_at on public.trading_setups;
