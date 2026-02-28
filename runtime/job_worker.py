@@ -637,6 +637,30 @@ def run_worker(connection_id: str):
                 logger.info("Job %s → SUCCESS (order %s)", job_id, result["order_id"])
             else:
                 err_msg = f"retcode={result['retcode']} msg={result['message']}"
+                if result["retcode"] == 10027:
+                    logger.error("Job %s → non-retryable failure: %s", job_id, err_msg)
+                    db.complete_trade_job(
+                        job_id,
+                        "failed",
+                        result=result,
+                        error=err_msg,
+                        error_code="autotrading_disabled",
+                    )
+                    db.update_connection_status(
+                        connection_id,
+                        "degraded",
+                        "MT5 AutoTrading disabled by client terminal",
+                    )
+                    db.log_event(
+                        "error",
+                        "worker",
+                        "MT5 AutoTrading disabled by client terminal",
+                        connection_id,
+                        {"job_id": job_id, **result},
+                    )
+                    backoff.reset()
+                    continue
+
                 logger.warning("Job %s → retryable failure: %s", job_id, err_msg)
 
                 current_retries = job.get("retry_count", 0)
