@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useTransition } from "react";
+import dynamic from "next/dynamic";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -8,6 +9,17 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { placeManualTrade } from "./actions";
 import { createClient } from "@/utils/supabase/client";
+
+// Loaded only on the client — lightweight-charts requires window/DOM
+const CandlestickChart = dynamic(
+  () => import("@/components/chart/CandlestickChart").then((m) => ({ default: m.CandlestickChart })),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="w-full h-[340px] rounded-lg bg-[#0c0c0c] border border-[#2a2a2a] animate-pulse" />
+    ),
+  }
+);
 
 interface Connection {
   id: string;
@@ -28,6 +40,11 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   const [loadingSymbols, setLoadingSymbols] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [isPending, startTransition] = useTransition();
+
+  // Chart state — controlled so price lines update live as user types
+  const [chartSymbol, setChartSymbol] = useState("EURUSD");
+  const [slValue, setSlValue] = useState<number | undefined>();
+  const [tpValue, setTpValue] = useState<number | undefined>();
 
   // Load symbols when connection changes
   useEffect(() => {
@@ -66,6 +83,8 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
         (e.target as HTMLFormElement).reset();
         setSelectedConn("");
         setSymbols([]);
+        setSlValue(undefined);
+        setTpValue(undefined);
       } catch (err: unknown) {
         setResult({ ok: false, msg: `❌ ${err instanceof Error ? err.message : "Unknown error"}` });
       }
@@ -81,6 +100,13 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
         </CardDescription>
       </CardHeader>
       <CardContent>
+        {/* Live chart — SL/TP lines update as you type */}
+        <CandlestickChart
+          symbol={chartSymbol}
+          sl={slValue}
+          tp={tpValue}
+          className="mb-5"
+        />
         <form onSubmit={handleSubmit} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6 items-end">
 
           {/* Account */}
@@ -116,7 +142,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                   onChange={(e) => setSymbolSearch(e.target.value)}
                   className="mb-1"
                 />
-                <Select name="symbol" required>
+                <Select name="symbol" required onValueChange={(v) => setChartSymbol(v)}>
                   <SelectTrigger><SelectValue placeholder="Select symbol" /></SelectTrigger>
                   <SelectContent className="max-h-64">
                     {filtered.map((s) => (
@@ -154,14 +180,28 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
             <Input name="volume" type="number" step="0.01" min="0.01" placeholder="0.01" required />
           </div>
 
-          {/* SL / TP */}
+          {/* SL / TP — controlled so chart price lines update live */}
           <div className="space-y-2">
             <Label>SL (optional)</Label>
-            <Input name="sl" type="number" step="0.00001" placeholder="0.00000" />
+            <Input
+              name="sl"
+              type="number"
+              step="0.00001"
+              placeholder="0.00000"
+              value={slValue ?? ""}
+              onChange={(e) => setSlValue(e.target.value ? parseFloat(e.target.value) : undefined)}
+            />
           </div>
           <div className="space-y-2">
             <Label>TP (optional)</Label>
-            <Input name="tp" type="number" step="0.00001" placeholder="0.00000" />
+            <Input
+              name="tp"
+              type="number"
+              step="0.00001"
+              placeholder="0.00000"
+              value={tpValue ?? ""}
+              onChange={(e) => setTpValue(e.target.value ? parseFloat(e.target.value) : undefined)}
+            />
           </div>
 
           {/* Submit */}
