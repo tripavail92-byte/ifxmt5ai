@@ -289,7 +289,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 "candle_closes":  stats["candle_closes"],
                 "ws_sent":        stats["ws_sent"],
                 "ws_dropped":     stats["ws_dropped"],
-                "railway_ws":     RAILWAY_WS_URL or "not configured",
+                "railway_ingest": RAILWAY_INGEST_URL or "not configured",
                 "candle_buf_syms": sum(
                     len(syms) for syms in candle_buffer.values()
                 ),
