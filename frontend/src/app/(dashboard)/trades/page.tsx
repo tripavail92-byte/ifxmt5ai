@@ -2,8 +2,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { createClient } from "@/utils/supabase/server";
+import { unstable_noStore as noStore } from "next/cache";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export default async function TradesPage() {
+  noStore();
   const supabase = await createClient();
   
   const { data: trades, error } = await supabase
