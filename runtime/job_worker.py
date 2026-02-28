@@ -333,23 +333,25 @@ def run_worker(connection_id: str):
     last_heartbeat = 0.0
 
     # ------------------------------------------------------------------ #
-    # Step 1: Provision terminal
-    # ------------------------------------------------------------------ #
-    try:
-        terminal_path = verify_or_provision(connection_id)
-    except Exception as exc:
-        logger.error("Provisioning failed: %s", exc)
-        db.log_event("error", "worker", f"Provisioning failed: {exc}", connection_id)
-        db.update_connection_status(connection_id, "error", str(exc))
-        sys.exit(1)
-
-    # ------------------------------------------------------------------ #
-    # Step 2: Get connection credentials
+    # Step 1: Get connection credentials
     # ------------------------------------------------------------------ #
     connections = db.get_active_connections()
     conn = next((c for c in connections if c["id"] == connection_id), None)
     if conn is None:
         logger.error("Connection %s not found or not active. Exiting.", connection_id)
+        sys.exit(1)
+
+    broker_server = conn.get("broker_server", "")
+
+    # ------------------------------------------------------------------ #
+    # Step 2: Provision terminal (uses right MT5 binary for this broker)
+    # ------------------------------------------------------------------ #
+    try:
+        terminal_path = verify_or_provision(connection_id, broker_server=broker_server)
+    except Exception as exc:
+        logger.error("Provisioning failed: %s", exc)
+        db.log_event("error", "worker", f"Provisioning failed: {exc}", connection_id)
+        db.update_connection_status(connection_id, "error", str(exc))
         sys.exit(1)
 
     master_key = os.environ["MT5_CREDENTIALS_MASTER_KEY_B64"]

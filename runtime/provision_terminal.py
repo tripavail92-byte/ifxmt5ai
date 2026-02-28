@@ -13,12 +13,34 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-TEMPLATE_DIR = os.environ.get("MT5_TERMINAL_TEMPLATE_DIR", r"C:\mt5-runtime\mt5-terminal-template")
-BASE_DIR = os.environ.get("MT5_TERMINAL_BASE_DIR", r"C:\mt5-runtime\mt5-runtime-vps\terminals")
+# Where all isolated terminal folders are stored
+TERMINALS_DIR = os.environ.get(
+    "MT5_TERMINALS_DIR",
+    r"C:\mt5system\terminals"
+)
+
+# Broker prefix → installed MT5 base directory
+# The Python worker uses the binary from here to provision new portable folders.
+BROKER_BASE_MAP: dict[str, str] = {
+    "exness": r"C:\Program Files\MetaTrader 5 EXNESS",
+    "metaquotes": r"C:\Program Files\MetaTrader 5",
+}
+
+# Default fallback if broker not matched
+DEFAULT_BASE = r"C:\Program Files\MetaTrader 5"
+
+
+def _resolve_base(broker_server: str) -> str:
+    """Return the MT5 base installation path for the given broker server."""
+    key = broker_server.lower()
+    for prefix, path in BROKER_BASE_MAP.items():
+        if prefix in key:
+            return path
+    return DEFAULT_BASE
 
 
 def get_terminal_path(connection_id: str) -> Path:
-    return Path(BASE_DIR) / connection_id
+    return Path(TERMINALS_DIR) / connection_id
 
 
 def is_provisioned(connection_id: str) -> bool:
@@ -27,27 +49,16 @@ def is_provisioned(connection_id: str) -> bool:
     return (path / "terminal64.exe").exists()
 
 
-def provision(connection_id: str, force: bool = False) -> Path:
+def provision(connection_id: str, broker_server: str = "", force: bool = False) -> Path:
     """
-    Copy template into terminals/<connection_id>/ if not already present.
-    Set the portable env marker so MT5 uses this folder exclusively.
-
-    Args:
-        connection_id: The UUID of the MT5 connection.
-        force:         If True, re-copy even if already provisioned (preserves logs/).
-
-    Returns:
-        Path to the provisioned terminal folder.
-
-    Raises:
-        FileNotFoundError: If template directory is missing.
-        RuntimeError:      If terminal64.exe not found after copy.
+    Copy MT5 binary into terminals/<connection_id>/ if not already present.
+    Selects broker-specific MT5 installation based on broker_server name.
     """
-    template = Path(TEMPLATE_DIR)
-    if not template.exists():
+    base = Path(_resolve_base(broker_server))
+    if not base.exists():
         raise FileNotFoundError(
-            f"MT5 template directory not found: {TEMPLATE_DIR}\n"
-            "Set MT5_TERMINAL_TEMPLATE_DIR env var to a valid portable MT5 folder."
+            f"MT5 base directory not found: {base}\n"
+            f"Install MetaTrader 5 for broker '{broker_server}' and update BROKER_BASE_MAP."
         )
 
     dest = get_terminal_path(connection_id)
@@ -58,52 +69,46 @@ def provision(connection_id: str, force: bool = False) -> Path:
             return dest
         else:
             logger.warning(
-                "[provisioner] Terminal folder exists but is corrupted (no terminal64.exe). Re-provisioning."
+                "[provisioner] Terminal folder exists but corrupted — re-provisioning."
             )
 
     # Preserve logs if they exist
     logs_backup = None
     if (dest / "logs").exists():
         logs_backup = dest / "logs"
-        tmp_logs = Path(BASE_DIR) / f"{connection_id}_logs_backup"
+        tmp_logs = Path(TERMINALS_DIR) / f"{connection_id}_logs_backup"
         shutil.copytree(logs_backup, tmp_logs, dirs_exist_ok=True)
         logger.info("[provisioner] Backed up logs to %s", tmp_logs)
 
-    logger.info("[provisioner] Copying template → %s", dest)
-    shutil.copytree(str(template), str(dest), dirs_exist_ok=True)
+    logger.info("[provisioner] Copying %s → %s", base, dest)
+    shutil.copytree(str(base), str(dest), dirs_exist_ok=True)
 
     # Restore logs
-    if logs_backup and (Path(BASE_DIR) / f"{connection_id}_logs_backup").exists():
-        shutil.copytree(
-            str(Path(BASE_DIR) / f"{connection_id}_logs_backup"),
-            str(dest / "logs"),
-            dirs_exist_ok=True,
-        )
-        shutil.rmtree(str(Path(BASE_DIR) / f"{connection_id}_logs_backup"), ignore_errors=True)
+    tmp_logs = Path(TERMINALS_DIR) / f"{connection_id}_logs_backup"
+    if logs_backup and tmp_logs.exists():
+        shutil.copytree(str(tmp_logs), str(dest / "logs"), dirs_exist_ok=True)
+        shutil.rmtree(str(tmp_logs), ignore_errors=True)
         logger.info("[provisioner] Restored logs.")
 
-    # Portable mode marker — MT5 looks for this file to isolate data
-    portable_marker = dest / "portable"
-    portable_marker.touch()
-    logger.info("[provisioner] Portable mode marker created: %s", portable_marker)
+    # Portable mode marker
+    (dest / "portable").touch()
+    logger.info("[provisioner] Portable mode marker created: %s", dest / "portable")
 
-    # Sanity check
     if not (dest / "terminal64.exe").exists():
         raise RuntimeError(
-            f"terminal64.exe not found in provisioned folder: {dest}\n"
-            "Ensure the template contains a full portable MT5 installation."
+            f"terminal64.exe not found in provisioned folder: {dest}"
         )
 
     logger.info("[provisioner] Terminal provisioned successfully: %s", dest)
     return dest
 
 
-def verify_or_provision(connection_id: str) -> Path:
+def verify_or_provision(connection_id: str, broker_server: str = "") -> Path:
     """
     Called by worker on startup.
-    Provisions if missing, returns path if healthy.
+    Provisions if missing using the correct broker binary, returns path if healthy.
     """
     if is_provisioned(connection_id):
         return get_terminal_path(connection_id)
     logger.warning("[provisioner] Terminal missing for %s — provisioning now.", connection_id)
-    return provision(connection_id)
+    return provision(connection_id, broker_server=broker_server)
