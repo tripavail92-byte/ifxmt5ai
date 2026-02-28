@@ -9,6 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { placeManualTrade } from "./actions";
 import { createClient } from "@/utils/supabase/client";
+import { usePriceFeed } from "@/hooks/usePriceFeed";
 
 // Loaded only on the client — lightweight-charts requires window/DOM
 const CandlestickChart = dynamic(
@@ -38,6 +39,9 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   const [symbols, setSymbols] = useState<Symbol[]>([]);
   const [symbolSearch, setSymbolSearch] = useState("");
   const [loadingSymbols, setLoadingSymbols] = useState(false);
+
+  // Live price feed
+  const { forming, lastClose, prices } = usePriceFeed();
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [isPending, startTransition] = useTransition();
 
@@ -103,8 +107,11 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
         {/* Live chart — SL/TP lines update as you type */}
         <CandlestickChart
           symbol={chartSymbol}
+          liveSymbol={chartSymbol}
           sl={slValue}
           tp={tpValue}
+          forming={forming}
+          lastClose={lastClose}
           className="mb-5"
         />
         <form onSubmit={handleSubmit} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6 items-end">
@@ -131,7 +138,14 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
 
           {/* Symbol search + dropdown */}
           <div className="space-y-2 lg:col-span-2">
-            <Label>Symbol</Label>
+            <Label>
+              Symbol
+              {chartSymbol && prices[chartSymbol] && (
+                <span className="ml-2 font-mono text-xs text-emerald-400">
+                  {prices[chartSymbol].bid.toFixed(5)} / {prices[chartSymbol].ask.toFixed(5)}
+                </span>
+              )}
+            </Label>
             {loadingSymbols ? (
               <div className="h-9 flex items-center text-sm text-muted-foreground px-3 border rounded-md">Loading symbols…</div>
             ) : symbols.length > 0 ? (

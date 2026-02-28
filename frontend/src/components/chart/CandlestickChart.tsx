@@ -24,12 +24,22 @@ export interface OHLCBar {
   close: number;
 }
 
+// CandleBar from usePriceFeed (1m raw bar, epoch seconds)
+export interface RawCandleBar {
+  t: number; o: number; h: number; l: number; c: number; v: number;
+}
+
 export interface CandlestickChartProps {
   sl?: number;
   tp?: number;
   entryPrice?: number;
   symbol?: string;
   className?: string;
+  // Live feed props (Sprint 5)
+  liveSymbol?: string;            // e.g. "BTCUSDm" — enables live feed
+  connId?: string;                // optional connection filter
+  forming?: Record<string, RawCandleBar>;    // from usePriceFeed
+  lastClose?: { symbol: string; bar: RawCandleBar } | null;  // from usePriceFeed
 }
 
 // ─── Timeframes ───────────────────────────────────────────────────────────────
@@ -54,6 +64,19 @@ const TF_VOLATILITY: Record<TF, number> = {
   H4: 0.0035,
   D1: 0.0080,
 };
+
+// Map chart TF label → API tf param
+const TF_API: Record<TF, string> = {
+  M1: "1m", M5: "5m", M15: "15m", H1: "1h", H4: "4h", D1: "1d",
+};
+
+// Slot-snap a 1m bar to the active TF slot
+function snapToTf(bar: RawCandleBar, tfSec: number): OHLCBar {
+  return {
+    time:  (Math.floor(bar.t / tfSec) * tfSec) as Time,
+    open:  bar.o, high: bar.h, low: bar.l, close: bar.c,
+  };
+}
 
 // ─── Seed data generator ──────────────────────────────────────────────────────
 
@@ -120,6 +143,10 @@ export function CandlestickChart({
   entryPrice,
   symbol = "EURUSD",
   className = "",
+  liveSymbol,
+  connId: _connId,
+  forming,
+  lastClose,
 }: CandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef     = useRef<IChartApi | null>(null);
@@ -129,6 +156,7 @@ export function CandlestickChart({
   const entryLineRef = useRef<IPriceLine | null>(null);
 
   const [activeTf, setActiveTf] = useState<TF>("H1");
+  const [hasLiveData, setHasLiveData] = useState(false);
 
   // ── Mount / unmount chart ──────────────────────────────────────────────────
   useEffect(() => {
@@ -208,9 +236,67 @@ export function CandlestickChart({
     const series = seriesRef.current;
     const chart = chartRef.current;
     if (!series || !chart) return;
-    series.setData(SEED_DATA[tf] as CandlestickData[]);
-    chart.timeScale().fitContent();
-  }, []);
+    // If no live symbol, fall back to seed data immediately
+    if (!liveSymbol) {
+      series.setData(SEED_DATA[tf] as CandlestickData[]);
+      chart.timeScale().fitContent();
+    }
+    // When liveSymbol is set, the fetch effect below handles the update
+  }, [liveSymbol]);
+
+  // ── Fetch live candle history from Railway ─────────────────────────────────
+  useEffect(() => {
+    if (!liveSymbol) return;
+    const series = seriesRef.current;
+    const chart  = chartRef.current;
+    if (!series || !chart) return;
+
+    const apiTf = TF_API[activeTf];
+    const url   = `/api/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${apiTf}&count=300`;
+
+    fetch(url)
+      .then(r => r.json())
+      .then((data: { bars: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }> }) => {
+        if (!data.bars?.length || !seriesRef.current) return;
+        const mapped: OHLCBar[] = data.bars.map(b => ({
+          time:  b.t as Time,
+          open:  b.o,
+          high:  b.h,
+          low:   b.l,
+          close: b.c,
+        }));
+        seriesRef.current.setData(mapped as CandlestickData[]);
+        chartRef.current?.timeScale().fitContent();
+        setHasLiveData(true);
+      })
+      .catch(() => {
+        // Fallback to seed data on error
+        series.setData(SEED_DATA[activeTf] as CandlestickData[]);
+        chart.timeScale().fitContent();
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveSymbol, activeTf]);
+
+  // ── Apply incoming forming (live tick) update ──────────────────────────────
+  useEffect(() => {
+    if (!liveSymbol || !forming) return;
+    const bar = forming[liveSymbol];
+    if (!bar) return;
+    const series = seriesRef.current;
+    if (!series) return;
+    const tfSec = TF_SECONDS[activeTf];
+    series.update(snapToTf(bar, tfSec) as CandlestickData);
+  }, [liveSymbol, forming, activeTf]);
+
+  // ── Apply candle close ─────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!liveSymbol || !lastClose) return;
+    if (lastClose.symbol !== liveSymbol) return;
+    const series = seriesRef.current;
+    if (!series) return;
+    const tfSec = TF_SECONDS[activeTf];
+    series.update(snapToTf(lastClose.bar, tfSec) as CandlestickData);
+  }, [liveSymbol, lastClose, activeTf]);
 
   // ── SL price line ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -278,8 +364,14 @@ export function CandlestickChart({
       {/* Toolbar */}
       <div className="flex items-center justify-between px-3 py-1.5 bg-[#0c0c0c] border border-[#2a2a2a] rounded-t-lg">
         <span className="font-mono font-semibold text-sm text-white tracking-wide">
-          {symbol}
-          <span className="ml-2 text-xs font-normal text-gray-500">seed data · live feed coming in Phase 1.5</span>
+          {liveSymbol ?? symbol}
+          {liveSymbol && hasLiveData ? (
+            <span className="ml-2 text-xs font-normal text-emerald-500 animate-pulse">● LIVE</span>
+          ) : liveSymbol ? (
+            <span className="ml-2 text-xs font-normal text-yellow-500">⟳ connecting…</span>
+          ) : (
+            <span className="ml-2 text-xs font-normal text-gray-500">seed data · live feed coming in Phase 1.5</span>
+          )}
         </span>
         <div className="flex gap-0.5">
           {TIMEFRAMES.map((tf) => (
