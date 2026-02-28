@@ -670,6 +670,27 @@ def main():
             _push_history_to_railway()
         threading.Thread(target=_delayed_push, name="auto-push", daemon=True).start()
 
+        def _railway_watchdog_loop():
+            """Every 10 min, check if Railway dropped its state (redeploy). Re-push if so."""
+            time.sleep(120)  # skip first 2 minutes (startup push already running)
+            while True:
+                try:
+                    import urllib.request as _ureq
+                    url = RAILWAY_INGEST_URL.replace("/api/mt5/ingest", "/api/candles?symbol=BTCUSDm&tf=1m&count=1")
+                    req = _ureq.Request(url, headers={"Accept": "application/json"})
+                    with _ureq.urlopen(req, timeout=8) as resp:
+                        data = json.loads(resp.read().decode())
+                    count = data.get("count", 0)
+                    if count < 5:
+                        log.info(f"[watchdog] Railway has only {count} BTC bars → re-pushing history")
+                        _push_history_to_railway()
+                    else:
+                        log.debug(f"[watchdog] Railway OK ({count} BTC bars)")
+                except Exception as exc:
+                    log.debug(f"[watchdog] check failed: {exc!r}")
+                time.sleep(600)  # check every 10 minutes
+        threading.Thread(target=_railway_watchdog_loop, name="watchdog", daemon=True).start()
+
     # Start HTTP server (blocks)
     server = ThreadingHTTPServer(("127.0.0.1", PORT), RelayHandler)
     log.info(f"HTTP server ready — waiting for EA connections on port {PORT}")
