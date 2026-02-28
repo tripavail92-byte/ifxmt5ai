@@ -242,20 +242,56 @@ def ensure_symbol_selected(symbol: str, logger: logging.Logger) -> str | None:
         if _try_symbol_select_with_retries(ci_exact, logger):
             return ci_exact
 
-    # 2) Suffix fallback by base symbol
-    base = requested.rstrip("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ").lower()
-    if not base:
-        base = requested.lower().rstrip("m")
-    suffix_candidates = [
-        name for name in names
-        if name.lower().startswith(base) and len(name) <= len(base) + 3
-    ]
-    if suffix_candidates:
-        resolved = sorted(suffix_candidates, key=len)[0]
-        if resolved != requested:
-            logger.info("Resolved symbol %s -> %s (suffix fallback)", requested, resolved)
-        if _try_symbol_select_with_retries(resolved, logger):
-            return resolved
+    # 2) Normalized matching for broker-specific wrappers:
+    #    - Prefixes: mBTCUSD, cBTCUSD, tBTCUSD
+    #    - Suffixes: BTCUSDm, BTCUSD.c, BTCUSDpro
+    #    - Separators: BTCUSD.r, BTCUSD_i, XAUUSD-ecn
+    def normalize(name: str) -> str:
+        return "".join(ch for ch in (name or "").upper() if ch.isalnum())
+
+    requested_norm = normalize(requested)
+    if not requested_norm:
+        return None
+
+    scored: list[tuple[int, int, str]] = []
+    for name in names:
+        candidate_norm = normalize(name)
+        if not candidate_norm:
+            continue
+
+        score = 0
+        if candidate_norm == requested_norm:
+            score = 100
+        elif candidate_norm.startswith(requested_norm):
+            score = 92
+        elif candidate_norm.endswith(requested_norm):
+            score = 90
+        elif requested_norm in candidate_norm:
+            score = 84
+        elif candidate_norm in requested_norm:
+            score = 78
+
+        if score > 0:
+            # Prefer shorter/closer names among same class of match.
+            score -= min(abs(len(candidate_norm) - len(requested_norm)), 8)
+            scored.append((score, len(candidate_norm), name))
+
+    if scored:
+        # Highest score first, then closest length.
+        scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+        best_score, _, resolved = scored[0]
+
+        # Guardrail: avoid weak accidental matches.
+        if best_score >= 76:
+            if resolved != requested:
+                logger.info(
+                    "Resolved symbol %s -> %s (normalized match score=%s)",
+                    requested,
+                    resolved,
+                    best_score,
+                )
+            if _try_symbol_select_with_retries(resolved, logger):
+                return resolved
 
     return None
 
