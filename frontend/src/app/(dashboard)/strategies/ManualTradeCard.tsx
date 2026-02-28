@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useTransition, useRef } from "react";
+import { useState, useEffect, useTransition, useRef, useMemo } from "react";
 import dynamic from "next/dynamic";
+import { Target } from "lucide-react";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -30,6 +31,34 @@ interface Symbol {
 const STORAGE_KEY_SYMBOLS = "ifx_chart_symbols";
 const STORAGE_KEY_ACTIVE  = "ifx_chart_active";
 const DEFAULT_SYMBOLS      = ["BTCUSDm", "ETHUSDm"];
+
+// Per-symbol default zone percentages (matches backend asset_config_service)
+const ZONE_DEFAULTS: Record<string, number> = {
+  EURUSDm: 0.04, GBPUSDm: 0.06, USDJPYm: 0.06, USDCHFm: 0.06,
+  EURGBPm: 0.06, AUDUSDm: 0.12, XAUUSDm: 0.125, NZDUSDm: 0.15,
+  USDCADm: 0.14, USOILm: 0.25, BTCUSDm: 0.23, ETHUSDm: 0.85,
+  // Without 'm' suffix variants
+  EURUSD: 0.04, GBPUSD: 0.06, USDJPY: 0.06, USDCHF: 0.06,
+  EURGBP: 0.06, AUDUSD: 0.12, XAUUSD: 0.125, NZDUSD: 0.15,
+  USDCAD: 0.14, USOIL: 0.25, BTCUSD: 0.23, ETHUSD: 0.85,
+};
+const ZONE_DEFAULT_FALLBACK = 0.5;
+
+function getZoneDefault(sym: string): number {
+  return ZONE_DEFAULTS[sym] ?? ZONE_DEFAULT_FALLBACK;
+}
+
+function getDecimals(sym: string): number {
+  if (/JPY|XAU|BTC|ETH|OIL/i.test(sym)) return 2;
+  return 5;
+}
+
+function calcZone(ep: number, zp: number) {
+  return {
+    low:  ep * (1 - zp / 100),
+    high: ep * (1 + zp / 100),
+  };
+}
 
 function loadStoredSymbols(): [string, string] {
   if (typeof window === "undefined") return DEFAULT_SYMBOLS as [string, string];
@@ -66,6 +95,13 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   const [slValue, setSlValue] = useState<number | undefined>();
   const [tpValue, setTpValue] = useState<number | undefined>();
   const [formSymbol, setFormSymbol] = useState("");
+  const [side, setSide] = useState<"buy" | "sell">("buy");
+
+  // Zone state
+  const [entryPrice, setEntryPrice] = useState<string>("");
+  const [zonePercent, setZonePercent] = useState<number>(ZONE_DEFAULT_FALLBACK);
+  const [showEntryZones, setShowEntryZones] = useState<boolean>(true);
+  const [showTPZones, setShowTPZones] = useState<boolean>(true);
 
   // Live feed
   const { forming, lastClose, prices, isConnected } = usePriceFeed();
@@ -154,8 +190,39 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     });
   }
 
+  // Reset zone % when symbol changes
+  useEffect(() => {
+    const sym = slots[activeSlot];
+    setZonePercent(getZoneDefault(sym));
+    setEntryPrice("");
+    setSlValue(undefined);
+    setTpValue(undefined);
+  }, [slots[activeSlot]]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const chartSym  = hydrated ? slots[activeSlot] : DEFAULT_SYMBOLS[0];
   const livePrice = prices[chartSym];
+
+  // Zone computation
+  const ep = parseFloat(entryPrice);
+  const validEp = !isNaN(ep) && ep > 0;
+  const zone = useMemo(
+    () => (validEp ? calcZone(ep, zonePercent) : null),
+    [validEp, ep, zonePercent]
+  );
+  const dec = getDecimals(chartSym);
+  const fmtZ = (v: number) => v.toFixed(dec);
+
+  // Auto-fill SL / TP whenever zone or side changes
+  useEffect(() => {
+    if (!zone) return;
+    if (side === "buy") {
+      setSlValue(parseFloat(zone.low.toFixed(dec)));
+      setTpValue(parseFloat(zone.high.toFixed(dec)));
+    } else {
+      setSlValue(parseFloat(zone.high.toFixed(dec)));
+      setTpValue(parseFloat(zone.low.toFixed(dec)));
+    }
+  }, [zone?.low, zone?.high, side]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="rounded-xl border border-[#1e1e1e] bg-[#0a0a0a] overflow-hidden shadow-2xl">
@@ -269,6 +336,100 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
         )}
       </div>
 
+      {/* ── Zone Panel ── */}
+      <div className="border-t border-[#1e1e1e] bg-[#0d0d0d] px-4 py-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
+
+          {/* Entry Settings */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-1.5 text-[10px] font-semibold text-gray-500 uppercase tracking-widest">
+              <Target className="size-3" /> Entry Settings
+            </div>
+            <div>
+              <label className="block text-[10px] text-gray-600 mb-1">Entry Price</label>
+              <input
+                type="number"
+                step="any"
+                placeholder={livePrice ? livePrice.bid.toFixed(dec) : "0.00000"}
+                value={entryPrice}
+                onChange={(e) => setEntryPrice(e.target.value)}
+                className="w-full h-8 rounded border border-[#2a2a2a] bg-[#111] text-xs text-white font-mono px-2.5 focus:outline-none focus:border-orange-500/50 placeholder:text-gray-700"
+              />
+            </div>
+            {zone && (
+              <div className="bg-[#141414] rounded-lg p-2.5 space-y-1.5">
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] text-gray-500">Suggested Entry Zone</span>
+                  <span className="text-[10px] font-mono font-semibold text-blue-400">
+                    {fmtZ(zone.low)} – {fmtZ(zone.high)}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] text-gray-500">{side === "buy" ? "Loss Edge (SL)" : "Loss Edge (SL)"}</span>
+                  <span className="text-[10px] font-mono font-semibold text-red-400">
+                    {side === "buy" ? fmtZ(zone.low) : fmtZ(zone.high)}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] text-gray-500">Target (TP)</span>
+                  <span className="text-[10px] font-mono font-semibold text-emerald-400">
+                    {side === "buy" ? fmtZ(zone.high) : fmtZ(zone.low)}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Zone Controls */}
+          <div className="space-y-2">
+            <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest">
+              Zone Controls
+            </div>
+            <label className="flex items-center justify-between p-2 bg-[#141414] rounded-lg cursor-pointer hover:bg-[#181818] transition-colors">
+              <span className="text-xs text-gray-300">Show Entry Zones</span>
+              <input
+                type="checkbox"
+                checked={showEntryZones}
+                onChange={(e) => setShowEntryZones(e.target.checked)}
+                className="size-3.5 accent-blue-500"
+              />
+            </label>
+            <label className="flex items-center justify-between p-2 bg-[#141414] rounded-lg cursor-pointer hover:bg-[#181818] transition-colors">
+              <span className="text-xs text-gray-300">Show Taking Profit Zones</span>
+              <input
+                type="checkbox"
+                checked={showTPZones}
+                onChange={(e) => setShowTPZones(e.target.checked)}
+                className="size-3.5 accent-blue-500"
+              />
+            </label>
+            <div className="p-2.5 bg-[#141414] rounded-lg space-y-2">
+              <div className="flex justify-between items-center">
+                <div>
+                  <span className="text-xs text-gray-300">Zone Percent</span>
+                  <span className="block text-[10px] text-gray-600">Default: {getZoneDefault(chartSym).toFixed(2)}%</span>
+                </div>
+                <span className="text-xs font-semibold text-blue-400">{zonePercent.toFixed(2)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="5"
+                step="0.01"
+                value={zonePercent}
+                onChange={(e) => setZonePercent(parseFloat(e.target.value))}
+                className="w-full h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+              />
+              <div className="flex justify-between text-[10px] text-gray-600">
+                <span>0%</span>
+                <span>5%</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
       {/* ── Trade form ── */}
       <div className="border-t border-[#1e1e1e] bg-[#0d0d0d] px-4 py-4">
         <form onSubmit={handleSubmit} className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4 lg:grid-cols-6 items-end">
@@ -285,7 +446,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
           {/* Side */}
           <div className="space-y-1">
             <Label className="text-[11px] text-gray-500 uppercase tracking-wide">Side</Label>
-            <Select name="side" required>
+            <Select name="side" required value={side} onValueChange={(v) => setSide(v as "buy" | "sell")}>
               <SelectTrigger className="h-8 text-xs bg-[#0a0a0a] border-[#2a2a2a] text-white">
                 <SelectValue placeholder="Buy/Sell" />
               </SelectTrigger>
