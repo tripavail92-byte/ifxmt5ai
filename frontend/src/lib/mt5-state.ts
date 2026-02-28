@@ -93,6 +93,18 @@ class Mt5State {
       priceMap.set(t.symbol, { bid: t.bid, ask: t.ask, ts_ms: t.ts_ms });
     }
 
+    // Auto-register symbols from tick/forming data
+    const knownSymbols = this.symbols.get(connId) ?? [];
+    const knownSet = new Set(knownSymbols);
+    let updated = false;
+    for (const t of ticks) {
+      if (!knownSet.has(t.symbol)) { knownSymbols.push(t.symbol); knownSet.add(t.symbol); updated = true; }
+    }
+    for (const c of formingCandles) {
+      if (!knownSet.has(c.symbol)) { knownSymbols.push(c.symbol); knownSet.add(c.symbol); updated = true; }
+    }
+    if (updated) this.symbols.set(connId, knownSymbols);
+
     const updatedSymbols: string[] = [];
     for (const c of formingCandles) {
       const bar: CandleBar = { t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.tick_vol };
@@ -236,9 +248,18 @@ class Mt5State {
   }
 
   getSymbols(connId?: string): string[] {
-    if (connId) return this.symbols.get(connId) ?? [];
+    if (connId) {
+      const registered = this.symbols.get(connId) ?? [];
+      if (registered.length) return registered;
+      // Fall back: derive from prices map
+      return [...(this.prices.get(connId)?.keys() ?? [])];
+    }
     const syms = new Set<string>();
     this.symbols.forEach(list => list.forEach(s => syms.add(s)));
+    // Fall back: derive from prices map
+    if (!syms.size) {
+      this.prices.forEach(m => m.forEach((_, k) => syms.add(k)));
+    }
     return [...syms];
   }
 
