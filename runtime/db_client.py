@@ -80,32 +80,15 @@ def get_active_connections() -> list[dict]:
 
 
 def update_connection_status(connection_id: str, status: str, error: str = None) -> None:
-    """Update connection status columns if they exist — silently skips if missing."""
-    payload: dict = {}
-    # Only include columns if they exist in the fetched row
-    try:
-        probe = (
-            get_client().table("mt5_user_connections")
-            .select("id")
-            .eq("id", connection_id)
-            .limit(1).execute()
-        )
-        row_keys = set(probe.data[0].keys()) if probe.data else set()
-    except Exception:
-        row_keys = set()
-
-    if "status" in row_keys:
-        payload["status"] = status
-    if "last_error" in row_keys and error is not None:
+    """Update connection status and related columns directly."""
+    payload: dict = {
+        "status": status,
+        "last_seen_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if error is not None:
         payload["last_error"] = error
-    if "last_ok_at" in row_keys and status == "online":
+    if status == "online":
         payload["last_ok_at"] = datetime.now(timezone.utc).isoformat()
-    if "last_seen_at" in row_keys:
-        payload["last_seen_at"] = datetime.now(timezone.utc).isoformat()
-
-    if not payload:
-        logger.debug("update_connection_status: no writable columns found — skipping update.")
-        return
 
     try:
         get_client().table("mt5_user_connections").update(payload).eq(
@@ -113,6 +96,7 @@ def update_connection_status(connection_id: str, status: str, error: str = None)
         ).execute()
     except Exception as exc:
         logger.warning("update_connection_status failed: %s", exc)
+
 
 
 # ---------------------------------------------------------------------------
