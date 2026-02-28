@@ -28,13 +28,13 @@ Then attach MT5 EA with:
     SigningSecret   = <matches RELAY_SECRET>
 """
 
-import asyncio
 import collections
 import hashlib
 import hmac
 import json
 import logging
 import os
+import queue
 import socketserver
 import sys
 import threading
@@ -42,6 +42,8 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+import requests
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 
@@ -61,9 +63,9 @@ log = logging.getLogger("price_relay")
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 PORT             = int(os.getenv("RELAY_PORT", "8082"))
-RELAY_SECRET     = os.getenv("RELAY_SECRET", "")          # blank = skip HMAC verify
-RAILWAY_WS_URL   = os.getenv("RAILWAY_WS_URL", "")        # blank = buffer only, no forward
-RAILWAY_TOKEN    = os.getenv("RAILWAY_RELAY_TOKEN", "")   # Bearer token for Railway WS
+RELAY_SECRET     = os.getenv("RELAY_SECRET", "")              # blank = skip HMAC verify
+RAILWAY_INGEST_URL = os.getenv("RAILWAY_INGEST_URL", "")      # https://....railway.app/api/mt5/ingest
+RAILWAY_TOKEN    = os.getenv("RAILWAY_RELAY_TOKEN", "")       # Bearer token for Railway ingest
 CANDLE_MAXBARS   = int(os.getenv("RELAY_CANDLE_MAXBARS", "1500"))  # ~25h of 1m data
 
 # Timeframe aggregation map  {tf_label -> minutes}
@@ -112,82 +114,80 @@ stats = {
     "t_start":         time.time(),
 }
 
-# ─── WebSocket forwarder ──────────────────────────────────────────────────────
+# ─── HTTP forwarder ───────────────────────────────────────────────────────────
 #
-#  Runs in a dedicated daemon thread with its own asyncio event loop.
-#  HTTP handlers call enqueue_ws(msg_dict) which is thread-safe.
-#  When RAILWAY_WS_URL is blank the queue simply drains to /dev/null.
+#  Runs in a dedicated daemon thread.
+#  HTTP handlers call enqueue_fwd(msg_dict) which is thread-safe.
+#  When RAILWAY_INGEST_URL is blank, messages are discarded after logging.
 
-_ws_loop:  asyncio.AbstractEventLoop | None = None
-_ws_queue: asyncio.Queue | None            = None
+_fwd_queue: queue.Queue = queue.Queue(maxsize=2000)
 
 
-def enqueue_ws(msg: dict) -> None:
-    """Thread-safe: submit a message to the WS relay queue."""
-    if _ws_loop is None or _ws_queue is None:
-        return
-    if not RAILWAY_WS_URL:
-        return  # no Railway endpoint configured — skip forwarding
-
+def enqueue_fwd(msg: dict) -> None:
+    """Thread-safe: enqueue a message for forwarding to Railway ingest."""
+    if not RAILWAY_INGEST_URL:
+        return  # buffering only — no Railway endpoint configured
     try:
-        _ws_loop.call_soon_threadsafe(_ws_queue.put_nowait, json.dumps(msg))
-    except asyncio.QueueFull:
+        _fwd_queue.put_nowait(msg)
+    except queue.Full:
         stats["ws_dropped"] += 1
 
 
-async def _ws_relay_loop() -> None:
-    """Persistent WebSocket client to Railway with exponential backoff reconnect."""
-    global _ws_queue
-    _ws_queue = asyncio.Queue(maxsize=1000)
+# Keep the old name as alias so existing call sites don't need changing
+enqueue_ws = enqueue_fwd
 
-    if not RAILWAY_WS_URL:
-        log.info("RAILWAY_WS_URL not set — WS forwarding disabled, buffering only")
-        # Keep queue alive so enqueue_ws() calls don't crash; drain silently
+
+def _http_relay_loop() -> None:
+    """Drain _fwd_queue and POST each message to Railway /api/mt5/ingest."""
+    if not RAILWAY_INGEST_URL:
+        log.info("RAILWAY_INGEST_URL not set — HTTP forwarding disabled, buffer-only mode")
         while True:
-            await _ws_queue.get()
+            _fwd_queue.get()  # drain silently
+            _fwd_queue.task_done()
+        return  # unreachable but explicit
 
-    import websockets  # imported here to keep startup fast if WS not needed
-
-    headers = {}
+    headers: dict = {"Content-Type": "application/json"}
     if RAILWAY_TOKEN:
         headers["Authorization"] = f"Bearer {RAILWAY_TOKEN}"
 
+    session = requests.Session()
     backoff = 1.0
+    log.info(f"HTTP relay -> target: {RAILWAY_INGEST_URL}")
+
     while True:
+        msg = _fwd_queue.get()
         try:
-            log.info(f"WS → connecting to {RAILWAY_WS_URL} ...")
-            async with websockets.connect(
-                RAILWAY_WS_URL,
-                additional_headers=headers,
-                ping_interval=20,
-                ping_timeout=10,
-                open_timeout=15,
-            ) as ws:
-                log.info("WS → connected to Railway ✅")
-                backoff = 1.0  # reset on success
-
-                # Send all queued messages
-                while True:
-                    msg_str = await _ws_queue.get()
-                    await ws.send(msg_str)
-                    stats["ws_sent"] += 1
-
+            resp = session.post(
+                RAILWAY_INGEST_URL,
+                data=json.dumps(msg),
+                headers=headers,
+                timeout=5,
+            )
+            if resp.status_code < 300:
+                stats["ws_sent"] += 1
+                backoff = 1.0
+            else:
+                log.warning(f"Railway ingest HTTP {resp.status_code}: {resp.text[:80]}")
+                stats["ws_dropped"] += 1
         except Exception as exc:
-            log.warning(f"WS error: {exc!r}  — retry in {backoff:.0f}s")
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2.0, 60.0)
+            log.warning(f"Railway ingest error: {exc!r} - retry in {backoff:.0f}s")
+            stats["ws_dropped"] += 1
+            time.sleep(backoff)
+            backoff = min(backoff * 2.0, 30.0)
+            # Re-enqueue the failed message (best-effort)
+            try:
+                _fwd_queue.put_nowait(msg)
+            except queue.Full:
+                pass
+        finally:
+            _fwd_queue.task_done()
 
 
 def _start_ws_thread() -> None:
-    global _ws_loop
-    _ws_loop = asyncio.new_event_loop()
-
-    def run():
-        _ws_loop.run_until_complete(_ws_relay_loop())
-
-    t = threading.Thread(target=run, name="ws-relay", daemon=True)
+    """Start the HTTP relay forwarding thread."""
+    t = threading.Thread(target=_http_relay_loop, name="http-relay", daemon=True)
     t.start()
-    log.info("WS relay thread started")
+    log.info("HTTP relay thread started")
 
 
 # ─── Candle buffer helpers ────────────────────────────────────────────────────
@@ -515,13 +515,20 @@ class RelayHandler(BaseHTTPRequestHandler):
                 f"bars_req={data.get('bars_requested')}"
             )
 
-            # Forward to Railway WS (abbreviated — just notify without full payload)
+            # Forward to Railway — include full bar data so Railway can seed its buffer
             enqueue_ws({
-                "type":          "historical_bulk",
-                "connection_id": conn_id,
-                "symbols":       sym_names,
-                "total_bars":    total_bars,
+                "type":           "historical_bulk",
+                "connection_id":  conn_id,
+                "symbols":        sym_names,
+                "total_bars":     total_bars,
                 "bars_requested": data.get("bars_requested"),
+                "symbols_data":   [
+                    {
+                        "symbol": s.get("symbol"),
+                        "bars":   s.get("bars", []),
+                    }
+                    for s in symbols
+                ],
             })
 
         except Exception as exc:
@@ -542,10 +549,10 @@ class RelayHandler(BaseHTTPRequestHandler):
 
 def main():
     log.info("=" * 60)
-    log.info("  IFX Price Bridge — Production Relay  (Sprint 3)")
+    log.info("  IFX Price Bridge -- Production Relay  (Sprint 3)")
     log.info(f"  Listening on http://127.0.0.1:{PORT}")
     log.info(f"  HMAC verification: {'ON' if RELAY_SECRET else 'OFF (RELAY_SECRET not set)'}")
-    log.info(f"  Railway WS: {RAILWAY_WS_URL or 'NOT CONFIGURED — buffer only'}")
+    log.info(f"  Railway ingest: {RAILWAY_INGEST_URL or 'NOT CONFIGURED -- buffer only'}")
     log.info(f"  Candle buffer: {CANDLE_MAXBARS} bars/symbol (~{CANDLE_MAXBARS//60}h of 1m)")
     log.info("=" * 60)
 
