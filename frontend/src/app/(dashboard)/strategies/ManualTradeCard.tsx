@@ -1,25 +1,18 @@
 "use client";
 
-import { useState, useEffect, useTransition } from "react";
+import { useState, useEffect, useTransition, useRef } from "react";
 import dynamic from "next/dynamic";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { placeManualTrade } from "./actions";
 import { createClient } from "@/utils/supabase/client";
 import { usePriceFeed } from "@/hooks/usePriceFeed";
 
-// Loaded only on the client — lightweight-charts requires window/DOM
 const CandlestickChart = dynamic(
   () => import("@/components/chart/CandlestickChart").then((m) => ({ default: m.CandlestickChart })),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="w-full h-[340px] rounded-lg bg-[#0c0c0c] border border-[#2a2a2a] animate-pulse" />
-    ),
-  }
+  { ssr: false, loading: () => <div className="flex-1 bg-[#0a0a0a] animate-pulse rounded" /> }
 );
 
 interface Connection {
@@ -34,214 +27,330 @@ interface Symbol {
   category: string;
 }
 
+const STORAGE_KEY_SYMBOLS = "ifx_chart_symbols";
+const STORAGE_KEY_ACTIVE  = "ifx_chart_active";
+const DEFAULT_SYMBOLS      = ["BTCUSDm", "ETHUSDm"];
+
+function loadStoredSymbols(): [string, string] {
+  if (typeof window === "undefined") return DEFAULT_SYMBOLS as [string, string];
+  try {
+    const v = JSON.parse(localStorage.getItem(STORAGE_KEY_SYMBOLS) ?? "null");
+    if (Array.isArray(v) && v.length === 2) return v as [string, string];
+  } catch { /* ignore */ }
+  return DEFAULT_SYMBOLS as [string, string];
+}
+
+function loadStoredActive(slots: [string, string]): 0 | 1 {
+  if (typeof window === "undefined") return 0;
+  const v = localStorage.getItem(STORAGE_KEY_ACTIVE);
+  return v === "1" ? 1 : 0;
+}
+
 export function ManualTradeCard({ connections }: { connections: Connection[] }) {
-  const [selectedConn, setSelectedConn] = useState("");
+  // Auto-select only connection
+  const autoConn = connections[0] ?? null;
+
   const [symbols, setSymbols] = useState<Symbol[]>([]);
   const [symbolSearch, setSymbolSearch] = useState("");
-  const [loadingSymbols, setLoadingSymbols] = useState(false);
+  const [showSymbolPicker, setShowSymbolPicker] = useState<0 | 1 | null>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
 
-  // Live price feed
-  const { forming, lastClose, prices } = usePriceFeed();
+  // Two pinned chart slots — persisted to localStorage
+  const [slots, setSlots] = useState<[string, string]>(DEFAULT_SYMBOLS as [string, string]);
+  const [activeSlot, setActiveSlot] = useState<0 | 1>(0);
+  const [hydrated, setHydrated] = useState(false);
+
+  // Trade form
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [isPending, startTransition] = useTransition();
-
-  // Chart state — controlled so price lines update live as user types
-  const [chartSymbol, setChartSymbol] = useState("EURUSD");
   const [slValue, setSlValue] = useState<number | undefined>();
   const [tpValue, setTpValue] = useState<number | undefined>();
+  const [formSymbol, setFormSymbol] = useState("");
 
-  // Load symbols when connection changes
+  // Live feed
+  const { forming, lastClose, prices, isConnected } = usePriceFeed();
+
+  // Hydrate from localStorage on first render
   useEffect(() => {
-    if (!selectedConn) { setSymbols([]); return; }
-    setLoadingSymbols(true);
-    setSymbols([]);
-    setSymbolSearch("");
+    const stored = loadStoredSymbols();
+    const active = loadStoredActive(stored);
+    setSlots(stored);
+    setActiveSlot(active);
+    setFormSymbol(stored[active]);
+    setHydrated(true);
+  }, []);
 
+  // Persist changes to localStorage
+  useEffect(() => {
+    if (!hydrated) return;
+    localStorage.setItem(STORAGE_KEY_SYMBOLS, JSON.stringify(slots));
+  }, [slots, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    localStorage.setItem(STORAGE_KEY_ACTIVE, String(activeSlot));
+  }, [activeSlot, hydrated]);
+
+  // Load symbols for the auto-selected connection
+  useEffect(() => {
+    if (!autoConn) return;
     const supabase = createClient();
     supabase
       .from("mt5_symbols")
       .select("symbol, description, category")
-      .eq("connection_id", selectedConn)
+      .eq("connection_id", autoConn.id)
       .order("symbol")
-      .then(({ data }) => {
-        setSymbols(data ?? []);
-        setLoadingSymbols(false);
-      });
-  }, [selectedConn]);
+      .then(({ data }) => setSymbols(data ?? []));
+  }, [autoConn?.id]);
+
+  // Close picker on outside click
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setShowSymbolPicker(null);
+        setSymbolSearch("");
+      }
+    }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
 
   const filtered = symbolSearch.length > 0
     ? symbols.filter(s =>
         s.symbol.toLowerCase().includes(symbolSearch.toLowerCase()) ||
         s.description?.toLowerCase().includes(symbolSearch.toLowerCase())
-      ).slice(0, 80)
-    : symbols.slice(0, 80);
+      ).slice(0, 60)
+    : symbols.slice(0, 60);
+
+  function selectSlotSymbol(slot: 0 | 1, sym: string) {
+    const next: [string, string] = [...slots] as [string, string];
+    next[slot] = sym;
+    setSlots(next);
+    setActiveSlot(slot);
+    setFormSymbol(sym);
+    setShowSymbolPicker(null);
+    setSymbolSearch("");
+  }
+
+  function switchSlot(slot: 0 | 1) {
+    setActiveSlot(slot);
+    setFormSymbol(slots[slot]);
+  }
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
+    if (autoConn) fd.set("connection_id", autoConn.id);
     setResult(null);
     startTransition(async () => {
       try {
         await placeManualTrade(fd);
-        setResult({ ok: true, msg: "✅ Trade queued! Check Trades page for execution status." });
-        (e.target as HTMLFormElement).reset();
-        setSelectedConn("");
-        setSymbols([]);
+        setResult({ ok: true, msg: "Trade queued — check Trades page for status." });
         setSlValue(undefined);
         setTpValue(undefined);
       } catch (err: unknown) {
-        setResult({ ok: false, msg: `❌ ${err instanceof Error ? err.message : "Unknown error"}` });
+        setResult({ ok: false, msg: err instanceof Error ? err.message : "Unknown error" });
       }
     });
   }
 
-  return (
-    <Card className="border-2 border-orange-500/40 shadow-md bg-orange-500/5">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">🧪 Manual Trade — Live Test</CardTitle>
-        <CardDescription>
-          Inject a trade job directly. The live worker claims and executes it within seconds.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        {/* Live chart — SL/TP lines update as you type */}
-        <CandlestickChart
-          symbol={chartSymbol}
-          liveSymbol={chartSymbol}
-          sl={slValue}
-          tp={tpValue}
-          forming={forming}
-          lastClose={lastClose}
-          className="mb-5"
-        />
-        <form onSubmit={handleSubmit} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6 items-end">
+  const chartSym  = hydrated ? slots[activeSlot] : DEFAULT_SYMBOLS[0];
+  const livePrice = prices[chartSym];
 
-          {/* Account */}
-          <div className="space-y-2 lg:col-span-2">
-            <Label>Account</Label>
-            <Select
-              name="connection_id"
-              required
-              value={selectedConn}
-              onValueChange={setSelectedConn}
-            >
-              <SelectTrigger><SelectValue placeholder="Select account" /></SelectTrigger>
-              <SelectContent>
-                {connections.map((c) => (
-                  <SelectItem key={c.id} value={c.id}>
-                    {c.broker_server} — {c.account_login}
-                  </SelectItem>
+  return (
+    <div className="rounded-xl border border-[#1e1e1e] bg-[#0a0a0a] overflow-hidden shadow-2xl">
+
+      {/* ── Top bar: account badge + connection status ── */}
+      <div className="flex items-center justify-between px-4 py-2 bg-[#111] border-b border-[#1e1e1e]">
+        <div className="flex items-center gap-3">
+          <span className="text-xs font-semibold text-gray-300">
+            {autoConn ? `${autoConn.broker_server} · ${autoConn.account_login}` : "No active connection"}
+          </span>
+          {autoConn && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
+              ACTIVE
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className={`w-1.5 h-1.5 rounded-full ${isConnected ? "bg-emerald-400 animate-pulse" : "bg-yellow-500"}`} />
+          <span className="text-[10px] text-gray-500">{isConnected ? "LIVE" : "connecting…"}</span>
+        </div>
+      </div>
+
+      {/* ── Symbol slot tabs ── */}
+      <div className="flex border-b border-[#1e1e1e] bg-[#0d0d0d]" ref={pickerRef}>
+        {([0, 1] as const).map((slot) => {
+          const sym   = slots[slot];
+          const live  = prices[sym];
+          const isAct = activeSlot === slot;
+          return (
+            <div key={slot} className="relative flex-1">
+              <button
+                type="button"
+                onClick={() => switchSlot(slot)}
+                className={`w-full flex items-center justify-between gap-2 px-4 py-2.5 text-left transition-colors
+                  ${isAct
+                    ? "bg-[#141414] border-b-2 border-orange-500"
+                    : "hover:bg-[#111] border-b-2 border-transparent"
+                  }`}
+              >
+                <div>
+                  <span className={`font-mono font-semibold text-sm ${isAct ? "text-white" : "text-gray-500"}`}>
+                    {sym}
+                  </span>
+                  {live && (
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <span className="text-[11px] font-mono text-emerald-400">{live.bid.toFixed(sym.includes("JPY") || sym.includes("XAU") || sym.includes("BTC") || sym.includes("ETH") ? 2 : 5)}</span>
+                      <span className="text-[9px] text-gray-600">/</span>
+                      <span className="text-[11px] font-mono text-red-400">{live.ask.toFixed(sym.includes("JPY") || sym.includes("XAU") || sym.includes("BTC") || sym.includes("ETH") ? 2 : 5)}</span>
+                    </div>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); setShowSymbolPicker(slot); setSymbolSearch(""); }}
+                  className="text-[10px] text-gray-600 hover:text-orange-400 px-1.5 py-0.5 rounded hover:bg-orange-500/10 transition-colors"
+                  title="Change symbol"
+                >
+                  ▾
+                </button>
+              </button>
+
+              {/* Symbol picker dropdown */}
+              {showSymbolPicker === slot && (
+                <div className="absolute top-full left-0 z-50 w-72 bg-[#161616] border border-[#2a2a2a] rounded-b-lg shadow-2xl">
+                  <div className="p-2 border-b border-[#222]">
+                    <Input
+                      autoFocus
+                      placeholder="Search symbol…"
+                      value={symbolSearch}
+                      onChange={(e) => setSymbolSearch(e.target.value)}
+                      className="h-7 text-xs bg-[#0a0a0a] border-[#2a2a2a] text-white placeholder:text-gray-600"
+                    />
+                  </div>
+                  <div className="max-h-52 overflow-y-auto">
+                    {filtered.length === 0 ? (
+                      <div className="px-3 py-2 text-xs text-gray-600 text-center">No results</div>
+                    ) : filtered.map((s) => (
+                      <button
+                        key={s.symbol}
+                        type="button"
+                        onClick={() => selectSlotSymbol(slot, s.symbol)}
+                        className={`w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-orange-500/10 transition-colors
+                          ${slots.includes(s.symbol) ? "text-orange-400" : "text-gray-300"}`}
+                      >
+                        <span className="font-mono text-xs font-semibold">{s.symbol}</span>
+                        {s.description && (
+                          <span className="text-[10px] text-gray-600 truncate max-w-[140px]">{s.description}</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── Chart ── */}
+      <div className="bg-[#0a0a0a]">
+        {hydrated && (
+          <CandlestickChart
+            symbol={chartSym}
+            liveSymbol={chartSym}
+            sl={slValue}
+            tp={tpValue}
+            forming={forming}
+            lastClose={lastClose}
+            className="w-full"
+          />
+        )}
+      </div>
+
+      {/* ── Trade form ── */}
+      <div className="border-t border-[#1e1e1e] bg-[#0d0d0d] px-4 py-4">
+        <form onSubmit={handleSubmit} className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4 lg:grid-cols-6 items-end">
+
+          {/* Symbol */}
+          <div className="space-y-1 lg:col-span-1">
+            <Label className="text-[11px] text-gray-500 uppercase tracking-wide">Symbol</Label>
+            <Select name="symbol" required value={formSymbol} onValueChange={(v) => { setFormSymbol(v); }}>
+              <SelectTrigger className="h-8 text-xs bg-[#0a0a0a] border-[#2a2a2a] text-white">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="max-h-64 bg-[#161616] border-[#2a2a2a]">
+                {/* Pinned slots first */}
+                {slots.map((s) => (
+                  <SelectItem key={s} value={s} className="text-xs font-mono text-orange-400">{s}</SelectItem>
+                ))}
+                {symbols.filter(s => !slots.includes(s.symbol)).slice(0, 50).map((s) => (
+                  <SelectItem key={s.symbol} value={s.symbol} className="text-xs font-mono">{s.symbol}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
 
-          {/* Symbol search + dropdown */}
-          <div className="space-y-2 lg:col-span-2">
-            <Label>
-              Symbol
-              {chartSymbol && prices[chartSymbol] && (
-                <span className="ml-2 font-mono text-xs text-emerald-400">
-                  {prices[chartSymbol].bid.toFixed(5)} / {prices[chartSymbol].ask.toFixed(5)}
-                </span>
-              )}
-            </Label>
-            {loadingSymbols ? (
-              <div className="h-9 flex items-center text-sm text-muted-foreground px-3 border rounded-md">Loading symbols…</div>
-            ) : symbols.length > 0 ? (
-              <div className="relative">
-                <Input
-                  placeholder="Search symbol e.g. EURUSD"
-                  value={symbolSearch}
-                  onChange={(e) => setSymbolSearch(e.target.value)}
-                  className="mb-1"
-                />
-                <Select name="symbol" required onValueChange={(v) => setChartSymbol(v)}>
-                  <SelectTrigger><SelectValue placeholder="Select symbol" /></SelectTrigger>
-                  <SelectContent className="max-h-64">
-                    {filtered.map((s) => (
-                      <SelectItem key={s.symbol} value={s.symbol}>
-                        <span className="font-mono font-semibold">{s.symbol}</span>
-                        {s.description && <span className="ml-2 text-xs text-muted-foreground">{s.description}</span>}
-                      </SelectItem>
-                    ))}
-                    {filtered.length === 0 && (
-                      <div className="p-2 text-sm text-muted-foreground">No match</div>
-                    )}
-                  </SelectContent>
-                </Select>
-              </div>
-            ) : (
-              <Input name="symbol" placeholder={selectedConn ? "Type symbol e.g. EURUSD" : "Select account first"} required />
-            )}
-          </div>
-
           {/* Side */}
-          <div className="space-y-2">
-            <Label>Side</Label>
+          <div className="space-y-1">
+            <Label className="text-[11px] text-gray-500 uppercase tracking-wide">Side</Label>
             <Select name="side" required>
-              <SelectTrigger><SelectValue placeholder="Buy / Sell" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="buy">🟢 Buy</SelectItem>
-                <SelectItem value="sell">🔴 Sell</SelectItem>
+              <SelectTrigger className="h-8 text-xs bg-[#0a0a0a] border-[#2a2a2a] text-white">
+                <SelectValue placeholder="Buy/Sell" />
+              </SelectTrigger>
+              <SelectContent className="bg-[#161616] border-[#2a2a2a]">
+                <SelectItem value="buy"><span className="text-emerald-400 font-semibold">▲ Buy</span></SelectItem>
+                <SelectItem value="sell"><span className="text-red-400 font-semibold">▼ Sell</span></SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           {/* Volume */}
-          <div className="space-y-2">
-            <Label>Volume (lots)</Label>
-            <Input name="volume" type="number" step="0.01" min="0.01" placeholder="0.01" required />
+          <div className="space-y-1">
+            <Label className="text-[11px] text-gray-500 uppercase tracking-wide">Lots</Label>
+            <Input name="volume" type="number" step="0.01" min="0.01" placeholder="0.01" required
+              className="h-8 text-xs bg-[#0a0a0a] border-[#2a2a2a] text-white placeholder:text-gray-700" />
           </div>
 
-          {/* SL / TP — controlled so chart price lines update live */}
-          <div className="space-y-2">
-            <Label>SL (optional)</Label>
-            <Input
-              name="sl"
-              type="number"
-              step="0.00001"
-              placeholder="0.00000"
+          {/* SL */}
+          <div className="space-y-1">
+            <Label className="text-[11px] text-gray-500 uppercase tracking-wide">SL</Label>
+            <Input name="sl" type="number" step="0.00001" placeholder="optional"
               value={slValue ?? ""}
               onChange={(e) => setSlValue(e.target.value ? parseFloat(e.target.value) : undefined)}
-            />
+              className="h-8 text-xs bg-[#0a0a0a] border-[#2a2a2a] text-white placeholder:text-gray-700" />
           </div>
-          <div className="space-y-2">
-            <Label>TP (optional)</Label>
-            <Input
-              name="tp"
-              type="number"
-              step="0.00001"
-              placeholder="0.00000"
+
+          {/* TP */}
+          <div className="space-y-1">
+            <Label className="text-[11px] text-gray-500 uppercase tracking-wide">TP</Label>
+            <Input name="tp" type="number" step="0.00001" placeholder="optional"
               value={tpValue ?? ""}
               onChange={(e) => setTpValue(e.target.value ? parseFloat(e.target.value) : undefined)}
-            />
+              className="h-8 text-xs bg-[#0a0a0a] border-[#2a2a2a] text-white placeholder:text-gray-700" />
           </div>
 
           {/* Submit */}
-          <div className="lg:col-span-6">
-            <Button
-              type="submit"
-              disabled={isPending}
-              className="w-full bg-orange-600 hover:bg-orange-700 text-white font-bold"
-            >
-              {isPending ? "Placing…" : "🚀 Place Trade Now"}
+          <div className="space-y-1 lg:col-span-1">
+            <Label className="text-[11px] text-transparent select-none">.</Label>
+            <Button type="submit" disabled={isPending || !autoConn}
+              className="h-8 w-full text-xs font-bold bg-orange-600 hover:bg-orange-500 disabled:opacity-40 text-white">
+              {isPending ? "Placing…" : "Place Trade"}
             </Button>
           </div>
         </form>
 
         {result && (
-          <div className={`mt-3 p-3 rounded-md text-sm font-medium ${result.ok ? "bg-green-500/10 text-green-600" : "bg-destructive/10 text-destructive"}`}>
+          <div className={`mt-3 px-3 py-2 rounded text-xs font-medium border
+            ${result.ok
+              ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+              : "bg-red-500/10 text-red-400 border-red-500/20"
+            }`}>
             {result.msg}
           </div>
         )}
-
-        <p className="mt-3 text-xs text-muted-foreground">
-          After placing, check the{" "}
-          <a href="/trades" className="underline">Trades page</a> and{" "}
-          <a href="/logs" className="underline">System Logs</a> for real-time execution updates.
-        </p>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }

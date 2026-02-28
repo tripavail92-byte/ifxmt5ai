@@ -155,7 +155,11 @@ export function CandlestickChart({
   const tpLineRef    = useRef<IPriceLine | null>(null);
   const entryLineRef = useRef<IPriceLine | null>(null);
 
-  const [activeTf, setActiveTf] = useState<TF>("H1");
+  const [activeTf, setActiveTf] = useState<TF>(() =>
+    // Default M15 for live (shows bars quickly); H1 for seed data
+    typeof window !== "undefined" &&
+    localStorage.getItem("ifx_chart_tf") as TF | null || "M15"
+  );
   const [hasLiveData, setHasLiveData] = useState(false);
 
   // ── Mount / unmount chart ──────────────────────────────────────────────────
@@ -233,6 +237,7 @@ export function CandlestickChart({
   // ── Timeframe switch ───────────────────────────────────────────────────────
   const switchTf = useCallback((tf: TF) => {
     setActiveTf(tf);
+    try { localStorage.setItem("ifx_chart_tf", tf); } catch { /* ignore */ }
     const series = seriesRef.current;
     const chart = chartRef.current;
     if (!series || !chart) return;

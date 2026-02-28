@@ -114,6 +114,44 @@ stats = {
     "t_start":         time.time(),
 }
 
+# ─── Candle buffer disk persistence ──────────────────────────────────────────
+BUFFER_FILE = LOG_DIR / "candle_buffer.json"
+
+def save_buffer() -> None:
+    """Persist candle_buffer to disk (called every 60s + on shutdown)."""
+    try:
+        with _state_lock:
+            data = {cid: {sym: list(buf) for sym, buf in syms.items()}
+                    for cid, syms in candle_buffer.items() if syms}
+        with open(BUFFER_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as exc:
+        log.warning(f"save_buffer error: {exc!r}")
+
+def load_buffer() -> None:
+    """Restore candle_buffer from disk on startup."""
+    if not BUFFER_FILE.exists():
+        return
+    try:
+        with open(BUFFER_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        with _state_lock:
+            for cid, sym_map in data.items():
+                for sym, bars in sym_map.items():
+                    buf = candle_buffer[cid][sym]
+                    for b in bars:
+                        buf.append(b)
+        total = sum(len(s) for c in data.values() for s in c.values())
+        log.info(f"Loaded {total} bars from disk for {sum(len(v) for v in data.values())} symbols")
+    except Exception as exc:
+        log.warning(f"load_buffer error: {exc!r}")
+
+def _buffer_autosave_loop() -> None:
+    """Background thread: save buffer to disk every 60 seconds."""
+    while True:
+        time.sleep(60)
+        save_buffer()
+
 # ─── HTTP forwarder ───────────────────────────────────────────────────────────
 #
 #  Runs in a dedicated daemon thread.
@@ -188,6 +226,54 @@ def _start_ws_thread() -> None:
     t = threading.Thread(target=_http_relay_loop, name="http-relay", daemon=True)
     t.start()
     log.info("HTTP relay thread started")
+
+
+def _push_history_to_railway() -> None:
+    """
+    One-shot: read all buffered 1m bars from candle_buffer and POST them
+    to Railway /api/mt5/ingest as historical_bulk messages (one per conn_id).
+    """
+    if not RAILWAY_INGEST_URL:
+        log.warning("push-history: RAILWAY_INGEST_URL not set")
+        return
+
+    headers: dict = {"Content-Type": "application/json"}
+    if RAILWAY_TOKEN:
+        headers["Authorization"] = f"Bearer {RAILWAY_TOKEN}"
+
+    with _state_lock:
+        snapshot = {cid: {sym: list(buf) for sym, buf in syms.items()}
+                    for cid, syms in candle_buffer.items()}
+
+    session = requests.Session()
+    total_sent = 0
+    for conn_id, sym_map in snapshot.items():
+        if not sym_map:
+            continue
+        symbols_data = [
+            {"symbol": sym, "bars": list(bars)}
+            for sym, bars in sym_map.items() if bars
+        ]
+        if not symbols_data:
+            continue
+        total_bars = sum(len(e["bars"]) for e in symbols_data)
+        payload = {
+            "type":         "historical_bulk",
+            "connection_id": conn_id,
+            "symbols":      [e["symbol"] for e in symbols_data],
+            "total_bars":   total_bars,
+            "symbols_data": symbols_data,
+        }
+        try:
+            resp = session.post(RAILWAY_INGEST_URL, json=payload, headers=headers, timeout=30)
+            if resp.status_code < 300:
+                total_sent += total_bars
+                log.info(f"push-history: sent {len(symbols_data)} symbols / {total_bars} bars "
+                         f"for conn {conn_id[:8]}")
+            else:
+                log.warning(f"push-history: Railway responded {resp.status_code}: {resp.text[:80]}")
+        except Exception as exc:
+            log.warning(f"push-history error: {exc!r}")
 
 
 # ─── Candle buffer helpers ────────────────────────────────────────────────────
@@ -294,6 +380,12 @@ class RelayHandler(BaseHTTPRequestHandler):
                     len(syms) for syms in candle_buffer.values()
                 ),
             }).encode()
+            self._send(200, body)
+
+        elif path == "/push-history":
+            # Re-push all buffered candle history to Railway ingest
+            threading.Thread(target=_push_history_to_railway, daemon=True).start()
+            body = json.dumps({"ok": True, "msg": "push started"}).encode()
             self._send(200, body)
 
         else:
@@ -556,8 +648,22 @@ def main():
     log.info(f"  Candle buffer: {CANDLE_MAXBARS} bars/symbol (~{CANDLE_MAXBARS//60}h of 1m)")
     log.info("=" * 60)
 
+    # Restore candle buffer from disk (survives relay restarts)
+    load_buffer()
+
     # Start WebSocket relay thread (handles both connected and disconnected states)
     _start_ws_thread()
+
+    # Start autosave thread
+    threading.Thread(target=_buffer_autosave_loop, name="autosave", daemon=True).start()
+
+    # After a delay, push all buffered history to Railway (gives EA time to reconnect)
+    if RAILWAY_INGEST_URL:
+        def _delayed_push():
+            time.sleep(45)
+            log.info("Auto push-history -> Railway on startup")
+            _push_history_to_railway()
+        threading.Thread(target=_delayed_push, name="auto-push", daemon=True).start()
 
     # Start HTTP server (blocks)
     server = ThreadingHTTPServer(("127.0.0.1", PORT), RelayHandler)
@@ -583,6 +689,7 @@ def main():
         log.info(f"  Historical bulk: {stats['historical_bulk']}")
         log.info(f"  WS sent:         {stats['ws_sent']}")
         log.info(f"  WS dropped:      {stats['ws_dropped']}")
+        save_buffer()
         server.server_close()
 
 

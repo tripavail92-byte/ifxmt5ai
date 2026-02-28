@@ -266,7 +266,9 @@ class Mt5State {
   // ── SSE broadcast ──────────────────────────────────────────────────────────
 
   broadcast(payload: object) {
-    const line = `data: ${JSON.stringify(payload)}\n\n`;
+    // Include event name so EventSource.addEventListener(type, ...) works
+    const type = (payload as { type?: string }).type ?? "message";
+    const line = `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
     const encoded = new TextEncoder().encode(line);
     const dead: SseSubscriber[] = [];
 

@@ -24,7 +24,8 @@ export const dynamic = "force-dynamic";
 const encoder = new TextEncoder();
 
 function sseMessage(payload: object): Uint8Array {
-  return encoder.encode(`data: ${JSON.stringify(payload)}\n\n`);
+  const type = (payload as { type?: string }).type ?? "message";
+  return encoder.encode(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`);
 }
 
 export async function GET(req: NextRequest) {
