@@ -35,6 +35,8 @@ datetime g_sym_last_bar[];      // Last completed 1m bar open-time
 int      g_sym_count     = 0;
 ulong    g_last_flush_ms = 0;
 ulong    g_last_config_ms= 0;
+ulong    g_last_health_ms = 0;  // Last /health check timestamp
+int      g_relay_uptime_prev = -2; // -2=first-run  -1=was-down  >=0=last-uptime
 
 // Tick batch accumulator (plain arrays, flushed every TickBatchMs)
 // Max 2000 ticks per batch (at 50ms polling × 20 symbols × flood = safe ceiling)
@@ -67,6 +69,7 @@ int OnInit()
 
    g_last_flush_ms  = GetTickCount64();
    g_last_config_ms = GetTickCount64();
+   g_last_health_ms = GetTickCount64();
 
    Print("✅ Started. Monitoring ", g_sym_count, " symbols");
    return INIT_SUCCEEDED;
@@ -100,6 +103,13 @@ void OnTimer()
    {
       FetchConfig();
       g_last_config_ms = now_ms;
+   }
+
+   // Relay restart detection — every 10s
+   if(now_ms - g_last_health_ms >= 10000)
+   {
+      CheckRelayRestart();
+      g_last_health_ms = now_ms;
    }
 }
 
@@ -309,6 +319,77 @@ void PushHistoricalBulk()
       Print("✅ Historical bulk pushed: ", sym_added, " symbols");
    else
       Print("❌ Historical bulk POST failed — relay may not be running yet");
+}
+
+//==========================================================================
+// SECTION 7b — RELAY RESTART DETECTION
+// Calls GET /health every 10s; if uptime_s drops (relay restarted) or relay
+// was previously unreachable, re-pushes the full 500-bar history.
+//==========================================================================
+void CheckRelayRestart()
+{
+   string url = BackendRelayUrl + "/health";
+   uchar  emptyData[];
+   ArrayResize(emptyData, 0);
+   uchar  result[];
+   string resultHeaders = "";
+
+   ResetLastError();
+   int status = WebRequest("GET", url, "", 3000, emptyData, result, resultHeaders);
+
+   if(status != 200)
+   {
+      // Relay is down — remember so next success triggers re-push
+      if(g_relay_uptime_prev != -1)
+         Print("⚠️ [HEALTH] relay unreachable (HTTP ", status, ") — will re-push history when it returns");
+      g_relay_uptime_prev = -1;
+      return;
+   }
+
+   // Parse uptime_s from JSON response
+   string resp = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+   int pos = StringFind(resp, "\"uptime_s\":");
+   if(pos < 0) return;
+
+   string after = StringSubstr(resp, pos + 11);
+   string numStr = "";
+   for(int i = 0; i < MathMin(StringLen(after), 20); i++)
+   {
+      ushort ch = StringGetCharacter(after, i);
+      if(ch >= '0' && ch <= '9')
+      {
+         uchar c[] = {(uchar)ch};
+         numStr += CharArrayToString(c);
+      }
+      else if(StringLen(numStr) > 0)
+         break;
+   }
+   int uptime = (int)StringToDouble(numStr);
+
+   if(g_relay_uptime_prev == -2)
+   {
+      // First health check after EA init — OnInit() already pushed, just record baseline
+      g_relay_uptime_prev = uptime;
+      Print("🔗 [HEALTH] relay baseline uptime=", uptime, "s");
+   }
+   else if(g_relay_uptime_prev == -1)
+   {
+      // Relay was down, now back — re-push history
+      Print("🔄 [HEALTH] relay back online (uptime=", uptime, "s) — re-pushing history");
+      g_relay_uptime_prev = uptime;
+      PushHistoricalBulk();
+   }
+   else if(uptime < g_relay_uptime_prev)
+   {
+      // Uptime reset — relay restarted
+      Print("🔄 [HEALTH] relay restarted (uptime ", g_relay_uptime_prev, "→", uptime, "s) — re-pushing history");
+      g_relay_uptime_prev = uptime;
+      PushHistoricalBulk();
+   }
+   else
+   {
+      g_relay_uptime_prev = uptime;
+   }
 }
 
 //==========================================================================
