@@ -6,34 +6,27 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { createClient } from "@/utils/supabase/server";
-import { saveStrategy } from "./actions";
+import { saveStrategy, placeManualTrade } from "./actions";
 
 export default async function StrategiesPage() {
   const supabase = await createClient();
   
-  // Fetch connections for the dropdown
   const { data: connections } = await supabase
     .from("mt5_user_connections")
     .select("id, broker_server, account_login")
     .eq("is_active", true);
 
-  // Fetch existing strategies
   const { data: strategies, error } = await supabase
     .from("user_strategies")
-    .select(`
-      *,
-      mt5_user_connections (account_login, broker_server)
-    `)
+    .select(`*, mt5_user_connections (account_login, broker_server)`)
     .order("created_at", { ascending: false });
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold md:text-2xl">Strategy Configuration</h1>
-      </div>
+      <h1 className="text-lg font-semibold md:text-2xl">Strategy Configuration</h1>
 
       <div className="grid gap-6 md:grid-cols-3">
-        {/* ADD STRATEGY FORM */}
+        {/* CONFIGURE RISK */}
         <Card className="md:col-span-1 border shadow-sm">
           <CardHeader>
             <CardTitle>Configure Risk</CardTitle>
@@ -42,48 +35,40 @@ export default async function StrategiesPage() {
           <CardContent>
             <form action={saveStrategy} className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="connection_id">Select Account</Label>
+                <Label>Account</Label>
                 <Select name="connection_id" required>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select an active MT5 account" />
-                  </SelectTrigger>
+                  <SelectTrigger><SelectValue placeholder="Select account" /></SelectTrigger>
                   <SelectContent>
-                    {connections?.map((conn) => (
-                      <SelectItem key={conn.id} value={conn.id}>
-                        {conn.broker_server} - {conn.account_login}
-                      </SelectItem>
+                    {connections?.map((c) => (
+                      <SelectItem key={c.id} value={c.id}>{c.broker_server} — {c.account_login}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
-
               <div className="space-y-2">
-                <Label htmlFor="risk_percent">Risk % per trade</Label>
-                <Input id="risk_percent" name="risk_percent" type="number" step="0.1" max="10" defaultValue="1.0" required />
+                <Label>Risk % per trade</Label>
+                <Input name="risk_percent" type="number" step="0.1" max="10" defaultValue="1.0" required />
               </div>
-
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label htmlFor="max_daily_trades">Max Daily Trades</Label>
-                  <Input id="max_daily_trades" name="max_daily_trades" type="number" defaultValue="5" required />
+                  <Label>Max Daily Trades</Label>
+                  <Input name="max_daily_trades" type="number" defaultValue="5" required />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="max_open_trades">Max Open Trades</Label>
-                  <Input id="max_open_trades" name="max_open_trades" type="number" defaultValue="3" required />
+                  <Label>Max Open Trades</Label>
+                  <Input name="max_open_trades" type="number" defaultValue="3" required />
                 </div>
               </div>
-
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label htmlFor="rr_min">Min Reward/Risk</Label>
-                  <Input id="rr_min" name="rr_min" type="number" step="0.1" defaultValue="1.5" required />
+                  <Label>Min R:R</Label>
+                  <Input name="rr_min" type="number" step="0.1" defaultValue="1.5" required />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="rr_max">Max Reward/Risk</Label>
-                  <Input id="rr_max" name="rr_max" type="number" step="0.1" defaultValue="5.0" required />
+                  <Label>Max R:R</Label>
+                  <Input name="rr_max" type="number" step="0.1" defaultValue="5.0" required />
                 </div>
               </div>
-
               <Button type="submit" className="w-full">Save Configuration</Button>
             </form>
           </CardContent>
@@ -104,23 +89,21 @@ export default async function StrategiesPage() {
                   <TableRow>
                     <TableHead>Account</TableHead>
                     <TableHead>Risk</TableHead>
-                    <TableHead>Daily M/O</TableHead>
-                    <TableHead>Target R:R</TableHead>
+                    <TableHead>Daily / Open</TableHead>
+                    <TableHead>R:R</TableHead>
                     <TableHead>Status</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {strategies.map((strat) => (
-                    <TableRow key={strat.id}>
-                      <TableCell className="font-medium">
-                        {strat.mt5_user_connections?.account_login}
-                      </TableCell>
-                      <TableCell>{strat.risk_percent}%</TableCell>
-                      <TableCell>{strat.max_daily_trades} / {strat.max_open_trades}</TableCell>
-                      <TableCell>{strat.rr_min} - {strat.rr_max}</TableCell>
+                  {strategies.map((s) => (
+                    <TableRow key={s.id}>
+                      <TableCell className="font-medium">{s.mt5_user_connections?.account_login}</TableCell>
+                      <TableCell>{s.risk_percent}%</TableCell>
+                      <TableCell>{s.max_daily_trades} / {s.max_open_trades}</TableCell>
+                      <TableCell>{s.rr_min} – {s.rr_max}</TableCell>
                       <TableCell>
-                        <Badge variant={strat.is_active ? "default" : "secondary"}>
-                          {strat.is_active ? "Active" : "Inactive"}
+                        <Badge variant={s.is_active ? "default" : "secondary"}>
+                          {s.is_active ? "Active" : "Inactive"}
                         </Badge>
                       </TableCell>
                     </TableRow>
@@ -135,6 +118,81 @@ export default async function StrategiesPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* ── MANUAL TRADE PANEL ─────────────────────────────── */}
+      <Card className="border-2 border-orange-500/40 shadow-md bg-orange-500/5">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            🧪 Manual Trade — Live Test
+          </CardTitle>
+          <CardDescription>
+            Inject a trade job directly. The live worker will claim and execute it within seconds.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form action={placeManualTrade} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6 items-end">
+            {/* Connection */}
+            <div className="space-y-2 lg:col-span-2">
+              <Label>Account</Label>
+              <Select name="connection_id" required>
+                <SelectTrigger><SelectValue placeholder="Select account" /></SelectTrigger>
+                <SelectContent>
+                  {connections?.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.broker_server} — {c.account_login}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Symbol */}
+            <div className="space-y-2">
+              <Label>Symbol</Label>
+              <Input name="symbol" placeholder="EURUSD" required />
+            </div>
+
+            {/* Side */}
+            <div className="space-y-2">
+              <Label>Side</Label>
+              <Select name="side" required>
+                <SelectTrigger><SelectValue placeholder="Buy / Sell" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="buy">🟢 Buy</SelectItem>
+                  <SelectItem value="sell">🔴 Sell</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Volume */}
+            <div className="space-y-2">
+              <Label>Volume (lots)</Label>
+              <Input name="volume" type="number" step="0.01" min="0.01" placeholder="0.01" required />
+            </div>
+
+            {/* SL / TP */}
+            <div className="space-y-2">
+              <Label>SL (optional)</Label>
+              <Input name="sl" type="number" step="0.00001" placeholder="0.0" />
+            </div>
+
+            <div className="space-y-2">
+              <Label>TP (optional)</Label>
+              <Input name="tp" type="number" step="0.00001" placeholder="0.0" />
+            </div>
+
+            {/* Submit */}
+            <div className="lg:col-span-6">
+              <Button type="submit" variant="default" className="w-full bg-orange-600 hover:bg-orange-700 text-white font-bold">
+                🚀 Place Trade Now
+              </Button>
+            </div>
+          </form>
+          <p className="mt-3 text-xs text-muted-foreground">
+            After placing, check the <a href="/trades" className="underline">Trades page</a> and <a href="/logs" className="underline">System Logs</a> to see execution status in real-time.
+          </p>
+        </CardContent>
+      </Card>
     </div>
   );
 }

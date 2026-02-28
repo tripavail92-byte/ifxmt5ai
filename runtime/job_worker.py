@@ -477,9 +477,25 @@ def run_worker(connection_id: str):
             time.sleep(2)
             continue
 
-        job_id = job["id"]
+        job_id = job.get("id")
+        if not job_id:
+            logger.warning("Claimed job has no id — skipping phantom row.")
+            backoff.reset()
+            continue
+
+        symbol = job.get("symbol")
+        if not symbol:
+            logger.warning("Job %s has no symbol — marking failed.", job_id)
+            db.complete_trade_job(
+                job_id, "failed",
+                error="Symbol is null — invalid job",
+                error_code="symbol_unavailable",
+            )
+            backoff.reset()
+            continue
+
         logger.info("Claimed job %s (symbol=%s side=%s vol=%s)",
-                    job_id, job["symbol"], job["side"], job["volume"])
+                    job_id, symbol, job.get("side"), job.get("volume"))
 
         # --- Idempotency: DB check ---
         if job.get("status") == "success":
