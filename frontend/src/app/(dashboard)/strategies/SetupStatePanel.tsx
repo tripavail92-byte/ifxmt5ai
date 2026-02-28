@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { createClient } from "@/utils/supabase/client";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -82,32 +83,40 @@ function timeAgo(iso: string): string {
 export function SetupStatePanel({ connectionId }: { connectionId: string }) {
   const [setups, setSetups]   = useState<TradingSetup[]>([]);
   const [loading, setLoading] = useState(true);
-  const [now, setNow]         = useState(Date.now());
+  const [now, setNow]         = useState(0);  // 0 on server — set after mount
   // Prevent SSR — avoids React hydration mismatch (#418)
-  // createBrowserClient behaves differently server-side
+  // createBrowserClient must NOT be called during server rendering
   const [mounted, setMounted] = useState(false);
 
-  // Stable supabase client ref — avoids recreating on every render
-  const supabase = useRef(createClient()).current;
+  // Lazy-initialised after mount — never called on server
+  const supabase = useRef<SupabaseClient | null>(null);
 
-  useEffect(() => { setMounted(true); }, []);
-
-  // ── Initial load ──────────────────────────────────────────────────────────
+  // Create the Supabase client lazily after mount — never runs on server
   useEffect(() => {
+    supabase.current = createClient();
+    setMounted(true);
+    setNow(Date.now());
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Initial load (runs only after mount so supabase.current is set) ────────
+  useEffect(() => {
+    if (!mounted) return;
+    const sb = supabase.current!;
     let cancelled = false;
-    supabase
-      .rpc("get_setups_for_connection", { p_connection_id: connectionId })
+    sb.rpc("get_setups_for_connection", { p_connection_id: connectionId })
       .then(({ data, error }) => {
         if (cancelled) return;
         if (!error && data) setSetups(data as TradingSetup[]);
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [connectionId]);  // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mounted, connectionId]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Realtime subscription ─────────────────────────────────────────────────
   useEffect(() => {
-    const channel = supabase
+    if (!mounted) return;
+    const sb = supabase.current!;
+    const channel = sb
       .channel(`setups-${connectionId}`)
       .on(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -142,14 +151,15 @@ export function SetupStatePanel({ connectionId }: { connectionId: string }) {
       )
       .subscribe();
 
-    return () => { supabase.removeChannel(channel); };
-  }, [connectionId]);  // eslint-disable-line react-hooks/exhaustive-deps
+    return () => { sb.removeChannel(channel); };
+  }, [mounted, connectionId]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Tick "time ago" every 30s ─────────────────────────────────────────────
   useEffect(() => {
+    if (!mounted) return;
     const t = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(t);
-  }, []);
+  }, [mounted]);
 
   // ── Render ────────────────────────────────────────────────────────────────
 
