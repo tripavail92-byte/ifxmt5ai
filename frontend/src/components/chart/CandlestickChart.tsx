@@ -122,10 +122,10 @@ export function CandlestickChart({
   className = "",
 }: CandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-  const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const slLineRef = useRef<IPriceLine | null>(null);
-  const tpLineRef = useRef<IPriceLine | null>(null);
+  const chartRef     = useRef<IChartApi | null>(null);
+  const seriesRef    = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const slLineRef    = useRef<IPriceLine | null>(null);
+  const tpLineRef    = useRef<IPriceLine | null>(null);
   const entryLineRef = useRef<IPriceLine | null>(null);
 
   const [activeTf, setActiveTf] = useState<TF>("H1");
@@ -136,8 +136,7 @@ export function CandlestickChart({
     if (!el) return;
 
     const chart = createChart(el, {
-      width: el.clientWidth,
-      height: el.clientHeight,
+      autoSize: true,
       layout: {
         background: { type: ColorType.Solid, color: COLORS.background },
         textColor: COLORS.text,
@@ -193,19 +192,7 @@ export function CandlestickChart({
     series.setData(SEED_DATA["H1"] as CandlestickData[]);
     chart.timeScale().fitContent();
 
-    // Resize observer — keeps chart filling its container
-    const ro = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) return;
-      chart.applyOptions({
-        width: entry.contentRect.width,
-        height: entry.contentRect.height,
-      });
-    });
-    ro.observe(el);
-
     return () => {
-      ro.disconnect();
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
@@ -315,8 +302,8 @@ export function CandlestickChart({
       {/* Canvas container */}
       <div
         ref={containerRef}
-        className="w-full border-x border-b border-[#2a2a2a] rounded-b-lg overflow-hidden"
-        style={{ height: 300 }}
+        className="w-full border-x border-b border-[#2a2a2a] rounded-b-lg"
+        style={{ height: 300, minHeight: 300 }}
       />
 
       {/* Legend: active price lines */}
