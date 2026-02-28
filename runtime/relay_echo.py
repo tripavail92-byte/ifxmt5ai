@@ -21,6 +21,7 @@ import json
 import hashlib
 import hmac
 import time
+import socketserver
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
@@ -49,7 +50,12 @@ stats = {
 
 # ── Request handler ───────────────────────────────────────────────────────────
 
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+
 class EchoHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # required for MT5 WebRequest POST
 
     def log_message(self, fmt, *args):
         pass  # suppress default Apache-style log; we do our own
@@ -193,6 +199,7 @@ class EchoHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
@@ -202,7 +209,7 @@ class EchoHandler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     print("=" * 60)
     print(f"  IFX Price Bridge — Echo Server")
-    print(f"  Listening on http://localhost:{PORT}")
+    print(f"  Listening on http://127.0.0.1:{PORT}")
     print(f"  Mock symbols: {len(MOCK_SYMBOLS)}")
     print(f"  HMAC verification: {'ON (' + SIGNING_SECRET[:8] + '...)' if SIGNING_SECRET else 'OFF (echo mode)'}")
     print("=" * 60)
@@ -216,7 +223,7 @@ if __name__ == "__main__":
     print("  Press Ctrl+C to stop.")
     print()
 
-    server = HTTPServer(("localhost", PORT), EchoHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), EchoHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
