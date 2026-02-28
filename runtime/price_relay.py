@@ -45,6 +45,38 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+# ─── Setup state machine (optional — no-op if Supabase not configured) ─────────
+try:
+    import os as _os, sys as _sys
+    _root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    if _root not in _sys.path:
+        _sys.path.insert(0, _root)
+    from ai_engine.setup_manager import setup_manager as _setup_manager
+    log_setup = logging.getLogger("setup_manager")
+    log_setup.info("setup_manager imported OK")
+except Exception as _sm_err:
+    _setup_manager = None
+    logging.getLogger("setup_manager").warning(
+        "setup_manager not available: %r — state machine disabled", _sm_err
+    )
+
+
+def _sm_on_tick_batch(conn_id: str, ticks: list) -> None:
+    if _setup_manager is not None:
+        try:
+            _setup_manager.on_tick_batch(conn_id, ticks)
+        except Exception as _e:
+            log.debug("setup_manager.on_tick_batch error: %r", _e)
+
+
+def _sm_on_candle_close(conn_id: str, symbol: str, bar: dict) -> None:
+    if _setup_manager is not None:
+        try:
+            _setup_manager.on_candle_close(conn_id, symbol, bar)
+        except Exception as _e:
+            log.debug("setup_manager.on_candle_close error: %r", _e)
+
+
 # ─── Logging ─────────────────────────────────────────────────────────────────
 
 LOG_DIR = Path(__file__).parent / "logs"
@@ -379,6 +411,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 "candle_buf_syms": sum(
                     len(syms) for syms in candle_buffer.values()
                 ),
+                "setups": _setup_manager.summary() if _setup_manager else None,
             }).encode()
             self._send(200, body)
 
@@ -513,6 +546,9 @@ class RelayHandler(BaseHTTPRequestHandler):
                             "v": c.get("tick_vol", 0),
                         }
 
+            # Evaluate setup state machine on tick data
+            _sm_on_tick_batch(conn_id, ticks)
+
             # Forward to Railway WS
             enqueue_ws({
                 "type":          "tick_batch",
@@ -557,6 +593,9 @@ class RelayHandler(BaseHTTPRequestHandler):
                 f"O={bar['o']} H={bar['h']} L={bar['l']} C={bar['c']} "
                 f"buf={len(candle_buffer[conn_id][symbol])}"
             )
+
+            # Evaluate setup state machine (H1 boundary detection inside)
+            _sm_on_candle_close(conn_id, symbol, bar)
 
             # Forward to Railway WS
             enqueue_ws({
