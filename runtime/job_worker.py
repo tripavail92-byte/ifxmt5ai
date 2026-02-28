@@ -200,7 +200,7 @@ def check_terminal_health(logger: logging.Logger) -> bool:
 # Symbol validation
 # ---------------------------------------------------------------------------
 
-def ensure_symbol_selected(symbol: str, logger: logging.Logger) -> bool:
+def _try_symbol_select_with_retries(symbol: str, logger: logging.Logger) -> bool:
     """Try mt5.symbol_select() up to SYMBOL_SELECT_RETRIES times."""
     for attempt in range(1, SYMBOL_SELECT_RETRIES + 1):
         if mt5.symbol_select(symbol, True):
@@ -211,6 +211,53 @@ def ensure_symbol_selected(symbol: str, logger: logging.Logger) -> bool:
         )
         time.sleep(1)
     return False
+
+
+def ensure_symbol_selected(symbol: str, logger: logging.Logger) -> str | None:
+    """
+    Ensure a tradable symbol is selected.
+    Returns the actual selected symbol name (may differ by case/suffix), or None.
+    """
+    requested = (symbol or "").strip()
+    if not requested:
+        return None
+
+    if _try_symbol_select_with_retries(requested, logger):
+        return requested
+
+    try:
+        all_symbols = mt5.symbols_get() or []
+    except Exception:
+        all_symbols = []
+
+    names = [s.name for s in all_symbols if getattr(s, "name", None)]
+    if not names:
+        return None
+
+    # 1) Case-insensitive exact match (handles BTCUSDM -> BTCUSDm)
+    lower_map = {name.lower(): name for name in names}
+    ci_exact = lower_map.get(requested.lower())
+    if ci_exact and ci_exact != requested:
+        logger.info("Resolved symbol %s -> %s (case-insensitive match)", requested, ci_exact)
+        if _try_symbol_select_with_retries(ci_exact, logger):
+            return ci_exact
+
+    # 2) Suffix fallback by base symbol
+    base = requested.rstrip("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ").lower()
+    if not base:
+        base = requested.lower().rstrip("m")
+    suffix_candidates = [
+        name for name in names
+        if name.lower().startswith(base) and len(name) <= len(base) + 3
+    ]
+    if suffix_candidates:
+        resolved = sorted(suffix_candidates, key=len)[0]
+        if resolved != requested:
+            logger.info("Resolved symbol %s -> %s (suffix fallback)", requested, resolved)
+        if _try_symbol_select_with_retries(resolved, logger):
+            return resolved
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +588,8 @@ def run_worker(connection_id: str):
             continue
 
         # --- Symbol validation ---
-        if not ensure_symbol_selected(job["symbol"], logger):
+        selected_symbol = ensure_symbol_selected(job["symbol"], logger)
+        if not selected_symbol:
             logger.error("Symbol %s unavailable for job %s", job["symbol"], job_id)
             db.log_event("error", "worker", f"Symbol {job['symbol']} unavailable",
                          connection_id, {"job_id": job_id})
@@ -552,6 +600,11 @@ def run_worker(connection_id: str):
             )
             backoff.reset()
             continue
+
+        # Use broker-resolved symbol for tick lookup and order_send.
+        if selected_symbol != job["symbol"]:
+            logger.info("Job %s symbol mapped %s -> %s", job_id, job["symbol"], selected_symbol)
+            job = {**job, "symbol": selected_symbol}
 
         # --- Mark executing ---
         db.mark_trade_job_executing(job_id)
