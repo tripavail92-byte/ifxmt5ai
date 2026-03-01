@@ -329,4 +329,51 @@ $$;
 -- 8) PostgREST schema cache reload
 --    Makes newly created RPCs available immediately.
 -- -----------------------------------------------
+
+-- -----------------------------------------------
+-- 8) Permissions
+--    Some projects revoke default EXECUTE; make it explicit.
+-- -----------------------------------------------
+grant execute on function public.upsert_trading_setup(
+  uuid, uuid, text, text, numeric, numeric, text, uuid
+) to authenticated;
+
+grant execute on function public.get_setups_for_connection(uuid)
+  to authenticated;
+
+grant execute on function public.deactivate_setup(uuid, uuid)
+  to authenticated;
+
+
+-- -----------------------------------------------
+-- 9) Enable Supabase Realtime (optional)
+--    Needed for `postgres_changes` subscriptions.
+-- -----------------------------------------------
+do $$ begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime'
+        and schemaname = 'public'
+        and tablename = 'trading_setups'
+    ) then
+      execute 'alter publication supabase_realtime add table public.trading_setups';
+    end if;
+
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime'
+        and schemaname = 'public'
+        and tablename = 'setup_state_transitions'
+    ) then
+      execute 'alter publication supabase_realtime add table public.setup_state_transitions';
+    end if;
+  end if;
+end $$;
+
+
+-- -----------------------------------------------
+-- 10) PostgREST schema cache reload
+--     Makes newly created RPCs available immediately.
+-- -----------------------------------------------
 notify pgrst, 'reload schema';
