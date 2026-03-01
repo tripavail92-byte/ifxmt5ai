@@ -323,3 +323,10 @@ begin
   return coalesce(v_found, false);
 end;
 $$;
+
+
+-- -----------------------------------------------
+-- 8) PostgREST schema cache reload
+--    Makes newly created RPCs available immediately.
+-- -----------------------------------------------
+notify pgrst, 'reload schema';
