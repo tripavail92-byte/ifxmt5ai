@@ -161,6 +161,11 @@ export function CandlestickChart({
     localStorage.getItem("ifx_chart_tf") as TF | null || "M15"
   );
   const [hasLiveData, setHasLiveData] = useState(false);
+  const hasLiveDataRef = useRef(false);
+
+  useEffect(() => {
+    hasLiveDataRef.current = hasLiveData;
+  }, [hasLiveData]);
 
   // ── Mount / unmount chart ──────────────────────────────────────────────────
   useEffect(() => {
@@ -275,9 +280,12 @@ export function CandlestickChart({
         setHasLiveData(true);
       })
       .catch(() => {
-        // Fallback to seed data on error
-        series.setData(SEED_DATA[activeTf] as CandlestickData[]);
-        chart.timeScale().fitContent();
+        // Fallback to seed data only if we don't have live data yet.
+        // This prevents chart "flicker" if the history endpoint blips.
+        if (!hasLiveDataRef.current) {
+          series.setData(SEED_DATA[activeTf] as CandlestickData[]);
+          chart.timeScale().fitContent();
+        }
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveSymbol, activeTf]);
