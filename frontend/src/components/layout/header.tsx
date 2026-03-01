@@ -31,9 +31,9 @@ export function Header() {
   const { setTheme } = useTheme();
   const router = useRouter();
   const pathname = usePathname();
-  const supabase = createClient();
 
   const handleSignOut = async () => {
+    const supabase = createClient();
     const { error } = await supabase.auth.signOut();
     if (error) {
       toast.error(error.message);
