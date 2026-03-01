@@ -106,8 +106,18 @@ class Mt5State {
     if (updated) this.symbols.set(connId, knownSymbols);
 
     const updatedSymbols: string[] = [];
+    const closedBars: Array<{ symbol: string; bar: CandleBar }> = [];
     for (const c of formingCandles) {
       const bar: CandleBar = { t: c.time, o: c.open, h: c.high, l: c.low, c: c.close, v: c.tick_vol };
+
+      // If the EA does not send explicit candle_close messages, we can still
+      // detect closes by observing the forming bar's open-time rollover.
+      const prev = formingMap.get(c.symbol);
+      if (prev && prev.t && bar.t && prev.t !== bar.t) {
+        this.pushCandle(connId, c.symbol, prev);
+        closedBars.push({ symbol: c.symbol, bar: prev });
+      }
+
       formingMap.set(c.symbol, bar);
       updatedSymbols.push(c.symbol);
     }
@@ -120,6 +130,13 @@ class Mt5State {
         if (b) formingSnap[sym] = b;
       }
       this.broadcast({ type: "candle_update", connection_id: connId, forming: formingSnap });
+    }
+
+    // Broadcast synthetic candle closes (derived from forming rollover)
+    if (closedBars.length) {
+      for (const e of closedBars) {
+        this.broadcast({ type: "candle_close", connection_id: connId, symbol: e.symbol, bar: e.bar });
+      }
     }
 
     // Broadcast price updates
