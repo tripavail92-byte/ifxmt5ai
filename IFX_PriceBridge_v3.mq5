@@ -37,6 +37,7 @@ ulong    g_last_flush_ms = 0;
 ulong    g_last_config_ms= 0;
 ulong    g_last_health_ms = 0;  // Last /health check timestamp
 int      g_relay_uptime_prev = -2; // -2=first-run  -1=was-down  >=0=last-uptime
+bool     g_historical_seeded = false; // true once /historical-bulk succeeds
 
 // Tick batch accumulator (plain arrays, flushed every TickBatchMs)
 // Max 2000 ticks per batch (at 50ms polling × 20 symbols × flood = safe ceiling)
@@ -261,7 +262,10 @@ void SendCandleClose(const string symbol, int sym_idx)
 void PushHistoricalBulk()
 {
    if(g_sym_count == 0)
+   {
+      g_historical_seeded = false;
       return;
+   }
 
    Print("📦 Pushing ", HistoricalBarsOnInit, " × 1m historical bars for ", g_sym_count, " symbols...");
 
@@ -312,13 +316,20 @@ void PushHistoricalBulk()
    if(sym_added == 0)
    {
       Print("❌ Historical push: no symbols had data");
+      g_historical_seeded = false;
       return;
    }
 
    if(SignedPost("/historical-bulk", json, 15000))
+   {
+      g_historical_seeded = true;
       Print("✅ Historical bulk pushed: ", sym_added, " symbols");
+   }
    else
+   {
+      g_historical_seeded = false;
       Print("❌ Historical bulk POST failed — relay may not be running yet");
+   }
 }
 
 //==========================================================================
@@ -368,9 +379,18 @@ void CheckRelayRestart()
 
    if(g_relay_uptime_prev == -2)
    {
-      // First health check after EA init — OnInit() already pushed, just record baseline
+      // First health check after EA init.
+      // If init push failed (relay not up yet), seed history now.
       g_relay_uptime_prev = uptime;
-      Print("🔗 [HEALTH] relay baseline uptime=", uptime, "s");
+      if(!g_historical_seeded)
+      {
+         Print("🔄 [HEALTH] relay reachable (uptime=", uptime, "s) but history not seeded — pushing now");
+         PushHistoricalBulk();
+      }
+      else
+      {
+         Print("🔗 [HEALTH] relay baseline uptime=", uptime, "s");
+      }
    }
    else if(g_relay_uptime_prev == -1)
    {

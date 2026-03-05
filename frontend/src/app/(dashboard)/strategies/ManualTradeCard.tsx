@@ -105,7 +105,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   const [slotSetupIds, setSlotSetupIds] = useState<Record<string, string>>({});
 
   // Live feed
-  const { forming, lastClose, prices, isConnected } = usePriceFeed();
+  const { forming, lastClose, prices, isConnected } = usePriceFeed(autoConn?.id);
 
   // Hydrate from localStorage on first render
   useEffect(() => {
@@ -315,6 +315,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
           <CandlestickChart
             symbol={chartSym}
             liveSymbol={chartSym}
+            connId={autoConn?.id}
             sl={slValue}
             tp={tpValue}
             forming={forming}

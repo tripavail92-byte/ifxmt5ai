@@ -37,7 +37,7 @@ export interface CandlestickChartProps {
   className?: string;
   // Live feed props (Sprint 5)
   liveSymbol?: string;            // e.g. "BTCUSDm" — enables live feed
-  connId?: string;                // optional connection filter
+    connId?: string;                // optional connection filter
   forming?: Record<string, RawCandleBar>;    // from usePriceFeed
   lastClose?: { symbol: string; bar: RawCandleBar } | null;  // from usePriceFeed
 }
@@ -144,7 +144,7 @@ export function CandlestickChart({
   symbol = "EURUSD",
   className = "",
   liveSymbol,
-  connId: _connId,
+    connId,
   forming,
   lastClose,
 }: CandlestickChartProps) {
@@ -262,7 +262,8 @@ export function CandlestickChart({
     if (!series || !chart) return;
 
     const apiTf = TF_API[activeTf];
-    const url   = `/api/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${apiTf}&count=1500`;
+      const connQ = connId ? `&conn_id=${encodeURIComponent(connId)}` : "";
+      const url   = `/api/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${apiTf}&count=1500${connQ}`;
 
     fetch(url)
       .then(r => r.json())
@@ -288,7 +289,7 @@ export function CandlestickChart({
         }
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveSymbol, activeTf]);
+  }, [liveSymbol, activeTf, connId]);
 
   // ── Apply incoming forming (live tick) update ──────────────────────────────
   useEffect(() => {
