@@ -291,6 +291,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                 type="button"
                 onClick={() => switchSlot(slot)}
                 className={`w-full flex items-center justify-between gap-2 px-4 py-2.5 text-left transition-colors
+                  pr-10
                   ${isAct
                     ? "bg-[#141414] border-b-2 border-orange-500"
                     : "hover:bg-[#111] border-b-2 border-transparent"
@@ -308,14 +309,19 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                     </div>
                   )}
                 </div>
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); setShowSymbolPicker(slot); setSymbolSearch(""); }}
-                  className="text-[10px] text-gray-600 hover:text-orange-400 px-1.5 py-0.5 rounded hover:bg-orange-500/10 transition-colors"
-                  title="Change symbol"
-                >
-                  ▾
-                </button>
+              </button>
+
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowSymbolPicker(slot);
+                  setSymbolSearch("");
+                }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-gray-600 hover:text-orange-400 px-1.5 py-0.5 rounded hover:bg-orange-500/10 transition-colors"
+                title="Change symbol"
+              >
+                ▾
               </button>
 
               {/* Symbol picker dropdown */}
