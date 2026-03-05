@@ -250,14 +250,25 @@ export function CandlestickChart({
     const series = seriesRef.current;
     const chart = chartRef.current;
     if (!series || !chart) return;
-    // If no live symbol, fall back to seed data immediately
-    if (!liveSymbol) {
+    // While waiting for the live fetch, immediately show seed data for this TF
+    // so the timeframe switch feels instant. The fetch effect will replace
+    // it with real bars when they arrive (incoming > 3).
+    if (lastHistoryCountRef.current <= 3) {
+      // No real history yet — show placeholder seed for the selected TF
+      const seedTf = SEED_DATA[tf];
+      series.setData(seedTf as CandlestickData[]);
+      lastBarTimeRef.current = seedTf.length ? seedTf[seedTf.length - 1].time as number : 0;
+      lastHistoryCountRef.current = 0; // mark as placeholder so fetch can replace
+      chart.timeScale().fitContent();
+    } else if (!liveSymbol) {
+      // No live symbol at all — always use seed data
       const seedTf = SEED_DATA[tf];
       series.setData(seedTf as CandlestickData[]);
       lastBarTimeRef.current = seedTf.length ? seedTf[seedTf.length - 1].time as number : 0;
       chart.timeScale().fitContent();
     }
-    // When liveSymbol is set, the fetch effect below handles the update
+    // When we have real history (lastHistoryCountRef > 3), the fetch effect
+    // will load the real bars for the new TF automatically.
   }, [liveSymbol]);
 
   // ── Fetch live candle history from Railway ─────────────────────────────────
@@ -267,22 +278,36 @@ export function CandlestickChart({
     const chart  = chartRef.current;
     if (!series || !chart) return;
 
-    const apiTf = TF_API[activeTf];
-      const connQ = connId ? `&conn_id=${encodeURIComponent(connId)}` : "";
-      const url   = `/api/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${apiTf}&count=1500${connQ}`;
+    // Capture activeTf in a local variable so stale closures don't overwrite
+    const tf = activeTf;
+    const ac = new AbortController();
 
-    fetch(url)
+    const apiTf = TF_API[tf];
+    const connQ = connId ? `&conn_id=${encodeURIComponent(connId)}` : "";
+    const url   = `/api/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${apiTf}&count=1500${connQ}`;
+
+    fetch(url, { signal: ac.signal })
       .then(r => r.json())
       .then((data: { bars: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }> }) => {
-        if (!data.bars?.length || !seriesRef.current) return;
+        if (ac.signal.aborted || !seriesRef.current) return;
 
-        // Guard against transient tiny payloads (e.g. single-candle response
-        // during a cold start) that would wipe an already healthy chart.
-        const incoming = data.bars.length;
+        const incoming = data.bars?.length ?? 0;
         const previous = lastHistoryCountRef.current;
-        const isTinyDrop = previous >= 50 && incoming <= 3;
-        if (isTinyDrop) return;
 
+        // If the API returned ≤3 bars, we have no real history yet.
+        // Either keep current data (if already healthy) or show proper seed
+        // data so the chart at least reflects the correct timeframe.
+        if (incoming <= 3) {
+          if (previous > 3) return; // already have good data — don't downgrade
+          // Show seed data for the active TF so all TFs look different
+          const seed = SEED_DATA[tf];
+          series.setData(seed as CandlestickData[]);
+          lastBarTimeRef.current = seed.length ? seed[seed.length - 1].time as number : 0;
+          chart.timeScale().fitContent();
+          return;
+        }
+
+        // We have real history — load it
         const mapped: OHLCBar[] = data.bars.map(b => ({
           time:  b.t as Time,
           open:  b.o,
@@ -296,14 +321,19 @@ export function CandlestickChart({
         chartRef.current?.timeScale().fitContent();
         setHasLiveData(true);
       })
-      .catch(() => {
-        // Fallback to seed data only if we don't have live data yet.
-        // This prevents chart "flicker" if the history endpoint blips.
+      .catch((err) => {
+        if ((err as Error)?.name === "AbortError") return;
+        // Network error — show seed for this TF if no live data yet
         if (!hasLiveDataRef.current) {
-          series.setData(SEED_DATA[activeTf] as CandlestickData[]);
+          const seed = SEED_DATA[tf];
+          series.setData(seed as CandlestickData[]);
+          lastBarTimeRef.current = seed.length ? seed[seed.length - 1].time as number : 0;
           chart.timeScale().fitContent();
         }
       });
+
+    // Cancel in-flight request if symbol/TF/connId changes before it resolves
+    return () => { ac.abort(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveSymbol, activeTf, connId]);
 

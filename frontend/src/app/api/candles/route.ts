@@ -71,7 +71,12 @@ export async function GET(req: NextRequest) {
   }
 
   // Local in-memory history (volatile across restarts/instance switches)
-  const localAll = mt5State.getCandles(connId, symbol, tf, 1_000_000);
+  // If conn_id was provided but matched nothing, fall back to any connection
+  // (handles the case where the EA's connection_id ≠ frontend autoConn.id).
+  let localAll = mt5State.getCandles(connId, symbol, tf, 1_000_000);
+  if (!localAll.length && connId) {
+    localAll = mt5State.getCandles("", symbol, tf, 1_000_000);
+  }
   const localBars = count < localAll.length ? localAll.slice(-count) : localAll;
 
   // Prefer whichever source has more history — relay is authoritative when healthy
