@@ -262,7 +262,7 @@ export function CandlestickChart({
     if (!series || !chart) return;
 
     const apiTf = TF_API[activeTf];
-    const url   = `/api/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${apiTf}&count=300`;
+    const url   = `/api/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${apiTf}&count=1500`;
 
     fetch(url)
       .then(r => r.json())

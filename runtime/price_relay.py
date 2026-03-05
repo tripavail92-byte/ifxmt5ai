@@ -45,6 +45,25 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+
+def _load_dotenv(dotenv_path: Path) -> None:
+    """Best-effort .env loader (does not override existing env vars)."""
+    try:
+        if not dotenv_path.exists():
+            return
+        for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if (not line) or line.startswith("#") or ("=" not in line):
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except Exception:
+        # Never fail relay startup because of a dotenv parsing issue.
+        return
+
 # ─── Setup state machine (optional — no-op if Supabase not configured) ─────────
 try:
     import os as _os, sys as _sys
@@ -94,11 +113,17 @@ log = logging.getLogger("price_relay")
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
+# Load workspace .env (so the relay can be configured consistently with the rest
+# of the runtime). Environment variables already present take precedence.
+_WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+_load_dotenv(_WORKSPACE_ROOT / ".env")
+
 PORT             = int(os.getenv("RELAY_PORT", "8082"))
 RELAY_SECRET     = os.getenv("RELAY_SECRET", "")              # blank = skip HMAC verify
 RAILWAY_INGEST_URL = os.getenv("RAILWAY_INGEST_URL", "")      # https://....railway.app/api/mt5/ingest
 RAILWAY_TOKEN    = os.getenv("RAILWAY_RELAY_TOKEN", "")       # Bearer token for Railway ingest
-CANDLE_MAXBARS   = int(os.getenv("RELAY_CANDLE_MAXBARS", "1500"))  # ~25h of 1m data
+# Default to ~7 days of 1m data per symbol (override via RELAY_CANDLE_MAXBARS)
+CANDLE_MAXBARS   = int(os.getenv("RELAY_CANDLE_MAXBARS", "10000"))
 
 # Timeframe aggregation map  {tf_label -> minutes}
 TF_MINUTES = {
@@ -684,6 +709,26 @@ class RelayHandler(BaseHTTPRequestHandler):
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 def main():
+    expected_venv_python = _WORKSPACE_ROOT / ".venv" / "Scripts" / "python.exe"
+    try:
+        exe_path = Path(sys.executable).resolve()
+    except Exception:
+        exe_path = Path(sys.executable)
+
+    if expected_venv_python.exists():
+        try:
+            expected_path = expected_venv_python.resolve()
+        except Exception:
+            expected_path = expected_venv_python
+
+        if exe_path != expected_path:
+            log.error(
+                "Refusing to run with non-venv Python. "
+                f"Expected: {expected_path} | Got: {exe_path}"
+            )
+            log.error(f"Run with: {expected_path} runtime/price_relay.py")
+            sys.exit(2)
+
     log.info("=" * 60)
     log.info("  IFX Price Bridge -- Production Relay  (Sprint 3)")
     log.info(f"  Listening on http://127.0.0.1:{PORT}")

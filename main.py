@@ -16,14 +16,51 @@ import sys
 import os
 from pathlib import Path
 
+
+def load_dotenv(dotenv_path: Path) -> None:
+    if not dotenv_path.exists():
+        return
+
+    for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value
+
 # Ensure all submodule folders are on the path
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent
 for folder in ['runtime', 'risk_engine', 'ai_engine', 'job_queue']:
     sys.path.insert(0, str(ROOT / folder))
 sys.path.insert(0, str(ROOT))
 
 
 def main():
+    load_dotenv(ROOT / ".env")
+
+    expected_venv_python = ROOT / ".venv" / "Scripts" / "python.exe"
+    try:
+        exe_path = Path(sys.executable).resolve()
+    except Exception:
+        exe_path = Path(sys.executable)
+
+    if expected_venv_python.exists():
+        try:
+            expected_path = expected_venv_python.resolve()
+        except Exception:
+            expected_path = expected_venv_python
+
+        if exe_path != expected_path:
+            print(
+                "Refusing to run with non-venv Python. "
+                f"Expected: {expected_path} | Got: {exe_path}"
+            )
+            print(f"Run with: {expected_path} main.py <command>")
+            sys.exit(2)
+
     if len(sys.argv) < 2:
         print("Usage: python main.py [supervisor|worker <conn_id>|scheduler|poller]")
         sys.exit(1)

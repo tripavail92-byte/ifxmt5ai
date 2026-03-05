@@ -30,6 +30,30 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+
+def _enforce_venv() -> None:
+    root = Path(__file__).parent.parent
+    expected = root / ".venv" / "Scripts" / "python.exe"
+    if not expected.exists():
+        return
+
+    try:
+        exe_path = Path(sys.executable).resolve()
+        expected_path = expected.resolve()
+    except Exception:
+        exe_path = Path(sys.executable)
+        expected_path = expected
+
+    if exe_path != expected_path:
+        print(
+            "Refusing to run supervisor with non-venv Python. "
+            f"Expected: {expected_path} | Got: {exe_path}"
+        )
+        raise SystemExit(2)
+
+
+_enforce_venv()
+
 import psutil
 
 import db_client as db

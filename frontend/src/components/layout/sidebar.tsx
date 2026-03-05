@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import { LayoutDashboard, Network, Settings, History, Activity } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -15,6 +16,13 @@ const navItems = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!mounted) return null;
 
   return (
     <div className="hidden border-r bg-muted/40 md:block md:w-64 lg:w-72 shrink-0 h-screen sticky top-0">

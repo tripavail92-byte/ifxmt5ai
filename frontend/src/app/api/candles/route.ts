@@ -16,6 +16,42 @@ import { mt5State, TF_MINUTES } from "@/lib/mt5-state";
 
 export const runtime = "nodejs";
 
+const PRICE_RELAY_URL = (process.env.PRICE_RELAY_URL ?? "").trim();
+
+async function fetchRelayCandles(opts: {
+  symbol: string;
+  tf: string;
+  count: number;
+  connId?: string;
+}): Promise<Array<{ t: number; o: number; h: number; l: number; c: number; v: number }> | null> {
+  if (!PRICE_RELAY_URL) return null;
+
+  const url = new URL("/candles", PRICE_RELAY_URL);
+  url.searchParams.set("symbol", opts.symbol);
+  url.searchParams.set("tf", opts.tf);
+  url.searchParams.set("count", String(opts.count));
+  if (opts.connId) url.searchParams.set("conn_id", opts.connId);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1200);
+  try {
+    const resp = await fetch(url.toString(), {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as { bars?: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }> };
+    if (!data?.bars?.length) return [];
+    return data.bars;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
 
@@ -34,10 +70,24 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const bars = mt5State.getCandles(connId, symbol, tf, count);
+  // Local in-memory history (what we have since Railway last boot / since relay pushed)
+  const localAll = mt5State.getCandles(connId, symbol, tf, 1_000_000);
+  const localBars = count < localAll.length ? localAll.slice(-count) : localAll;
+
+  // Optional: proxy to price_relay.py for deeper persisted history.
+  // Use it when our local buffer is empty or clearly shorter than requested.
+  let bars = localBars;
+  let source: "memory" | "relay" = "memory";
+  if (PRICE_RELAY_URL && localBars.length < count) {
+    const relayBars = await fetchRelayCandles({ symbol, tf, count, connId: connId || undefined });
+    if (relayBars && relayBars.length >= bars.length) {
+      bars = relayBars;
+      source = "relay";
+    }
+  }
 
   return NextResponse.json(
-    { symbol, tf, count: bars.length, bars },
+    { symbol, tf, count: bars.length, total: localAll.length, source, bars },
     {
       headers: {
         // Short cache — chart can poll every few seconds for latest

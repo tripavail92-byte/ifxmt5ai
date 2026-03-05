@@ -33,6 +33,30 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+
+def _enforce_venv() -> None:
+    root = Path(__file__).parent.parent
+    expected = root / ".venv" / "Scripts" / "python.exe"
+    if not expected.exists():
+        return
+
+    try:
+        exe_path = Path(sys.executable).resolve()
+        expected_path = expected.resolve()
+    except Exception:
+        exe_path = Path(sys.executable)
+        expected_path = expected
+
+    if exe_path != expected_path:
+        print(
+            "Refusing to run worker with non-venv Python. "
+            f"Expected: {expected_path} | Got: {exe_path}"
+        )
+        raise SystemExit(2)
+
+
+_enforce_venv()
+
 import MetaTrader5 as mt5
 
 import db_client as db
@@ -545,6 +569,35 @@ def run_worker(connection_id: str):
     # Sync live symbol list from broker to Supabase (for frontend dropdown)
     try:
         all_symbols = mt5.symbols_get()
+
+        # On some terminals, symbols_get() can return only a small MarketWatch
+        # subset. Attempt a broader fetch (group '*') when the list is tiny.
+        try:
+            total = mt5.symbols_total()
+        except Exception:
+            total = None
+
+        if (not all_symbols) or (len(all_symbols) < 20 and (total is None or total > len(all_symbols))):
+            expanded = None
+            # MetaTrader5 Python API supports symbols_get(group="*") on most builds.
+            for attempt in (
+                ("group", "*"),
+                (None, "*"),
+            ):
+                try:
+                    if attempt[0] == "group":
+                        expanded = mt5.symbols_get(group=attempt[1])
+                    else:
+                        expanded = mt5.symbols_get(attempt[1])
+                except TypeError:
+                    expanded = None
+                except Exception:
+                    expanded = None
+
+                if expanded and len(expanded) > (len(all_symbols) if all_symbols else 0):
+                    all_symbols = expanded
+                    break
+
         if all_symbols:
             rows = [
                 {

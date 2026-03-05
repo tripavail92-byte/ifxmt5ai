@@ -43,7 +43,14 @@ export const TF_MINUTES: Record<string, number> = {
   "1d":  1440,
 };
 
-const CANDLE_MAXBARS = 1500;  // ~25h of 1m data per symbol
+function parseMaxBars(raw: string | undefined, fallback: number): number {
+  const n = Number.parseInt((raw ?? "").trim(), 10);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.max(300, Math.min(n, 50_000));
+}
+
+// Default to ~7 days of 1m data per symbol. Override via MT5_CANDLE_MAXBARS.
+const CANDLE_MAXBARS = parseMaxBars(process.env.MT5_CANDLE_MAXBARS, 10_000);
 
 // ─── State class ─────────────────────────────────────────────────────────────
 

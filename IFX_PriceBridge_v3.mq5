@@ -554,12 +554,23 @@ bool SignedPost(const string path, const string json, int timeout_ms)
 
    ResetLastError();
    int status = WebRequest("POST", url, headers, timeout_ms, post, result, resultHeaders);
+   int err = GetLastError();
 
    if(status >= 200 && status < 300)
       return true;
 
    string resp = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
-   Print("❌ POST ", path, " → HTTP ", status, " | ", StringSubstr(resp, 0, 120));
+
+   if(status == -1)
+   {
+      Print("❌ POST ", path, " → HTTP -1 (WebRequest failed) err=", err,
+            " | url=", url,
+            " | check MT5: Tools→Options→Expert Advisors→Allow WebRequest");
+   }
+   else
+   {
+      Print("❌ POST ", path, " → HTTP ", status, " err=", err, " | ", StringSubstr(resp, 0, 120));
+   }
    return false;
 }
 
