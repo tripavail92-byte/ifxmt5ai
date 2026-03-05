@@ -299,6 +299,9 @@ export function CandlestickChart({
     if (!series) return;
     const tfSec = TF_SECONDS[activeTf];
     series.update(snapToTf(bar, tfSec) as CandlestickData);
+    if (!hasLiveDataRef.current) {
+      setHasLiveData(true);
+    }
   }, [liveSymbol, forming, activeTf]);
 
   // ── Apply candle close ─────────────────────────────────────────────────────
@@ -309,6 +312,9 @@ export function CandlestickChart({
     if (!series) return;
     const tfSec = TF_SECONDS[activeTf];
     series.update(snapToTf(lastClose.bar, tfSec) as CandlestickData);
+    if (!hasLiveDataRef.current) {
+      setHasLiveData(true);
+    }
   }, [liveSymbol, lastClose, activeTf]);
 
   // ── SL price line ──────────────────────────────────────────────────────────

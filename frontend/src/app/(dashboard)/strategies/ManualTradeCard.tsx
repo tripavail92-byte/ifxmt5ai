@@ -30,7 +30,7 @@ interface Symbol {
 
 const STORAGE_KEY_SYMBOLS = "ifx_chart_symbols";
 const STORAGE_KEY_ACTIVE  = "ifx_chart_active";
-const DEFAULT_SYMBOLS      = ["BTCUSDm", "ETHUSDm"];
+const DEFAULT_SYMBOLS      = ["BTCUSDm", "BTCUSDm"];
 
 // Per-symbol default zone percentages (matches backend asset_config_service)
 const ZONE_DEFAULTS: Record<string, number> = {
@@ -62,17 +62,12 @@ function calcZone(ep: number, zp: number) {
 
 function loadStoredSymbols(): [string, string] {
   if (typeof window === "undefined") return DEFAULT_SYMBOLS as [string, string];
-  try {
-    const v = JSON.parse(localStorage.getItem(STORAGE_KEY_SYMBOLS) ?? "null");
-    if (Array.isArray(v) && v.length === 2) return v as [string, string];
-  } catch { /* ignore */ }
   return DEFAULT_SYMBOLS as [string, string];
 }
 
 function loadStoredActive(slots: [string, string]): 0 | 1 {
-  if (typeof window === "undefined") return 0;
-  const v = localStorage.getItem(STORAGE_KEY_ACTIVE);
-  return v === "1" ? 1 : 0;
+  void slots;
+  return 0;
 }
 
 export function ManualTradeCard({ connections }: { connections: Connection[] }) {
@@ -114,11 +109,10 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
 
   // Hydrate from localStorage on first render
   useEffect(() => {
-    const stored = loadStoredSymbols();
-    const active = loadStoredActive(stored);
-    setSlots(stored);
-    setActiveSlot(active);
-    setFormSymbol(stored[active]);
+    const fixed = DEFAULT_SYMBOLS as [string, string];
+    setSlots(fixed);
+    setActiveSlot(0);
+    setFormSymbol("BTCUSDm");
     setHydrated(true);
   }, []);
 
@@ -233,7 +227,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     setSetupResult(null);
   }, [slots[activeSlot]]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const chartSym  = hydrated ? slots[activeSlot] : DEFAULT_SYMBOLS[0];
+  const chartSym  = "BTCUSDm";
   const livePrice = prices[chartSym];
 
   // Zone computation
@@ -279,9 +273,9 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
         </div>
       </div>
 
-      {/* ── Symbol slot tabs ── */}
+      {/* ── Active symbol (single) ── */}
       <div className="flex border-b border-[#1e1e1e] bg-[#0d0d0d]" ref={pickerRef}>
-        {([0, 1] as const).map((slot) => {
+        {([0] as const).map((slot) => {
           const sym   = slots[slot];
           const live  = prices[sym];
           const isAct = activeSlot === slot;
@@ -310,52 +304,6 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                   )}
                 </div>
               </button>
-
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShowSymbolPicker(slot);
-                  setSymbolSearch("");
-                }}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-gray-600 hover:text-orange-400 px-1.5 py-0.5 rounded hover:bg-orange-500/10 transition-colors"
-                title="Change symbol"
-              >
-                ▾
-              </button>
-
-              {/* Symbol picker dropdown */}
-              {showSymbolPicker === slot && (
-                <div className="absolute top-full left-0 z-50 w-72 bg-[#161616] border border-[#2a2a2a] rounded-b-lg shadow-2xl">
-                  <div className="p-2 border-b border-[#222]">
-                    <Input
-                      autoFocus
-                      placeholder="Search symbol…"
-                      value={symbolSearch}
-                      onChange={(e) => setSymbolSearch(e.target.value)}
-                      className="h-7 text-xs bg-[#0a0a0a] border-[#2a2a2a] text-white placeholder:text-gray-600"
-                    />
-                  </div>
-                  <div className="max-h-52 overflow-y-auto">
-                    {filtered.length === 0 ? (
-                      <div className="px-3 py-2 text-xs text-gray-600 text-center">No results</div>
-                    ) : filtered.map((s) => (
-                      <button
-                        key={s.symbol}
-                        type="button"
-                        onClick={() => selectSlotSymbol(slot, s.symbol)}
-                        className={`w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-orange-500/10 transition-colors
-                          ${slots.includes(s.symbol) ? "text-orange-400" : "text-gray-300"}`}
-                      >
-                        <span className="font-mono text-xs font-semibold">{s.symbol}</span>
-                        {s.description && (
-                          <span className="text-[10px] text-gray-600 truncate max-w-[140px]">{s.description}</span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
           );
         })}
