@@ -74,13 +74,14 @@ export async function GET(req: NextRequest) {
   const localAll = mt5State.getCandles(connId, symbol, tf, 1_000_000);
   const localBars = count < localAll.length ? localAll.slice(-count) : localAll;
 
-  // Prefer relay history first because it is the authoritative buffered source.
-  // This avoids "1 candle after refresh" when the Next.js process restarts.
+  // Prefer whichever source has more history — relay is authoritative when healthy
+  // (avoids "1 candle after refresh" when Next.js restarts), but fall back to
+  // local when the relay only has its forming bar (0 closed bars yet).
   let bars = localBars;
   let source: "memory" | "relay" = "memory";
 
   const relayBars = await fetchRelayCandles({ symbol, tf, count, connId: connId || undefined });
-  if (relayBars && relayBars.length > 0) {
+  if (relayBars && relayBars.length > bars.length) {
     bars = relayBars;
     source = "relay";
   }

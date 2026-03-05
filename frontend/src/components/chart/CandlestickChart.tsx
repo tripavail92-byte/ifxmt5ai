@@ -155,6 +155,7 @@ export function CandlestickChart({
   const tpLineRef    = useRef<IPriceLine | null>(null);
   const entryLineRef = useRef<IPriceLine | null>(null);
   const lastHistoryCountRef = useRef<number>(0);
+  const lastBarTimeRef = useRef<number>(0); // tracks time of series' last bar for update guards
 
   const [activeTf, setActiveTf] = useState<TF>(() =>
     // Default M15 for live (shows bars quickly); H1 for seed data
@@ -227,7 +228,9 @@ export function CandlestickChart({
     chartRef.current = chart;
     seriesRef.current = series;
 
-    series.setData(SEED_DATA["H1"] as CandlestickData[]);
+    const seedH1 = SEED_DATA["H1"];
+    series.setData(seedH1 as CandlestickData[]);
+    lastBarTimeRef.current = seedH1.length ? seedH1[seedH1.length - 1].time as number : 0;
     chart.timeScale().fitContent();
 
     return () => {
@@ -249,7 +252,9 @@ export function CandlestickChart({
     if (!series || !chart) return;
     // If no live symbol, fall back to seed data immediately
     if (!liveSymbol) {
-      series.setData(SEED_DATA[tf] as CandlestickData[]);
+      const seedTf = SEED_DATA[tf];
+      series.setData(seedTf as CandlestickData[]);
+      lastBarTimeRef.current = seedTf.length ? seedTf[seedTf.length - 1].time as number : 0;
       chart.timeScale().fitContent();
     }
     // When liveSymbol is set, the fetch effect below handles the update
@@ -287,6 +292,7 @@ export function CandlestickChart({
         }));
         seriesRef.current.setData(mapped as CandlestickData[]);
         lastHistoryCountRef.current = incoming;
+        lastBarTimeRef.current = mapped.length ? mapped[mapped.length - 1].time as number : 0;
         chartRef.current?.timeScale().fitContent();
         setHasLiveData(true);
       })
@@ -309,7 +315,11 @@ export function CandlestickChart({
     const series = seriesRef.current;
     if (!series) return;
     const tfSec = TF_SECONDS[activeTf];
-    series.update(snapToTf(bar, tfSec) as CandlestickData);
+    const snappedForming = snapToTf(bar, tfSec);
+    try {
+      series.update(snappedForming as CandlestickData);
+      lastBarTimeRef.current = Math.max(lastBarTimeRef.current, snappedForming.time as number);
+    } catch { /* stale or out-of-order forming bar — skip */ }
     if (!hasLiveDataRef.current) {
       setHasLiveData(true);
     }
@@ -322,7 +332,15 @@ export function CandlestickChart({
     const series = seriesRef.current;
     if (!series) return;
     const tfSec = TF_SECONDS[activeTf];
-    series.update(snapToTf(lastClose.bar, tfSec) as CandlestickData);
+    const snappedClose = snapToTf(lastClose.bar, tfSec);
+    const closeTime = snappedClose.time as number;
+    // Skip if this close belongs to a bar that's no longer the last in the series.
+    // This happens at TF boundaries: e.g. the 13:59 close snaps to 13:45 M15
+    // after the chart has already appended a 14:00 forming bar.
+    if (closeTime < lastBarTimeRef.current) return;
+    try {
+      series.update(snappedClose as CandlestickData);
+    } catch { /* skip */ }
     if (!hasLiveDataRef.current) {
       setHasLiveData(true);
     }
