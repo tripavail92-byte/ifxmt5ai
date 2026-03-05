@@ -164,10 +164,23 @@ export function CandlestickChart({
   );
   const [hasLiveData, setHasLiveData] = useState(false);
   const hasLiveDataRef = useRef(false);
+  // Incremented by the retry timer to re-trigger the fetch effect
+  const [fetchRevision, setFetchRevision] = useState(0);
 
   useEffect(() => {
     hasLiveDataRef.current = hasLiveData;
   }, [hasLiveData]);
+
+  // ── Retry fetching history every 30s until real data arrives ──────────────
+  useEffect(() => {
+    if (!liveSymbol) return;
+    const id = setInterval(() => {
+      if (!hasLiveDataRef.current) {
+        setFetchRevision(r => r + 1);
+      }
+    }, 30_000);
+    return () => clearInterval(id);
+  }, [liveSymbol]);
 
   // ── Mount / unmount chart ──────────────────────────────────────────────────
   useEffect(() => {
@@ -335,7 +348,7 @@ export function CandlestickChart({
     // Cancel in-flight request if symbol/TF/connId changes before it resolves
     return () => { ac.abort(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveSymbol, activeTf, connId]);
+  }, [liveSymbol, activeTf, connId, fetchRevision]);
 
   // ── Apply incoming forming (live tick) update ──────────────────────────────
   useEffect(() => {
