@@ -154,6 +154,7 @@ export function CandlestickChart({
   const slLineRef    = useRef<IPriceLine | null>(null);
   const tpLineRef    = useRef<IPriceLine | null>(null);
   const entryLineRef = useRef<IPriceLine | null>(null);
+  const lastHistoryCountRef = useRef<number>(0);
 
   const [activeTf, setActiveTf] = useState<TF>(() =>
     // Default M15 for live (shows bars quickly); H1 for seed data
@@ -269,6 +270,14 @@ export function CandlestickChart({
       .then(r => r.json())
       .then((data: { bars: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }> }) => {
         if (!data.bars?.length || !seriesRef.current) return;
+
+        // Guard against transient tiny payloads (e.g. single-candle response
+        // during a cold start) that would wipe an already healthy chart.
+        const incoming = data.bars.length;
+        const previous = lastHistoryCountRef.current;
+        const isTinyDrop = previous >= 50 && incoming <= 3;
+        if (isTinyDrop) return;
+
         const mapped: OHLCBar[] = data.bars.map(b => ({
           time:  b.t as Time,
           open:  b.o,
@@ -277,6 +286,7 @@ export function CandlestickChart({
           close: b.c,
         }));
         seriesRef.current.setData(mapped as CandlestickData[]);
+        lastHistoryCountRef.current = incoming;
         chartRef.current?.timeScale().fitContent();
         setHasLiveData(true);
       })

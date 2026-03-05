@@ -70,20 +70,19 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // Local in-memory history (what we have since Railway last boot / since relay pushed)
+  // Local in-memory history (volatile across restarts/instance switches)
   const localAll = mt5State.getCandles(connId, symbol, tf, 1_000_000);
   const localBars = count < localAll.length ? localAll.slice(-count) : localAll;
 
-  // Optional: proxy to price_relay.py for deeper persisted history.
-  // Use it when our local buffer is empty or clearly shorter than requested.
+  // Prefer relay history first because it is the authoritative buffered source.
+  // This avoids "1 candle after refresh" when the Next.js process restarts.
   let bars = localBars;
   let source: "memory" | "relay" = "memory";
-  if (PRICE_RELAY_URL && localBars.length < count) {
-    const relayBars = await fetchRelayCandles({ symbol, tf, count, connId: connId || undefined });
-    if (relayBars && relayBars.length >= bars.length) {
-      bars = relayBars;
-      source = "relay";
-    }
+
+  const relayBars = await fetchRelayCandles({ symbol, tf, count, connId: connId || undefined });
+  if (relayBars && relayBars.length > 0) {
+    bars = relayBars;
+    source = "relay";
   }
 
   return NextResponse.json(
