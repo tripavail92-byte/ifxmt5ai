@@ -755,8 +755,8 @@ def main():
         threading.Thread(target=_delayed_push, name="auto-push", daemon=True).start()
 
         def _railway_watchdog_loop():
-            """Every 10 min, check if Railway dropped its state (redeploy). Re-push if so."""
-            time.sleep(120)  # skip first 2 minutes (startup push already running)
+            """Every 60s, check if Railway dropped its state (redeploy). Re-push if so."""
+            time.sleep(30)  # skip first 30s (startup push already queued)
             while True:
                 try:
                     import urllib.request as _ureq
@@ -772,7 +772,7 @@ def main():
                         log.debug(f"[watchdog] Railway OK ({count} BTC bars)")
                 except Exception as exc:
                     log.debug(f"[watchdog] check failed: {exc!r}")
-                time.sleep(600)  # check every 10 minutes
+                time.sleep(60)  # check every 60 seconds
         threading.Thread(target=_railway_watchdog_loop, name="watchdog", daemon=True).start()
 
     # Start HTTP server (blocks)

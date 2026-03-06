@@ -195,15 +195,22 @@ class Mt5State {
   getCandles(connId: string, symbol: string, tf: string, count: number): CandleBar[] {
     const tfMin = TF_MINUTES[tf] ?? 1;
 
-    // Try the specified conn, else search all
+    // Try the specified conn, else MERGE bars from all connections.
+    // This is critical: push_history_now.py stores under "push_script" while live
+    // EA bars accumulate under the EA's UUID. We need both merged by timestamp.
     let bars1m: CandleBar[] = [];
     if (connId) {
       bars1m = this.candles.get(connId)?.get(symbol) ?? [];
     } else {
+      // Merge from all connections — de-dup by timestamp (last writer wins)
+      const merged = new Map<number, CandleBar>();
       for (const [, symMap] of this.candles) {
         const b = symMap.get(symbol);
-        if (b?.length) { bars1m = b; break; }
+        if (b) {
+          for (const bar of b) merged.set(bar.t, bar);
+        }
       }
+      bars1m = [...merged.values()].sort((a, b) => a.t - b.t);
     }
 
     const aggregated = this.aggregate(bars1m, tfMin);

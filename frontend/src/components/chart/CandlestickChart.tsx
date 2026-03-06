@@ -308,15 +308,22 @@ export function CandlestickChart({
         const previous = lastHistoryCountRef.current;
 
         // If the API returned ≤3 bars, we have no real history yet.
-        // Either keep current data (if already healthy) or show proper seed
-        // data so the chart at least reflects the correct timeframe.
+        // For a live symbol, seed data (~1.085 prices) appears as a flat line
+        // at 0 once the forming bar (e.g. 70k BTC) arrives and expands the
+        // Y-scale. Show an empty chart instead — the forming SSE bar will place
+        // the first candle at the correct price level.
         if (incoming <= 3) {
           if (previous > 3) return; // already have good data — don't downgrade
-          // Show seed data for the active TF so all TFs look different
-          const seed = SEED_DATA[tf];
-          series.setData(seed as CandlestickData[]);
-          lastBarTimeRef.current = seed.length ? seed[seed.length - 1].time as number : 0;
-          chart.timeScale().fitContent();
+          if (liveSymbol) {
+            series.setData([]);
+            lastHistoryCountRef.current = 0;
+          } else {
+            const seed = SEED_DATA[tf];
+            series.setData(seed as CandlestickData[]);
+            lastBarTimeRef.current = seed.length ? seed[seed.length - 1].time as number : 0;
+            lastHistoryCountRef.current = 0;
+            chart.timeScale().fitContent();
+          }
           return;
         }
 
