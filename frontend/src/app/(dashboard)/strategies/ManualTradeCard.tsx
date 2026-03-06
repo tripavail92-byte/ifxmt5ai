@@ -105,7 +105,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   const [slotSetupIds, setSlotSetupIds] = useState<Record<string, string>>({});
 
   // Live feed
-  const { forming, lastClose, prices, isConnected } = usePriceFeed(autoConn?.id);
+  const { forming, lastClose, prices, isConnected, symbols: liveSymbols } = usePriceFeed(autoConn?.id);
 
   // Hydrate from localStorage on first render
   useEffect(() => {
@@ -227,8 +227,11 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     setSetupResult(null);
   }, [slots[activeSlot]]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const chartSym  = "BTCUSDm";
-  const livePrice = prices[chartSym];
+  // All subscribed pairs — fall back to known list while SSE connects
+  const SUBSCRIBED = ["BTCUSDm","ETHUSDm","EURUSDm","GBPUSDm","USDJPYm","XAUUSDm","USDCADm","AUDUSDm","NZDUSDm","USDCHFm","EURGBPm","USOILm"];
+  const tabSymbols = liveSymbols.length > 0 ? liveSymbols : SUBSCRIBED;
+  const chartSym   = slots[activeSlot];
+  const livePrice  = prices[chartSym];
 
   // Zone computation
   const ep = parseFloat(entryPrice);
@@ -273,38 +276,37 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
         </div>
       </div>
 
-      {/* ── Active symbol (single) ── */}
-      <div className="flex border-b border-[#1e1e1e] bg-[#0d0d0d]" ref={pickerRef}>
-        {([0] as const).map((slot) => {
-          const sym   = slots[slot];
-          const live  = prices[sym];
-          const isAct = activeSlot === slot;
+      {/* ── Symbol tab bar — all subscribed pairs ── */}
+      <div
+        className="flex overflow-x-auto border-b border-[#1e1e1e] bg-[#0d0d0d]"
+        style={{ scrollbarWidth: "none" }}
+      >
+        {tabSymbols.map((sym) => {
+          const live   = prices[sym];
+          const isAct  = chartSym === sym;
+          const digits = /JPY|XAU|BTC|ETH|OIL/i.test(sym) ? 2 : 5;
           return (
-            <div key={slot} className="relative flex-1">
-              <button
-                type="button"
-                onClick={() => switchSlot(slot)}
-                className={`w-full flex items-center justify-between gap-2 px-4 py-2.5 text-left transition-colors
-                  pr-10
-                  ${isAct
-                    ? "bg-[#141414] border-b-2 border-orange-500"
-                    : "hover:bg-[#111] border-b-2 border-transparent"
-                  }`}
-              >
-                <div>
-                  <span className={`font-mono font-semibold text-sm ${isAct ? "text-white" : "text-gray-500"}`}>
-                    {sym}
-                  </span>
-                  {live && (
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <span className="text-[11px] font-mono text-emerald-400">{live.bid.toFixed(sym.includes("JPY") || sym.includes("XAU") || sym.includes("BTC") || sym.includes("ETH") ? 2 : 5)}</span>
-                      <span className="text-[9px] text-gray-600">/</span>
-                      <span className="text-[11px] font-mono text-red-400">{live.ask.toFixed(sym.includes("JPY") || sym.includes("XAU") || sym.includes("BTC") || sym.includes("ETH") ? 2 : 5)}</span>
-                    </div>
-                  )}
-                </div>
-              </button>
-            </div>
+            <button
+              key={sym}
+              type="button"
+              onClick={() => selectSlotSymbol(0, sym)}
+              className={`flex-shrink-0 flex flex-col items-start px-3 py-2 border-b-2 transition-colors whitespace-nowrap
+                ${isAct
+                  ? "border-orange-500 bg-[#141414]"
+                  : "border-transparent hover:bg-[#111] hover:border-gray-700"
+                }`}
+            >
+              <span className={`font-mono font-semibold text-[11px] ${isAct ? "text-white" : "text-gray-500"}`}>
+                {sym}
+              </span>
+              {live ? (
+                <span className={`text-[10px] font-mono mt-0.5 ${isAct ? "text-emerald-400" : "text-gray-600"}`}>
+                  {live.bid.toFixed(digits)}
+                </span>
+              ) : (
+                <span className="text-[10px] text-gray-700 mt-0.5">—</span>
+              )}
+            </button>
           );
         })}
       </div>
