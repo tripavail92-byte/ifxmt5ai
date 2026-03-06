@@ -248,7 +248,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
       });
       if (error) throw error;
       setSlotSetupIds(prev => ({ ...prev, [formSymbol]: newId as string }));
-      setSetupResult({ ok: true, msg: `Setup tracked — state machine LIVE for ${formSymbol}` });
+      setSetupResult({ ok: true, msg: `MONITORING ACTIVE — state machine watching ${formSymbol} entry zone` });
     } catch (err: unknown) {
       setSetupResult({ ok: false, msg: err instanceof Error ? err.message : "Save failed" });
     } finally {
@@ -432,7 +432,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                   <span className="text-[10px] text-gray-500">Suggested Entry Zone</span>
                   <div className="flex items-center gap-1.5">
                     {slotSetupIds[formSymbol] && (
-                      <span className="text-[9px] px-1 py-0.5 rounded bg-orange-500/15 text-orange-400 border border-orange-500/20 font-semibold">TRACKED</span>
+                      <span className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/20 font-semibold">MONITORING</span>
                     )}
                     <span className="text-[10px] font-mono font-semibold text-blue-400">
                       {fmtZ(zone.low)} – {fmtZ(zone.high)}
@@ -454,6 +454,44 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
               </div>
             )}
 
+            {/* ── State machine strip — visible once setup is tracked ── */}
+            {slotSetupIds[formSymbol] && (
+              <div className="rounded-lg border border-[#1e1e1e] bg-[#0a0a0a] p-2.5">
+                <div className="text-[9px] text-gray-600 uppercase tracking-widest mb-2">
+                  State Machine
+                </div>
+                <div className="flex gap-1.5 flex-wrap">
+                  {(["IDLE", "STALKING", "PURGATORY", "DEAD"] as SetupState[]).map((s) => {
+                    const cfg = SETUP_STATE_CFG[s];
+                    const isActive = activeSetupState === s;
+                    return (
+                      <div
+                        key={s}
+                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[10px] font-bold tracking-wider transition-all duration-300 ${
+                          isActive
+                            ? cfg.badge
+                            : "bg-transparent text-gray-700 border-[#2a2a2a]"
+                        }`}
+                      >
+                        {isActive && (
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${cfg.dot}`} />
+                        )}
+                        {s}
+                      </div>
+                    );
+                  })}
+                  {!activeSetupState && (
+                    <span className="text-[10px] text-gray-700 animate-pulse">Loading…</span>
+                  )}
+                </div>
+                {activeSetupState && (
+                  <p className="text-[10px] text-gray-600 mt-1.5">
+                    {SETUP_STATE_CFG[activeSetupState].desc}
+                  </p>
+                )}
+              </div>
+            )}
+
             {/* Track Setup button */}
             {validEp && (
               <button
@@ -467,8 +505,8 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                 {setupSaving
                   ? "Saving…"
                   : slotSetupIds[formSymbol]
-                    ? `↻ Update ${formSymbol} Setup`
-                    : `⊕ Track ${formSymbol} Zone`
+                    ? `↻ Update ${formSymbol} Monitor`
+                    : `⊕ Monitor ${formSymbol} Zone`
                 }
               </button>
             )}
@@ -531,46 +569,14 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
               </div>
             </div>
 
-            {/* ── State Machine Badge ── */}
-            {slotSetupIds[formSymbol] ? (() => {
-              const cfg = activeSetupState
-                ? SETUP_STATE_CFG[activeSetupState]
-                : null;
-              return (
-                <div className={`rounded-lg border p-2.5 transition-all duration-500 ${
-                  cfg ? cfg.glow : "border-[#1e1e1e]"
-                }`}>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest">
-                      State Machine
-                    </span>
-                    <span className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 font-semibold">
-                      LIVE
-                    </span>
-                  </div>
-                  {cfg ? (
-                    <>
-                      <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-full border w-fit ${ cfg.badge }`}>
-                        <span className={`w-2 h-2 rounded-full shrink-0 ${ cfg.dot }`} />
-                        <span className="text-[11px] font-bold tracking-widest">{cfg.label}</span>
-                      </div>
-                      <p className="text-[10px] text-gray-600 mt-1.5">{cfg.desc}</p>
-                    </>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-gray-700 animate-pulse" />
-                      <span className="text-[10px] text-gray-600">Loading state…</span>
-                    </div>
-                  )}
-                </div>
-              );
-            })() : validEp ? (
+            {/* Prompt to monitor when entry is entered but not yet tracked */}
+            {validEp && !slotSetupIds[formSymbol] && (
               <div className="rounded-lg border border-dashed border-[#2a2a2a] p-2.5">
                 <p className="text-[10px] text-gray-700 text-center">
-                  Track setup above to activate state machine
+                  Enter entry price and click Monitor Zone to activate state machine
                 </p>
               </div>
-            ) : null}
+            )}
           </div>
 
         </div>
