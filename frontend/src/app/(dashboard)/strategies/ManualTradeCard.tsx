@@ -44,6 +44,43 @@ const ZONE_DEFAULTS: Record<string, number> = {
 };
 const ZONE_DEFAULT_FALLBACK = 0.5;
 
+// ─── State machine config ───────────────────────────────────────────────────
+
+type SetupState = "IDLE" | "STALKING" | "PURGATORY" | "DEAD";
+
+const SETUP_STATE_CFG: Record<SetupState, {
+  label: string; dot: string; badge: string; glow: string; desc: string;
+}> = {
+  IDLE: {
+    label: "IDLE",
+    dot:   "bg-gray-500",
+    badge: "bg-gray-500/15 text-gray-400 border-gray-500/30",
+    glow:  "border-[#1e1e1e]",
+    desc:  "Waiting — price away from zone",
+  },
+  STALKING: {
+    label: "STALKING",
+    dot:   "bg-blue-400 animate-pulse",
+    badge: "bg-blue-500/15 text-blue-400 border-blue-500/30",
+    glow:  "border-blue-500/30",
+    desc:  "Price in zone — watching closely",
+  },
+  PURGATORY: {
+    label: "PURGATORY",
+    dot:   "bg-amber-400 animate-pulse",
+    badge: "bg-amber-500/15 text-amber-400 border-amber-500/30",
+    glow:  "border-amber-500/30",
+    desc:  "Wick broke loss edge — awaiting H1 close",
+  },
+  DEAD: {
+    label: "DEAD",
+    dot:   "bg-red-500",
+    badge: "bg-red-500/15 text-red-400 border-red-500/30",
+    glow:  "border-red-500/30",
+    desc:  "H1 closed beyond loss edge — invalidated",
+  },
+};
+
 function getZoneDefault(sym: string): number {
   return ZONE_DEFAULTS[sym] ?? ZONE_DEFAULT_FALLBACK;
 }
@@ -103,6 +140,8 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   const [setupResult, setSetupResult] = useState<{ ok: boolean; msg: string } | null>(null);
   // symbol → setup_id for upsert (persisted in memory per session)
   const [slotSetupIds, setSlotSetupIds] = useState<Record<string, string>>({});
+  // Real-time state of the tracked setup for the active symbol
+  const [activeSetupState, setActiveSetupState] = useState<SetupState | null>(null);
 
   // Live feed
   const { forming, lastClose, prices, isConnected, symbols: liveSymbols } = usePriceFeed(autoConn?.id);
@@ -225,7 +264,47 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     setSlValue(undefined);
     setTpValue(undefined);
     setSetupResult(null);
+    setActiveSetupState(null);
   }, [slots[activeSlot]]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Subscribe to state-machine updates for the currently tracked setup
+  useEffect(() => {
+    const setupId = slotSetupIds[formSymbol];
+    if (!setupId) { setActiveSetupState(null); return; }
+    const sb = createClient();
+    let cancelled = false;
+
+    // Load current state immediately
+    sb.from("trading_setups")
+      .select("state")
+      .eq("id", setupId)
+      .single()
+      .then(({ data }) => {
+        if (!cancelled && data?.state) setActiveSetupState(data.state as SetupState);
+      });
+
+    // Subscribe to realtime row updates
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const channel = (sb as any)
+      .channel(`setup-state-${setupId}`)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .on("postgres_changes" as any, {
+        event:  "UPDATE",
+        schema: "public",
+        table:  "trading_setups",
+        filter: `id=eq.${setupId}`,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }, (payload: any) => {
+        if (payload.new?.state) setActiveSetupState(payload.new.state as SetupState);
+      })
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      sb.removeChannel(channel);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slotSetupIds[formSymbol], formSymbol]);
 
   // All subscribed pairs — fall back to known list while SSE connects
   const SUBSCRIBED = ["BTCUSDm","ETHUSDm","EURUSDm","GBPUSDm","USDJPYm","XAUUSDm","USDCADm","AUDUSDm","NZDUSDm","USDCHFm","EURGBPm","USOILm"];
@@ -451,6 +530,47 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                 <span>5%</span>
               </div>
             </div>
+
+            {/* ── State Machine Badge ── */}
+            {slotSetupIds[formSymbol] ? (() => {
+              const cfg = activeSetupState
+                ? SETUP_STATE_CFG[activeSetupState]
+                : null;
+              return (
+                <div className={`rounded-lg border p-2.5 transition-all duration-500 ${
+                  cfg ? cfg.glow : "border-[#1e1e1e]"
+                }`}>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest">
+                      State Machine
+                    </span>
+                    <span className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 font-semibold">
+                      LIVE
+                    </span>
+                  </div>
+                  {cfg ? (
+                    <>
+                      <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-full border w-fit ${ cfg.badge }`}>
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${ cfg.dot }`} />
+                        <span className="text-[11px] font-bold tracking-widest">{cfg.label}</span>
+                      </div>
+                      <p className="text-[10px] text-gray-600 mt-1.5">{cfg.desc}</p>
+                    </>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-gray-700 animate-pulse" />
+                      <span className="text-[10px] text-gray-600">Loading state…</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })() : validEp ? (
+              <div className="rounded-lg border border-dashed border-[#2a2a2a] p-2.5">
+                <p className="text-[10px] text-gray-700 text-center">
+                  Track setup above to activate state machine
+                </p>
+              </div>
+            ) : null}
           </div>
 
         </div>
