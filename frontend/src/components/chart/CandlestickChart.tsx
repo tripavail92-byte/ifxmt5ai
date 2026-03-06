@@ -45,6 +45,21 @@ const TF_API: Record<TF, string> = {
   M1: "1m", M5: "5m", M15: "15m", H1: "1h", H4: "4h", D1: "1d",
 };
 
+// ─── Symbol precision ────────────────────────────────────────────────────────
+
+function getDigits(sym: string): number {
+  const s = sym.toUpperCase();
+  if (/JPY/.test(s))           return 3;
+  if (/BTC|ETH/.test(s))       return 2;
+  if (/XAU|XAG|OIL/.test(s))  return 2;
+  return 5;
+}
+
+function priceFormat(sym: string) {
+  const p = getDigits(sym);
+  return { type: "price" as const, precision: p, minMove: Math.pow(10, -p) };
+}
+
 // ─── Chart colours ────────────────────────────────────────────────────────────
 
 const COLORS = {
@@ -144,6 +159,7 @@ export function CandlestickChart({
       borderDownColor:COLORS.down,
       wickUpColor:    COLORS.up,
       wickDownColor:  COLORS.down,
+      priceFormat:    priceFormat(liveSymbol ?? symbol),
     });
 
     chartRef.current  = chart;
@@ -166,6 +182,11 @@ export function CandlestickChart({
       entryLineRef.current = null;
     };
   }, []); // run once
+
+  // ── Update price format when symbol changes ────────────────────────────────
+  useEffect(() => {
+    seriesRef.current?.applyOptions({ priceFormat: priceFormat(liveSymbol ?? symbol) });
+  }, [liveSymbol, symbol]);
 
   // ── Retry timer — re-fires fetch every 3s until real history loads ────────
   useEffect(() => {
