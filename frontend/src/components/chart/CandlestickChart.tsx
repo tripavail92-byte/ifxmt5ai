@@ -149,7 +149,15 @@ export function CandlestickChart({
     chartRef.current  = chart;
     seriesRef.current = series;
 
+    // Force the chart to repaint whenever the container is resized
+    // (lightweight-charts autoSize handles width but needs a nudge on height change)
+    const ro = new ResizeObserver(() => {
+      chart.timeScale().fitContent();
+    });
+    ro.observe(el);
+
     return () => {
+      ro.disconnect();
       chart.remove();
       chartRef.current  = null;
       seriesRef.current = null;
@@ -333,11 +341,11 @@ export function CandlestickChart({
         </div>
       </div>
 
-      {/* Canvas */}
+      {/* Canvas — height scales with viewport: 220px mobile → 420px large screen */}
       <div
         ref={containerRef}
         className="w-full border-x border-b border-[#2a2a2a] rounded-b-lg"
-        style={{ height: 300, minHeight: 300 }}
+        style={{ height: "clamp(220px, 40vh, 420px)" }}
       />
 
       {/* Legend */}
