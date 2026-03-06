@@ -164,6 +164,9 @@ export function CandlestickChart({
   );
   const [hasLiveData, setHasLiveData] = useState(false);
   const hasLiveDataRef = useRef(false);
+  // Separate from hasLiveData: only true after ≥4 real historical bars loaded.
+  // The retry timer checks THIS so forming-bar arrival doesn't stop retries.
+  const hasHistoryRef = useRef(false);
   // Incremented by the retry timer to re-trigger the fetch effect
   const [fetchRevision, setFetchRevision] = useState(0);
 
@@ -171,14 +174,16 @@ export function CandlestickChart({
     hasLiveDataRef.current = hasLiveData;
   }, [hasLiveData]);
 
-  // ── Retry fetching history every 30s until real data arrives ──────────────
+  // ── Retry fetching history every 5s until real data arrives ───────────────
+  // Uses hasHistoryRef (not hasLiveDataRef) so a forming-bar SSE event doesn't
+  // stop the retry before actual historical bars have been loaded.
   useEffect(() => {
     if (!liveSymbol) return;
     const id = setInterval(() => {
-      if (!hasLiveDataRef.current) {
+      if (!hasHistoryRef.current) {
         setFetchRevision(r => r + 1);
       }
-    }, 30_000);
+    }, 5_000);
     return () => clearInterval(id);
   }, [liveSymbol]);
 
@@ -241,10 +246,16 @@ export function CandlestickChart({
     chartRef.current = chart;
     seriesRef.current = series;
 
-    const seedH1 = SEED_DATA["H1"];
-    series.setData(seedH1 as CandlestickData[]);
-    lastBarTimeRef.current = seedH1.length ? seedH1[seedH1.length - 1].time as number : 0;
-    chart.timeScale().fitContent();
+    // When liveSymbol is set, start EMPTY — the fetch effect will load real bars.
+    // Never pre-populate with seed data (price ~1.085) for a live symbol: a
+    // forming BTC bar at 70k would expand the Y-axis to 0–70k and make seed
+    // bars appear as a flat line at the bottom.
+    if (!liveSymbol) {
+      const seedH1 = SEED_DATA["H1"];
+      series.setData(seedH1 as CandlestickData[]);
+      lastBarTimeRef.current = seedH1.length ? seedH1[seedH1.length - 1].time as number : 0;
+      chart.timeScale().fitContent();
+    }
 
     return () => {
       chart.remove();
@@ -267,12 +278,18 @@ export function CandlestickChart({
     // so the timeframe switch feels instant. The fetch effect will replace
     // it with real bars when they arrive (incoming > 3).
     if (lastHistoryCountRef.current <= 3) {
-      // No real history yet — show placeholder seed for the selected TF
-      const seedTf = SEED_DATA[tf];
-      series.setData(seedTf as CandlestickData[]);
-      lastBarTimeRef.current = seedTf.length ? seedTf[seedTf.length - 1].time as number : 0;
+      if (liveSymbol) {
+        // Live symbol with no history yet — stay empty, fetch will fill it
+        series.setData([]);
+        lastBarTimeRef.current = 0;
+      } else {
+        // No live symbol — show placeholder seed for the selected TF
+        const seedTf = SEED_DATA[tf];
+        series.setData(seedTf as CandlestickData[]);
+        lastBarTimeRef.current = seedTf.length ? seedTf[seedTf.length - 1].time as number : 0;
+        chart.timeScale().fitContent();
+      }
       lastHistoryCountRef.current = 0; // mark as placeholder so fetch can replace
-      chart.timeScale().fitContent();
     } else if (!liveSymbol) {
       // No live symbol at all — always use seed data
       const seedTf = SEED_DATA[tf];
@@ -339,17 +356,19 @@ export function CandlestickChart({
         lastHistoryCountRef.current = incoming;
         lastBarTimeRef.current = mapped.length ? mapped[mapped.length - 1].time as number : 0;
         chartRef.current?.timeScale().fitContent();
+        hasHistoryRef.current = true; // stop the retry timer
         setHasLiveData(true);
       })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError") return;
-        // Network error — show seed for this TF if no live data yet
-        if (!hasLiveDataRef.current) {
+        // Network error — only show seed for non-live charts
+        if (!hasLiveDataRef.current && !liveSymbol) {
           const seed = SEED_DATA[tf];
           series.setData(seed as CandlestickData[]);
           lastBarTimeRef.current = seed.length ? seed[seed.length - 1].time as number : 0;
           chart.timeScale().fitContent();
         }
+        // For live symbol: leave as empty — retry timer will try again in 5s
       });
 
     // Cancel in-flight request if symbol/TF/connId changes before it resolves
