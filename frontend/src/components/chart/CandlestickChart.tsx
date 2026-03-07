@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   createChart,
   CandlestickSeries,
+  BaselineSeries,
   ColorType,
   LineStyle,
   CrosshairMode,
@@ -24,6 +25,8 @@ export interface CandlestickChartProps {
   sl?: number;
   tp?: number;
   entryPrice?: number;
+  entryZoneLow?: number;
+  entryZoneHigh?: number;
   symbol?: string;
   className?: string;
   liveSymbol?: string;
@@ -34,15 +37,11 @@ export interface CandlestickChartProps {
 
 // ─── Timeframes ───────────────────────────────────────────────────────────────
 
-const TIMEFRAMES = ["M1", "M5", "M15", "H1", "H4", "D1"] as const;
+const TIMEFRAMES = ["M1", "M3", "M5", "M15", "M30", "H1", "H4", "D1"] as const;
 type TF = (typeof TIMEFRAMES)[number];
 
-const TF_SECONDS: Record<TF, number> = {
-  M1: 60, M5: 300, M15: 900, H1: 3600, H4: 14400, D1: 86400,
-};
-
 const TF_API: Record<TF, string> = {
-  M1: "1m", M5: "5m", M15: "15m", H1: "1h", H4: "4h", D1: "1d",
+  M1: "1m", M3: "3m", M5: "5m", M15: "15m", M30: "30m", H1: "1h", H4: "4h", D1: "1d",
 };
 
 // ─── Symbol precision ────────────────────────────────────────────────────────
@@ -75,18 +74,27 @@ const COLORS = {
   entry:     "#3b82f6",
 };
 
+function hexToRgba(hex: string, alpha: number): string {
+  const h = hex.replace("#", "").trim();
+  if (h.length !== 6) return `rgba(0,0,0,${alpha})`;
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function CandlestickChart({
   sl,
   tp,
   entryPrice,
+  entryZoneLow,
+  entryZoneHigh,
   symbol = "EURUSD",
   className = "",
   liveSymbol,
   connId,
-  forming,
-  lastClose,
 }: CandlestickChartProps) {
   const containerRef  = useRef<HTMLDivElement>(null);
   const chartRef      = useRef<IChartApi | null>(null);
@@ -94,18 +102,26 @@ export function CandlestickChart({
   const slLineRef     = useRef<IPriceLine | null>(null);
   const tpLineRef     = useRef<IPriceLine | null>(null);
   const entryLineRef  = useRef<IPriceLine | null>(null);
+  const entryBandRef  = useRef<ISeriesApi<"Baseline"> | null>(null);
+  const historyRef    = useRef<CandlestickData[]>([]);
   // Time of the last bar in the series — used to guard series.update() calls
   const lastBarTimeRef = useRef<number>(0);
   // True once ≥1 real historical bars have been loaded from the API
   const hasRealDataRef = useRef<boolean>(false);
 
   const [activeTf, setActiveTf] = useState<TF>(() => {
-    if (typeof window === "undefined") return "M1";
-    return (localStorage.getItem("ifx_chart_tf") as TF | null) ?? "M1";
+    if (typeof window === "undefined") return "M5";
+    const raw = localStorage.getItem("ifx_chart_tf");
+    const stored = (raw as TF | null) ?? null;
+    return stored && (TIMEFRAMES as readonly string[]).includes(stored) ? stored : "M5";
   });
   const [isLive, setIsLive] = useState(false);
   // Bumped by the retry timer and by switchTf to trigger an immediate re-fetch
   const [fetchTick, setFetchTick] = useState(0);
+  // Bumped after setData() so overlays can refresh off the same timebase
+  const [historyVersion, setHistoryVersion] = useState(0);
+
+  const HISTORY_COUNT = 200; // must roughly match engine structure window
 
   // ── Mount chart (once) ────────────────────────────────────────────────────
   useEffect(() => {
@@ -180,6 +196,7 @@ export function CandlestickChart({
       slLineRef.current    = null;
       tpLineRef.current    = null;
       entryLineRef.current = null;
+      entryBandRef.current = null;
     };
   }, []); // run once
 
@@ -188,20 +205,18 @@ export function CandlestickChart({
     seriesRef.current?.applyOptions({ priceFormat: priceFormat(liveSymbol ?? symbol) });
   }, [liveSymbol, symbol]);
 
-  // ── Retry timer — re-fires fetch every 3s until real history loads ────────
+  // ── Poll timer — re-fetch broker candles every 3s ─────────────────────────
   useEffect(() => {
     if (!liveSymbol) return;
     const id = setInterval(() => {
-      if (!hasRealDataRef.current) {
-        setFetchTick(n => n + 1);
-      }
+      setFetchTick(n => n + 1);
     }, 3_000);
     return () => clearInterval(id);
   }, [liveSymbol]);
 
   // ── Fetch candle history ──────────────────────────────────────────────────
   useEffect(() => {
-    if (!liveSymbol) return;
+    if (!liveSymbol || !connId) return;
     const series = seriesRef.current;
     const chart  = chartRef.current;
     if (!series || !chart) return;
@@ -209,7 +224,7 @@ export function CandlestickChart({
     const tf  = activeTf;
     const ac  = new AbortController();
     const connQ = connId ? `&conn_id=${encodeURIComponent(connId)}` : "";
-    const url = `/api/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${TF_API[tf]}&count=1500${connQ}`;
+    const url = `/api/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${TF_API[tf]}&count=${HISTORY_COUNT}${connQ}`;
 
     fetch(url, { signal: ac.signal })
       .then(r => r.json())
@@ -230,6 +245,8 @@ export function CandlestickChart({
         const s = seriesRef.current;
         if (!s) return;
         s.setData(mapped);
+        historyRef.current = mapped;
+        setHistoryVersion(v => v + 1);
         lastBarTimeRef.current = mapped[mapped.length - 1].time as number;
         chartRef.current?.timeScale().fitContent();
         hasRealDataRef.current = true;
@@ -245,47 +262,12 @@ export function CandlestickChart({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveSymbol, activeTf, connId, fetchTick]);
 
-  // ── Forming bar (live tick every ~150ms) ─────────────────────────────────
-  useEffect(() => {
-    if (!liveSymbol || !forming) return;
-    const bar = forming[liveSymbol];
-    if (!bar) return;
-    const series = seriesRef.current;
-    if (!series) return;
-
-    const tfSec    = TF_SECONDS[activeTf];
-    const slotTime = (Math.floor(bar.t / tfSec) * tfSec) as Time;
-    try {
-      series.update({ time: slotTime, open: bar.o, high: bar.h, low: bar.l, close: bar.c });
-      lastBarTimeRef.current = Math.max(lastBarTimeRef.current, slotTime as number);
-    } catch { /* out-of-order or before setData — ignore */ }
-
-    if (!isLive) setIsLive(true);
-  }, [liveSymbol, forming, activeTf, isLive]);
-
-  // ── Completed candle (bar close event) ───────────────────────────────────
-  useEffect(() => {
-    if (!liveSymbol || !lastClose || lastClose.symbol !== liveSymbol) return;
-    const series = seriesRef.current;
-    if (!series) return;
-
-    const tfSec    = TF_SECONDS[activeTf];
-    const slotTime = Math.floor(lastClose.bar.t / tfSec) * tfSec;
-    // Skip if the series has already moved past this slot (can happen at TF boundaries)
-    if (slotTime < lastBarTimeRef.current) return;
-    try {
-      series.update({
-        time: slotTime as Time,
-        open: lastClose.bar.o, high: lastClose.bar.h,
-        low:  lastClose.bar.l, close: lastClose.bar.c,
-      });
-    } catch { /* skip */ }
-  }, [liveSymbol, lastClose, activeTf]);
-
   // ── TF switch ─────────────────────────────────────────────────────────────
   function switchTf(tf: TF) {
     // Clear series so the user sees a blank slate while the new TF loads
     seriesRef.current?.setData([]);
+    historyRef.current = [];
+    setHistoryVersion(v => v + 1);
     lastBarTimeRef.current = 0;
     hasRealDataRef.current = false;
     setActiveTf(tf);
@@ -330,6 +312,61 @@ export function CandlestickChart({
       });
     }
   }, [entryPrice]);
+
+  // ── Entry zone shaded band (between zone_low and zone_high) ──────────────
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+
+    const lowRaw = entryZoneLow;
+    const highRaw = entryZoneHigh;
+
+    const low = typeof lowRaw === "number" && Number.isFinite(lowRaw) ? lowRaw : null;
+    const high = typeof highRaw === "number" && Number.isFinite(highRaw) ? highRaw : null;
+
+    // Remove if not valid
+    if (low === null || high === null || low <= 0 || high <= 0 || low === high) {
+      if (entryBandRef.current) {
+        chart.removeSeries(entryBandRef.current);
+        entryBandRef.current = null;
+      }
+      return;
+    }
+
+    const zoneLow = Math.min(low, high);
+    const zoneHigh = Math.max(low, high);
+
+    if (!entryBandRef.current) {
+      entryBandRef.current = chart.addSeries(BaselineSeries, {
+        baseValue: { type: "price", price: zoneLow },
+        topLineColor: COLORS.entry,
+        topFillColor1: hexToRgba(COLORS.entry, 0.25),
+        topFillColor2: hexToRgba(COLORS.entry, 0.05),
+        bottomLineColor: "transparent",
+        bottomFillColor1: "transparent",
+        bottomFillColor2: "transparent",
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+    } else {
+      entryBandRef.current.applyOptions({
+        baseValue: { type: "price", price: zoneLow },
+      });
+    }
+
+    const band = entryBandRef.current;
+    if (!band) return;
+    const candles = historyRef.current;
+    if (candles.length === 0) {
+      band.setData([]);
+      return;
+    }
+
+    band.setData(
+      candles.map((c) => ({ time: c.time as Time, value: zoneHigh }))
+    );
+  }, [entryZoneLow, entryZoneHigh, historyVersion]);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (

@@ -20,3 +20,9 @@ frontend/.next/
 frontend/node_modules/
 frontend/.DS_Store
 frontend/out/
+
+# Reference-only / not part of mt5system repo
+code for choch nbos/
+
+# Separate UI workspace (not used by Next.js frontend)
+Forex Trading Terminal UI/

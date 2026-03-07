@@ -30,6 +30,8 @@ interface Symbol {
 
 const STORAGE_KEY_SYMBOLS = "ifx_chart_symbols";
 const STORAGE_KEY_ACTIVE  = "ifx_chart_active";
+const STORAGE_KEY_AI_SENS  = "ifx_ai_sensitivity";
+const STORAGE_KEY_DRAFTS   = "ifx_setup_drafts";
 const DEFAULT_SYMBOLS      = ["BTCUSDm", "BTCUSDm"];
 
 // Per-symbol default zone percentages (matches backend asset_config_service)
@@ -43,6 +45,22 @@ const ZONE_DEFAULTS: Record<string, number> = {
   USDCAD: 0.14, USOIL: 0.25, BTCUSD: 0.23, ETHUSD: 0.85,
 };
 const ZONE_DEFAULT_FALLBACK = 0.5;
+
+function getSelectedSetupTimeframe(): string {
+  if (typeof window === "undefined") return "5m";
+  const raw = (localStorage.getItem("ifx_chart_tf") ?? "M5").trim();
+  const map: Record<string, string> = {
+    M1: "1m",
+    M3: "3m",
+    M5: "5m",
+    M15: "15m",
+    M30: "30m",
+    H1: "1h",
+    H4: "4h",
+    D1: "1d",
+  };
+  return map[raw] ?? "5m";
+}
 
 // ─── State machine config ───────────────────────────────────────────────────
 
@@ -99,12 +117,61 @@ function calcZone(ep: number, zp: number) {
 
 function loadStoredSymbols(): [string, string] {
   if (typeof window === "undefined") return DEFAULT_SYMBOLS as [string, string];
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_SYMBOLS);
+    if (!raw) return DEFAULT_SYMBOLS as [string, string];
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed) && parsed.length === 2 && typeof parsed[0] === "string" && typeof parsed[1] === "string") {
+      return [parsed[0] || DEFAULT_SYMBOLS[0], parsed[1] || DEFAULT_SYMBOLS[1]] as [string, string];
+    }
+  } catch {
+    // ignore
+  }
   return DEFAULT_SYMBOLS as [string, string];
 }
 
 function loadStoredActive(slots: [string, string]): 0 | 1 {
   void slots;
-  return 0;
+  if (typeof window === "undefined") return 0;
+  try {
+    const raw = (localStorage.getItem(STORAGE_KEY_ACTIVE) ?? "0").trim();
+    const n = parseInt(raw, 10);
+    return n === 1 ? 1 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+type SetupDraft = {
+  entryPrice?: string;
+  zonePercent?: number;
+  side?: "buy" | "sell";
+  aiSensitivity?: number;
+};
+
+function loadDraft(symbol: string): SetupDraft {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_DRAFTS);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, SetupDraft>;
+    const d = parsed?.[symbol];
+    return d && typeof d === "object" ? d : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveDraft(symbol: string, draft: SetupDraft) {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_DRAFTS);
+    const parsed = (raw ? (JSON.parse(raw) as Record<string, SetupDraft>) : {}) ?? {};
+    parsed[symbol] = draft;
+    localStorage.setItem(STORAGE_KEY_DRAFTS, JSON.stringify(parsed));
+  } catch {
+    // ignore
+  }
 }
 
 export function ManualTradeCard({ connections }: { connections: Connection[] }) {
@@ -135,6 +202,9 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   const [showEntryZones, setShowEntryZones] = useState<boolean>(true);
   const [showTPZones, setShowTPZones] = useState<boolean>(true);
 
+  // Structure sensitivity (NI): 1–10 (pivot_window = AI_SENSITIVITY)
+  const [aiSensitivity, setAiSensitivity] = useState<number>(5);
+
   // Setup tracking state
   const [setupSaving, setSetupSaving] = useState(false);
   const [setupResult, setSetupResult] = useState<{ ok: boolean; msg: string } | null>(null);
@@ -143,17 +213,44 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   // Real-time state of the tracked setup for the active symbol
   const [activeSetupState, setActiveSetupState] = useState<SetupState | null>(null);
 
+  const [setupsBySymbol, setSetupsBySymbol] = useState<Record<string, {
+    id: string;
+    symbol: string;
+    side: "buy" | "sell";
+    entry_price: number;
+    zone_percent: number;
+    timeframe: string;
+    ai_sensitivity?: number;
+  }>>({});
+
   // Live feed
   const { forming, lastClose, prices, isConnected, symbols: liveSymbols } = usePriceFeed(autoConn?.id);
 
   // Hydrate from localStorage on first render
   useEffect(() => {
-    const fixed = DEFAULT_SYMBOLS as [string, string];
-    setSlots(fixed);
-    setActiveSlot(0);
-    setFormSymbol("BTCUSDm");
+    const storedSlots = loadStoredSymbols();
+    const storedActive = loadStoredActive(storedSlots);
+    setSlots(storedSlots);
+    setActiveSlot(storedActive);
+    setFormSymbol(storedSlots[storedActive] || storedSlots[0] || "BTCUSDm");
+    try {
+      const raw = (localStorage.getItem(STORAGE_KEY_AI_SENS) ?? "5").trim();
+      const n = parseInt(raw, 10);
+      if (Number.isFinite(n) && n >= 1 && n <= 10) setAiSensitivity(n);
+    } catch {
+      // ignore
+    }
     setHydrated(true);
   }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      localStorage.setItem(STORAGE_KEY_AI_SENS, String(aiSensitivity));
+    } catch {
+      // ignore
+    }
+  }, [hydrated, aiSensitivity]);
 
   // Persist changes to localStorage
   useEffect(() => {
@@ -165,6 +262,50 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     if (!hydrated) return;
     localStorage.setItem(STORAGE_KEY_ACTIVE, String(activeSlot));
   }, [activeSlot, hydrated]);
+
+  // Load existing active setups from DB so refresh doesn't lose "MONITORING" state / zone config
+  useEffect(() => {
+    if (!autoConn || !hydrated) return;
+    const sb = createClient();
+    let cancelled = false;
+
+    sb.rpc("get_setups_for_connection", { p_connection_id: autoConn.id })
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) {
+          console.warn("[ManualTradeCard] get_setups_for_connection error", error);
+          return;
+        }
+        const rows = (data ?? []) as Array<{
+          id: string;
+          symbol: string;
+          side: "buy" | "sell";
+          entry_price: number;
+          zone_percent: number;
+          timeframe: string;
+          ai_sensitivity?: number;
+        }>;
+
+        const bySymbol: Record<string, typeof rows[number]> = {};
+        for (const r of rows) {
+          if (!r?.symbol) continue;
+          if (!bySymbol[r.symbol]) bySymbol[r.symbol] = r; // rows are already sorted desc
+        }
+        setSetupsBySymbol(bySymbol);
+
+        setSlotSetupIds(prev => {
+          const next = { ...prev };
+          for (const sym of Object.keys(bySymbol)) {
+            next[sym] = bySymbol[sym].id;
+          }
+          return next;
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [autoConn?.id, hydrated]);
 
   // Load symbols for the auto-selected connection
   useEffect(() => {
@@ -237,17 +378,45 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
-      const { data: newId, error } = await supabase.rpc("upsert_trading_setup", {
-        p_user_id:       user.id,
-        p_connection_id: autoConn.id,
-        p_symbol:        formSymbol,
-        p_side:          side,
-        p_entry_price:   ep,
-        p_zone_percent:  zonePercent,
-        p_setup_id:      slotSetupIds[formSymbol] ?? null,
-      });
+
+      const payloadV2 = {
+        p_user_id:        user.id,
+        p_connection_id:  autoConn.id,
+        p_symbol:         formSymbol,
+        p_side:           side,
+        p_entry_price:    ep,
+        p_zone_percent:   zonePercent,
+        p_timeframe:      getSelectedSetupTimeframe(),
+        p_ai_sensitivity: aiSensitivity,
+        p_setup_id:       slotSetupIds[formSymbol] ?? null,
+      };
+
+      let { data: newId, error } = await supabase.rpc("upsert_trading_setup", payloadV2);
+
+      // Backward-compatible fallback: if DB/RPC hasn't been migrated yet, retry without p_ai_sensitivity.
+      if (error) {
+        const msg = String((error as { message?: unknown })?.message ?? error);
+        if (msg.toLowerCase().includes("p_ai_sensitivity") || msg.toLowerCase().includes("function")) {
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { p_ai_sensitivity: _ignored, ...payloadV1 } = payloadV2;
+          ({ data: newId, error } = await supabase.rpc("upsert_trading_setup", payloadV1));
+        }
+      }
+
       if (error) throw error;
       setSlotSetupIds(prev => ({ ...prev, [formSymbol]: newId as string }));
+      setSetupsBySymbol(prev => ({
+        ...prev,
+        [formSymbol]: {
+          id: newId as string,
+          symbol: formSymbol,
+          side,
+          entry_price: ep,
+          zone_percent: zonePercent,
+          timeframe: getSelectedSetupTimeframe(),
+          ai_sensitivity: aiSensitivity,
+        },
+      }));
       setSetupResult({ ok: true, msg: `MONITORING ACTIVE — state machine watching ${formSymbol} entry zone` });
     } catch (err: unknown) {
       setSetupResult({ ok: false, msg: err instanceof Error ? err.message : "Save failed" });
@@ -256,16 +425,47 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     }
   }
 
-  // Reset zone % when symbol changes
+  // Load per-symbol config when symbol changes (prefer DB setup, else local draft)
   useEffect(() => {
+    if (!hydrated) return;
     const sym = slots[activeSlot];
-    setZonePercent(getZoneDefault(sym));
-    setEntryPrice("");
-    setSlValue(undefined);
-    setTpValue(undefined);
+    if (!sym) return;
+
+    const db = setupsBySymbol[sym];
+    if (db) {
+      setFormSymbol(sym);
+      setSide(db.side);
+      setZonePercent(Number(db.zone_percent) || getZoneDefault(sym));
+      setEntryPrice(String(db.entry_price ?? ""));
+      const sens = Number(db.ai_sensitivity ?? 5);
+      setAiSensitivity(Number.isFinite(sens) ? Math.min(10, Math.max(1, sens)) : 5);
+      setSetupResult(null);
+      setActiveSetupState(null);
+      return;
+    }
+
+    const draft = loadDraft(sym);
+    setFormSymbol(sym);
+    setSide(draft.side ?? "buy");
+    setZonePercent(typeof draft.zonePercent === "number" ? draft.zonePercent : getZoneDefault(sym));
+    setEntryPrice(draft.entryPrice ?? "");
+    const sens = typeof draft.aiSensitivity === "number" ? draft.aiSensitivity : 5;
+    setAiSensitivity(Math.min(10, Math.max(1, sens)));
     setSetupResult(null);
     setActiveSetupState(null);
-  }, [slots[activeSlot]]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [slots, activeSlot, setupsBySymbol, hydrated]);
+
+  // Persist drafts per symbol so switching pairs / refreshing doesn't lose the zone inputs
+  useEffect(() => {
+    if (!hydrated) return;
+    if (!formSymbol) return;
+    saveDraft(formSymbol, {
+      entryPrice,
+      zonePercent,
+      side,
+      aiSensitivity,
+    });
+  }, [hydrated, formSymbol, entryPrice, zonePercent, side, aiSensitivity]);
 
   // Subscribe to state-machine updates for the currently tracked setup
   useEffect(() => {
@@ -397,8 +597,11 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
             symbol={chartSym}
             liveSymbol={chartSym}
             connId={autoConn?.id}
-            sl={slValue}
-            tp={tpValue}
+            entryPrice={showEntryZones ? ep : undefined}
+            entryZoneLow={showEntryZones && zone ? zone.low : undefined}
+            entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
+            sl={showEntryZones ? slValue : undefined}
+            tp={showTPZones ? tpValue : undefined}
             forming={forming}
             lastClose={lastClose}
             className="w-full"
@@ -454,6 +657,26 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
               </div>
             )}
 
+            <div className="bg-[#141414] rounded-lg p-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-gray-500">AI Sensitivity (NI)</span>
+                <span className="text-[10px] font-mono font-semibold text-blue-400">{aiSensitivity}</span>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={10}
+                step={1}
+                value={aiSensitivity}
+                onChange={(e) => setAiSensitivity(parseInt(e.target.value, 10))}
+                className="w-full mt-2 accent-blue-500"
+              />
+              <div className="flex justify-between text-[9px] text-gray-600 mt-1">
+                <span>More sensitive</span>
+                <span>Less sensitive</span>
+              </div>
+            </div>
+
             {/* ── State machine strip — visible once setup is tracked ── */}
             {slotSetupIds[formSymbol] && (
               <div className="rounded-lg border border-[#1e1e1e] bg-[#0a0a0a] p-2.5">
@@ -494,21 +717,26 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
 
             {/* Track Setup button */}
             {validEp && (
-              <button
-                type="button"
-                onClick={handleTrackSetup}
-                disabled={setupSaving || !autoConn}
-                className="w-full h-8 rounded text-[11px] font-bold transition-colors disabled:opacity-40
-                  bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30
-                  disabled:cursor-not-allowed"
-              >
-                {setupSaving
-                  ? "Saving…"
-                  : slotSetupIds[formSymbol]
-                    ? `↻ Update ${formSymbol} Monitor`
-                    : `⊕ Monitor ${formSymbol} Zone`
-                }
-              </button>
+              <>
+                <p className="text-[10px] text-gray-600 mb-2">
+                  Signals are generated using your broker’s MT5 candle data. Different brokers may produce slightly different structure signals.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleTrackSetup}
+                  disabled={setupSaving || !autoConn}
+                  className="w-full h-8 rounded text-[11px] font-bold transition-colors disabled:opacity-40
+                    bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30
+                    disabled:cursor-not-allowed"
+                >
+                  {setupSaving
+                    ? "Saving…"
+                    : slotSetupIds[formSymbol]
+                      ? `↻ Update ${formSymbol} Monitor`
+                      : `⊕ Monitor ${formSymbol} Zone`
+                  }
+                </button>
+              </>
             )}
 
             {/* Setup feedback */}

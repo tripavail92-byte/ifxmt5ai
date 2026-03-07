@@ -14,6 +14,7 @@ interface TradingSetup {
   side: string;
   entry_price: number;
   zone_percent: number;
+  timeframe?: string;
   zone_low: number;
   zone_high: number;
   loss_edge: number;

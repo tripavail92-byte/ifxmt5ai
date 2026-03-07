@@ -69,6 +69,13 @@ class Setup:
     symbol:           str
     side:             str            # 'buy' | 'sell'
 
+    # Chart timeframe used for structure / CHOCH-BOS detection (e.g., '5m', '1h')
+    timeframe:        str
+
+    # AI sensitivity (NI) used for structure analysis.
+    # Direct correlation: pivot_window = ai_sensitivity (1–10)
+    ai_sensitivity:   int = 5
+
     entry_price:      float
     zone_low:         float          # entry * (1 - zone_percent/100)
     zone_high:        float          # entry * (1 + zone_percent/100)
@@ -202,6 +209,8 @@ def build_setup_from_row(row: dict) -> Setup:
         user_id                  = row.get("user_id"),
         symbol                   = row["symbol"],
         side                     = row["side"],
+        timeframe                = (row.get("timeframe") or "5m"),
+        ai_sensitivity            = int(row.get("ai_sensitivity") or 5),
         entry_price              = float(row["entry_price"]),
         zone_low                 = float(row["zone_low"]),
         zone_high                = float(row["zone_high"]),

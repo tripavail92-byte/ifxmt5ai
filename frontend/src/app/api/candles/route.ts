@@ -1,18 +1,18 @@
 /**
  * GET /api/candles
  *
- * Returns buffered OHLCV bars from the in-memory state.
- * Used by CandlestickChart on mount to load real history.
+ * Returns broker-native OHLCV bars from the MT5 terminal via price_relay /candles.
+ * Single source of truth: do not synthesize candles in the frontend.
  *
  * Query params:
  *   symbol  — required, e.g. BTCUSDm
- *   tf      — timeframe: 1m | 5m | 15m | 1h | 4h | 1d  (default: 1m)
+ *   tf      — timeframe: 1m | 3m | 5m | 15m | 30m | 1h | 4h | 1d  (default: 1m)
  *   count   — number of bars to return (default: 300, max: 1500)
- *   conn_id — optional connection UUID filter
+ *   conn_id — required connection UUID (selects the correct broker terminal)
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { mt5State, TF_MINUTES } from "@/lib/mt5-state";
+import { TF_MINUTES } from "@/lib/mt5-state";
 
 export const runtime = "nodejs";
 
@@ -63,6 +63,9 @@ export async function GET(req: NextRequest) {
   if (!symbol) {
     return NextResponse.json({ error: "symbol required" }, { status: 400 });
   }
+  if (!connId) {
+    return NextResponse.json({ error: "conn_id required" }, { status: 400 });
+  }
   if (!TF_MINUTES[tf]) {
     return NextResponse.json(
       { error: `tf must be one of: ${Object.keys(TF_MINUTES).join(", ")}` },
@@ -70,30 +73,20 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // Always merge bars from ALL connections — push_history_now.py stores under
-  // "push_script" while the live EA stores under its UUID. Passing "" triggers
-  // the merge path in getCandles() so we get the full combined history.
-  const localAll = mt5State.getCandles("", symbol, tf, 1_000_000);
-  const localBars = count < localAll.length ? localAll.slice(-count) : localAll;
+  if (!PRICE_RELAY_URL) {
+    return NextResponse.json({ error: "PRICE_RELAY_URL not configured" }, { status: 503 });
+  }
 
-  // Prefer whichever source has more history — relay is authoritative when healthy
-  // (avoids "1 candle after refresh" when Next.js restarts), but fall back to
-  // local when the relay only has its forming bar (0 closed bars yet).
-  let bars = localBars;
-  let source: "memory" | "relay" = "memory";
-
-  const relayBars = await fetchRelayCandles({ symbol, tf, count, connId: connId || undefined });
-  if (relayBars && relayBars.length > bars.length) {
-    bars = relayBars;
-    source = "relay";
+  const relayBars = await fetchRelayCandles({ symbol, tf, count, connId });
+  if (relayBars === null) {
+    return NextResponse.json({ error: "relay unavailable" }, { status: 503 });
   }
 
   return NextResponse.json(
-    { symbol, tf, count: bars.length, total: localAll.length, source, bars },
+    { symbol, tf, count: relayBars.length, source: "relay", bars: relayBars },
     {
       headers: {
-        // Short cache — chart can poll every few seconds for latest
-        "Cache-Control": "public, max-age=2, stale-while-revalidate=5",
+        "Cache-Control": "no-store",
       },
     }
   );

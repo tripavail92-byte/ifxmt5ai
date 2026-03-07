@@ -43,6 +43,17 @@ create table if not exists public.trading_setups (
   entry_price      numeric not null check (entry_price > 0),
   zone_percent     numeric not null default 0.10 check (zone_percent > 0),
 
+  -- Chart timeframe used for structure / CHOCH-BOS evaluation
+  -- Stored in API format (e.g., '5m', '1h')
+  timeframe        text not null default '5m'
+                 check (timeframe in ('1m','3m','5m','15m','30m','1h','4h','1d')),
+
+  -- AI sensitivity (NI) used for structure pivot_window.
+  -- Direct correlation: pivot_window = ai_sensitivity (1–10)
+  ai_sensitivity   integer not null default 5
+                 constraint trading_setups_ai_sensitivity_check
+                 check (ai_sensitivity between 1 and 10),
+
   -- Derived zone boundaries (computed from entry_price + zone_percent)
   -- BUY:  zone_low  = entry * (1 - zone_percent/100)
   --       zone_high = entry * (1 + zone_percent/100)
@@ -108,6 +119,82 @@ drop trigger if exists trg_trading_setups_updated_at on public.trading_setups;
 create trigger trg_trading_setups_updated_at
 before update on public.trading_setups
 for each row execute function public.set_updated_at();
+
+-- Ensure new columns exist even if trading_setups was created previously
+do $$ begin
+  if exists (
+    select 1 from information_schema.tables
+    where table_schema = 'public' and table_name = 'trading_setups'
+  ) then
+    if not exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public'
+        and table_name   = 'trading_setups'
+        and column_name  = 'timeframe'
+    ) then
+      alter table public.trading_setups
+        add column timeframe text not null default '5m';
+    end if;
+
+    if not exists (
+      select 1 from pg_constraint
+      where conname = 'trading_setups_timeframe_check'
+    ) then
+      alter table public.trading_setups
+        add constraint trading_setups_timeframe_check
+        check (timeframe in ('1m','3m','5m','15m','30m','1h','4h','1d'));
+    end if;
+
+    if not exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public'
+        and table_name   = 'trading_setups'
+        and column_name  = 'ai_sensitivity'
+    ) then
+      alter table public.trading_setups
+        add column ai_sensitivity integer not null default 5;
+    end if;
+
+    if not exists (
+      select 1 from pg_constraint
+      where conname = 'trading_setups_ai_sensitivity_check'
+    ) then
+      alter table public.trading_setups
+        add constraint trading_setups_ai_sensitivity_check
+        check (ai_sensitivity between 1 and 10);
+    end if;
+  end if;
+end $$;
+
+
+-- -----------------------------------------------
+-- 2b) setup_structure_events
+--     CHOCH/BOS (break) events emitted while a setup is STALKING.
+--     Written by setup_manager.py and consumed by risk management.
+-- -----------------------------------------------
+create table if not exists public.setup_structure_events (
+  id           bigserial primary key,
+  setup_id     uuid not null references public.trading_setups(id) on delete cascade,
+
+  event_type   text not null check (event_type in ('CHOCH', 'BOS')),
+  break_dir    text not null check (break_dir in ('bull', 'bear')),
+  timeframe    text not null check (timeframe in ('1m','3m','5m','15m','30m','1h','4h','1d')),
+
+  -- The swing level that was broken
+  level        numeric not null,
+  -- Close price of the candle that triggered the break
+  close_price  numeric not null,
+  -- Open-time (epoch_s) of the triggering candle on the event timeframe
+  candle_time  bigint not null,
+
+  created_at   timestamptz not null default now()
+);
+
+create index if not exists idx_structure_events_setup_created
+  on public.setup_structure_events(setup_id, created_at desc);
+
+create index if not exists idx_structure_events_created
+  on public.setup_structure_events(created_at desc);
 
 
 -- -----------------------------------------------
@@ -182,11 +269,38 @@ create policy "users can read own setup transitions"
   );
 
 
+-- setup_structure_events (read-only for users; service role writes)
+alter table public.setup_structure_events enable row level security;
+
+drop policy if exists "users can read own structure events" on public.setup_structure_events;
+create policy "users can read own structure events"
+  on public.setup_structure_events
+  for select
+  using (
+    exists (
+      select 1 from public.trading_setups ts
+      where ts.id = setup_id
+        and ts.user_id = auth.uid()
+    )
+  );
+
+
 -- -----------------------------------------------
 -- 5) RPC: upsert_trading_setup
 --    Called by ManualTradeCard submit handler.
 --    Computes zone_low, zone_high, loss_edge, target from inputs.
 -- -----------------------------------------------
+-- NOTE: We DROP first because adding/removing parameters changes the function
+-- signature (creates a new overload). Dropping ensures one canonical RPC.
+drop function if exists public.upsert_trading_setup(
+  uuid, uuid, text, text, numeric, numeric, text, uuid
+);
+drop function if exists public.upsert_trading_setup(
+  uuid, uuid, text, text, numeric, numeric, text, text, uuid
+);
+drop function if exists public.upsert_trading_setup(
+  uuid, uuid, text, text, numeric, numeric, text, integer, text, uuid
+);
 create or replace function public.upsert_trading_setup(
   p_user_id          uuid,
   p_connection_id    uuid,
@@ -194,6 +308,8 @@ create or replace function public.upsert_trading_setup(
   p_side             text,
   p_entry_price      numeric,
   p_zone_percent     numeric,
+  p_timeframe        text default '5m',
+  p_ai_sensitivity   integer default 5,
   p_notes            text default null,
   p_setup_id         uuid default null   -- if provided, update existing
 )
@@ -228,6 +344,8 @@ begin
       side                     = p_side,
       entry_price              = p_entry_price,
       zone_percent             = p_zone_percent,
+      timeframe                = coalesce(p_timeframe, '5m'),
+      ai_sensitivity            = coalesce(p_ai_sensitivity, 5),
       zone_low                 = v_zone_low,
       zone_high                = v_zone_high,
       loss_edge                = v_loss_edge,
@@ -243,12 +361,12 @@ begin
     -- Insert new setup
     insert into public.trading_setups (
       user_id, connection_id, symbol, side,
-      entry_price, zone_percent,
+      entry_price, zone_percent, timeframe, ai_sensitivity,
       zone_low, zone_high, loss_edge, target,
       notes
     ) values (
       p_user_id, p_connection_id, p_symbol, p_side,
-      p_entry_price, p_zone_percent,
+      p_entry_price, p_zone_percent, coalesce(p_timeframe, '5m'), coalesce(p_ai_sensitivity, 5),
       v_zone_low, v_zone_high, v_loss_edge, v_target,
       p_notes
     )
@@ -264,6 +382,9 @@ $$;
 -- 6) RPC: get_setups_for_connection
 --    Used by frontend dashboard to display setup states.
 -- -----------------------------------------------
+-- NOTE: We DROP first because Postgres cannot change the row type of a
+-- RETURNS TABLE function via CREATE OR REPLACE.
+drop function if exists public.get_setups_for_connection(uuid);
 create or replace function public.get_setups_for_connection(
   p_connection_id uuid
 )
@@ -273,6 +394,8 @@ returns table (
   side                      text,
   entry_price               numeric,
   zone_percent              numeric,
+  timeframe                 text,
+  ai_sensitivity            integer,
   zone_low                  numeric,
   zone_high                 numeric,
   loss_edge                 numeric,
@@ -290,6 +413,8 @@ stable
 as $$
   select
     id, symbol, side, entry_price, zone_percent,
+    timeframe,
+    ai_sensitivity,
     zone_low, zone_high, loss_edge, target,
     state::text, dead_trigger_candle_time,
     is_active, notes, created_at, updated_at
@@ -335,7 +460,7 @@ $$;
 --    Some projects revoke default EXECUTE; make it explicit.
 -- -----------------------------------------------
 grant execute on function public.upsert_trading_setup(
-  uuid, uuid, text, text, numeric, numeric, text, uuid
+  uuid, uuid, text, text, numeric, numeric, text, integer, text, uuid
 ) to authenticated;
 
 grant execute on function public.get_setups_for_connection(uuid)
@@ -343,6 +468,8 @@ grant execute on function public.get_setups_for_connection(uuid)
 
 grant execute on function public.deactivate_setup(uuid, uuid)
   to authenticated;
+
+grant select on table public.setup_structure_events to authenticated;
 
 
 -- -----------------------------------------------
@@ -367,6 +494,15 @@ do $$ begin
         and tablename = 'setup_state_transitions'
     ) then
       execute 'alter publication supabase_realtime add table public.setup_state_transitions';
+    end if;
+
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime'
+        and schemaname = 'public'
+        and tablename = 'setup_structure_events'
+    ) then
+      execute 'alter publication supabase_realtime add table public.setup_structure_events';
     end if;
   end if;
 end $$;

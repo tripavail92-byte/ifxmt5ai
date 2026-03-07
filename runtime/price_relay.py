@@ -128,8 +128,10 @@ CANDLE_MAXBARS   = int(os.getenv("RELAY_CANDLE_MAXBARS", "10000"))
 # Timeframe aggregation map  {tf_label -> minutes}
 TF_MINUTES = {
     "1m":  1,
+    "3m":  3,
     "5m":  5,
     "15m": 15,
+    "30m": 30,
     "1h":  60,
     "4h":  240,
     "1d":  1440,
@@ -367,13 +369,21 @@ def _aggregate_tf(bars_1m: list, tf_minutes: int) -> list:
 
 
 def _get_candles(conn_id: str, symbol: str, tf: str, count: int) -> list:
-    """Return up to `count` closed bars for symbol/tf, oldest-first."""
-    tf_min = TF_MINUTES.get(tf, 1)
-    with _state_lock:
-        bars_1m = list(candle_buffer[conn_id][symbol])  # snapshot
+    """Return up to `count` broker-native bars for symbol/tf, oldest-first.
 
-    aggregated = _aggregate_tf(bars_1m, tf_min)
-    return aggregated[-count:] if count < len(aggregated) else aggregated
+    Golden rule: no synthetic candles anywhere for charting.
+    This endpoint must mirror the user's MT5 broker candles.
+    """
+
+    from runtime.mt5_candles import get_broker_candles
+
+    return get_broker_candles(
+        connection_id=conn_id,
+        symbol=symbol,
+        timeframe=tf,
+        count=count,
+        include_current=True,
+    )
 
 
 # ─── HMAC verification ────────────────────────────────────────────────────────
@@ -423,6 +433,9 @@ class RelayHandler(BaseHTTPRequestHandler):
         elif path == "/prices":
             self._handle_get_prices(qs)
 
+        elif path == "/debug/mt5_status":
+            self._handle_debug_mt5_status(qs)
+
         elif path == "/health":
             uptime = time.time() - stats["t_start"]
             body = json.dumps({
@@ -449,6 +462,47 @@ class RelayHandler(BaseHTTPRequestHandler):
         else:
             self._send(404, b'{"error":"not found"}')
 
+    def _handle_debug_mt5_status(self, qs: dict) -> None:
+        """GET /debug/mt5_status?conn_id=...&symbol=...&tf=...&token=...
+
+        For safety:
+          - if IFX_DEBUG_TOKEN is set, require ?token=...
+          - else only allow localhost.
+        """
+        debug_token = (os.getenv("IFX_DEBUG_TOKEN") or "").strip()
+        token = (qs.get("token", [""])[0]).strip()
+        remote_ip = (self.client_address[0] or "").strip()
+        if debug_token:
+            if token != debug_token:
+                self._send(403, b'{"error":"forbidden"}')
+                return
+        else:
+            if remote_ip not in {"127.0.0.1", "::1"}:
+                self._send(403, b'{"error":"forbidden"}')
+                return
+
+        conn_id = (qs.get("conn_id", [""])[0]).strip()
+        symbol = (qs.get("symbol", [""])[0]).strip()
+        tf = (qs.get("tf", ["5m"])[0]).strip()
+
+        if not conn_id:
+            self._send(400, b'{"error":"conn_id required"}')
+            return
+        if not symbol:
+            self._send(400, b'{"error":"symbol required"}')
+            return
+        if tf not in TF_MINUTES:
+            self._send(400, json.dumps({"error": f"tf must be one of {list(TF_MINUTES)}"}).encode())
+            return
+
+        try:
+            from runtime.mt5_candles import get_mt5_status
+
+            payload = get_mt5_status(conn_id, symbol, tf)
+            self._send(200, json.dumps(payload).encode())
+        except Exception as exc:
+            self._send(500, json.dumps({"error": repr(exc)}).encode())
+
     def _handle_config(self):
         stats["config_reqs"] += 1
         conn_id = self.headers.get("X-IFX-CONN-ID", "default")
@@ -471,29 +525,14 @@ class RelayHandler(BaseHTTPRequestHandler):
         if not symbol:
             self._send(400, b'{"error":"symbol required"}')
             return
+        if not conn_id:
+            self._send(400, b'{"error":"conn_id required"}')
+            return
         if tf not in TF_MINUTES:
             self._send(400, json.dumps({"error": f"tf must be one of {list(TF_MINUTES)}"}).encode())
             return
 
-        # If conn_id not specified, search all connections for this symbol
-        if not conn_id:
-            for cid in candle_buffer:
-                if symbol in candle_buffer[cid]:
-                    conn_id = cid
-                    break
-
         bars = _get_candles(conn_id, symbol, tf, count)
-
-        # Append current forming candle if available
-        with _state_lock:
-            fc = forming.get(conn_id, {}).get(symbol)
-        if fc:
-            tf_min  = TF_MINUTES[tf]
-            slot_sec = tf_min * 60
-            fc_slot = (fc["t"] // slot_sec) * slot_sec
-            if not bars or bars[-1]["t"] != fc_slot:
-                bars = bars + [{"t": fc_slot, "o": fc["o"], "h": fc["h"],
-                                "l": fc["l"], "c": fc["c"], "v": fc.get("v", 0)}]
 
         body = json.dumps({"symbol": symbol, "tf": tf, "count": len(bars), "bars": bars}).encode()
         self._send(200, body)
@@ -780,7 +819,7 @@ def main():
     log.info(f"HTTP server ready — waiting for EA connections on port {PORT}")
     log.info("Endpoints:")
     log.info("  GET  /config                      — symbol list")
-    log.info("  GET  /candles?symbol=X&tf=1h&count=200 — buffered candles")
+    log.info("  GET  /candles?symbol=X&tf=1h&count=200&conn_id=... — broker candles (MT5)")
     log.info("  GET  /prices                      — latest bid/ask snapshot")
     log.info("  GET  /health                      — stats")
     log.info("  POST /tick-batch                  — live ticks + forming candles")
