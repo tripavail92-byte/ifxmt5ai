@@ -91,18 +91,24 @@ export async function GET(req: NextRequest) {
   }
 
   // Fast-path: serve from in-memory state (populated via /api/mt5/ingest).
-  // Try exact conn_id first, then merged-all-connections to handle conn_id
-  // drift between browser selection and relay push source.
-  let stateBars = mt5State.getCandles(connId, symbol, tf, count);
-  if (!stateBars.length) {
-    // Empty string → getCandles merges across all known connections
-    stateBars = mt5State.getCandles("", symbol, tf, count);
-  }
+  // Always compare exact conn_id vs merged-all-connections and use whichever
+  // has more bars. This handles conn_id drift where exact has only 1 forming
+  // bar but merged state has full history.
+  const exactStateBars = mt5State.getCandles(connId, symbol, tf, count);
+  const mergedStateBars = mt5State.getCandles("", symbol, tf, count);
+  let stateBars = mergedStateBars.length > exactStateBars.length ? mergedStateBars : exactStateBars;
 
   // If state has enough bars, trust it and skip relay fetch.
   if (stateBars.length >= MIN_STATE_BARS) {
     return NextResponse.json(
-      { symbol, tf, count: stateBars.length, source: "state", bars: stateBars },
+      {
+        symbol,
+        tf,
+        count: stateBars.length,
+        source: "state",
+        bars: stateBars,
+        debug: { exact_state_count: exactStateBars.length, merged_state_count: mergedStateBars.length },
+      },
       { headers: { "Cache-Control": "no-store" } }
     );
   }
@@ -110,7 +116,14 @@ export async function GET(req: NextRequest) {
   if (!PRICE_RELAY_URL) {
     // No relay configured; return whatever state has (possibly empty).
     return NextResponse.json(
-      { symbol, tf, count: stateBars.length, source: "state", bars: stateBars },
+      {
+        symbol,
+        tf,
+        count: stateBars.length,
+        source: "state",
+        bars: stateBars,
+        debug: { exact_state_count: exactStateBars.length, merged_state_count: mergedStateBars.length },
+      },
       { headers: { "Cache-Control": "no-store" } }
     );
   }
@@ -120,7 +133,14 @@ export async function GET(req: NextRequest) {
     // Relay unavailable; return current state bars (possibly empty) so UI keeps
     // running and can fill via SSE/state later.
     return NextResponse.json(
-      { symbol, tf, count: stateBars.length, source: "state", bars: stateBars },
+      {
+        symbol,
+        tf,
+        count: stateBars.length,
+        source: "state",
+        bars: stateBars,
+        debug: { exact_state_count: exactStateBars.length, merged_state_count: mergedStateBars.length },
+      },
       { headers: { "Cache-Control": "no-store" } }
     );
   }
@@ -138,7 +158,18 @@ export async function GET(req: NextRequest) {
   }
 
   return NextResponse.json(
-    { symbol, tf, count: bestBars.length, source, bars: bestBars },
+    {
+      symbol,
+      tf,
+      count: bestBars.length,
+      source,
+      bars: bestBars,
+      debug: {
+        exact_state_count: exactStateBars.length,
+        merged_state_count: mergedStateBars.length,
+        relay_count: relay.bars.length,
+      },
+    },
     {
       headers: {
         "Cache-Control": "no-store",
