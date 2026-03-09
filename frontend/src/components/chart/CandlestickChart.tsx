@@ -251,35 +251,44 @@ export function CandlestickChart({
       setIsLive(true);
     };
 
+    // Minimum bars Railway must return before we trust it as the sole source.
+    // After a Railway redeploy the in-memory state resets and may hold only the
+    // current forming bar (count=1). We always also query the local relay and
+    // use whichever source returns more bars.
+    const MIN_RAILWAY_BARS = 20;
+
     const load = async () => {
+      let railwayBars: RawCandleBar[] = [];
+      let relayBars:   RawCandleBar[] = [];
+
+      // 1) Same-origin Railway API (state-first, avoids relay dependency)
       try {
-        // 1) Preferred: same-origin API (Railway may proxy to relay/state)
         const r1 = await fetch(apiUrl, { signal: ac.signal, cache: "no-store" });
         const d1 = (await r1.json()) as { bars?: RawCandleBar[] };
-        const bars1 = d1.bars ?? [];
-        if (bars1.length) {
-          applyBars(bars1);
-          return;
-        }
+        railwayBars = d1.bars ?? [];
       } catch (err) {
         if ((err as Error)?.name !== "AbortError") {
           console.warn("[CandlestickChart] /api/candles failed:", err);
         }
       }
 
-      // 2) Fallback: local relay on the user's machine (works without extension if CORS is enabled)
-      try {
-        const r2 = await fetch(localRelayUrl, { signal: ac.signal, cache: "no-store" });
-        const d2 = (await r2.json()) as { bars?: RawCandleBar[] };
-        const bars2 = d2.bars ?? [];
-        if (bars2.length) {
-          applyBars(bars2);
-        }
-      } catch (err) {
-        if ((err as Error)?.name !== "AbortError") {
-          console.warn("[CandlestickChart] localhost relay fetch failed:", err);
+      // 2) Local relay — always try if Railway returned fewer than MIN_RAILWAY_BARS
+      //    (handles post-deploy state wipe, relay returning 1 forming bar, etc.)
+      if (railwayBars.length < MIN_RAILWAY_BARS) {
+        try {
+          const r2 = await fetch(localRelayUrl, { signal: ac.signal, cache: "no-store" });
+          const d2 = (await r2.json()) as { bars?: RawCandleBar[] };
+          relayBars = d2.bars ?? [];
+        } catch (err) {
+          if ((err as Error)?.name !== "AbortError") {
+            console.warn("[CandlestickChart] localhost relay fetch failed:", err);
+          }
         }
       }
+
+      // Use whichever source has more bars
+      const best = relayBars.length > railwayBars.length ? relayBars : railwayBars;
+      if (best.length) applyBars(best);
     };
 
     void load();
