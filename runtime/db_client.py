@@ -9,10 +9,12 @@ Never import supabase directly in worker/supervisor.
 import logging
 import os
 import socket
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
 from supabase import Client, create_client
+from supabase.lib.client_options import SyncClientOptions
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +24,66 @@ logger = logging.getLogger(__name__)
 
 _client: Optional[Client] = None
 
+_dotenv_loaded = False
+
+
+def _maybe_load_dotenv() -> None:
+    """Best-effort .env bootstrap.
+
+    `main.py` usually loads .env, but worker/supervisor may be launched directly
+    (or by external schedulers). Loading here makes runtime entrypoints robust.
+    """
+    global _dotenv_loaded
+    if _dotenv_loaded:
+        return
+    _dotenv_loaded = True
+    try:
+        from dotenv import load_dotenv  # type: ignore
+
+        load_dotenv()
+    except Exception:
+        return
+
+
+def _require_env(name: str) -> str:
+    val = os.environ.get(name)
+    if val:
+        return val
+    raise KeyError(
+        f"Missing required env var: {name}. "
+        "Make sure you have a .env file or start via main.py."
+    )
+
 
 def get_client() -> Client:
     global _client
     if _client is None:
-        url = os.environ["SUPABASE_URL"]
-        key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-        _client = create_client(url, key)
+        _maybe_load_dotenv()
+
+        url = _require_env("SUPABASE_URL")
+        key = _require_env("SUPABASE_SERVICE_ROLE_KEY")
+        # Avoid long hangs in background threads (e.g., heartbeat keepalive) if the
+        # network stalls. Keep this comfortably below HEARTBEAT_STALE_SEC.
+        timeout_sec_raw = os.environ.get("SUPABASE_POSTGREST_TIMEOUT_SEC", "8")
+        try:
+            timeout_sec = float(timeout_sec_raw)
+        except Exception:
+            timeout_sec = 8.0
+        _client = create_client(
+            url,
+            key,
+            options=SyncClientOptions(postgrest_client_timeout=timeout_sec),
+        )
     return _client
+
+
+def _format_supabase_exc(exc: Exception) -> str:
+    parts: list[str] = [repr(exc)]
+    for attr in ("message", "details", "hint", "code"):
+        val = getattr(exc, attr, None)
+        if val:
+            parts.append(f"{attr}={val}")
+    return " | ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -131,9 +185,25 @@ def upsert_heartbeat(
     if started_at:
         payload["started_at"] = started_at
 
-    get_client().table("mt5_worker_heartbeats").upsert(
-        payload, on_conflict="connection_id"
-    ).execute()
+    try:
+        get_client().table("mt5_worker_heartbeats").upsert(
+            payload, on_conflict="connection_id"
+        ).execute()
+    except Exception as exc:
+        # Avoid log spam: only log a detailed message once per connection per 30s.
+        now = time.time()
+        cache = globals().setdefault("_HB_ERR_LAST", {})
+        last = cache.get(connection_id, 0.0)
+        if now - last >= 30.0:
+            cache[connection_id] = now
+            logger.warning(
+                "upsert_heartbeat failed for %s (status=%s pid=%s): %s",
+                connection_id,
+                status,
+                pid,
+                _format_supabase_exc(exc),
+            )
+        raise
 
 
 def get_all_heartbeats() -> list[dict]:

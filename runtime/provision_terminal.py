@@ -9,6 +9,7 @@ Never shares any MT5 data folder across connections.
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,51 @@ def is_provisioned(connection_id: str) -> bool:
     return (path / "terminal64.exe").exists()
 
 
+def _backup_existing_terminal_folder(dest: Path) -> Path | None:
+    if not dest.exists():
+        return None
+
+    # Best-effort: terminate any running terminal from this folder.
+    # Reprovisioning while terminal64.exe is alive can fail on Windows.
+    try:
+        import psutil  # type: ignore
+
+        target_exe = dest / "terminal64.exe"
+        if target_exe.exists():
+            target = str(target_exe.resolve())
+            for proc in psutil.process_iter(attrs=["pid", "exe"]):
+                try:
+                    exe = proc.info.get("exe") or ""
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+                if not exe:
+                    continue
+                try:
+                    if str(Path(exe).resolve()) == target:
+                        proc.terminate()
+                except Exception:
+                    continue
+
+            # Give it a moment to die.
+            time.sleep(1)
+    except Exception:
+        pass
+
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    backup = dest.parent / f"{dest.name}_backup_{stamp}"
+
+    # Best-effort: avoid collisions.
+    if backup.exists():
+        try:
+            shutil.rmtree(str(backup), ignore_errors=True)
+        except Exception:
+            pass
+
+    shutil.move(str(dest), str(backup))
+    logger.warning("[provisioner] Moved existing terminal folder to backup: %s", backup)
+    return backup
+
+
 def provision(connection_id: str, broker_server: str = "", force: bool = False) -> Path:
     """
     Copy MT5 binary into terminals/<connection_id>/ if not already present.
@@ -67,28 +113,20 @@ def provision(connection_id: str, broker_server: str = "", force: bool = False) 
         if is_provisioned(connection_id):
             logger.info("[provisioner] Terminal already exists: %s", dest)
             return dest
-        else:
-            logger.warning(
-                "[provisioner] Terminal folder exists but corrupted — re-provisioning."
-            )
+        logger.warning(
+            "[provisioner] Terminal folder exists but corrupted — re-provisioning."
+        )
 
-    # Preserve logs if they exist
-    logs_backup = None
-    if (dest / "logs").exists():
-        logs_backup = dest / "logs"
-        tmp_logs = Path(TERMINALS_DIR) / f"{connection_id}_logs_backup"
-        shutil.copytree(logs_backup, tmp_logs, dirs_exist_ok=True)
-        logger.info("[provisioner] Backed up logs to %s", tmp_logs)
+    # If forcing or the folder looks corrupted, prefer a clean reprovision.
+    # Copy-over can leave behind broken state (Config/*.dat, partial updates, etc).
+    if dest.exists():
+        try:
+            _backup_existing_terminal_folder(dest)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to backup existing terminal folder {dest}: {exc}") from exc
 
     logger.info("[provisioner] Copying %s → %s", base, dest)
     shutil.copytree(str(base), str(dest), dirs_exist_ok=True)
-
-    # Restore logs
-    tmp_logs = Path(TERMINALS_DIR) / f"{connection_id}_logs_backup"
-    if logs_backup and tmp_logs.exists():
-        shutil.copytree(str(tmp_logs), str(dest / "logs"), dirs_exist_ok=True)
-        shutil.rmtree(str(tmp_logs), ignore_errors=True)
-        logger.info("[provisioner] Restored logs.")
 
     # Portable mode marker
     (dest / "portable").touch()
@@ -112,3 +150,9 @@ def verify_or_provision(connection_id: str, broker_server: str = "") -> Path:
         return get_terminal_path(connection_id)
     logger.warning("[provisioner] Terminal missing for %s — provisioning now.", connection_id)
     return provision(connection_id, broker_server=broker_server)
+
+
+def verify_or_reprovision(connection_id: str, broker_server: str = "") -> Path:
+    """Force a clean reprovision, backing up any existing folder."""
+    logger.warning("[provisioner] Forcing terminal reprovision for %s", connection_id)
+    return provision(connection_id, broker_server=broker_server, force=True)

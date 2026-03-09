@@ -29,9 +29,11 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 
 def _enforce_venv() -> None:
@@ -61,7 +63,7 @@ import MetaTrader5 as mt5
 
 import db_client as db
 from crypto_utils import decrypt_mt5_password
-from provision_terminal import verify_or_provision
+from provision_terminal import verify_or_provision, verify_or_reprovision
 
 # ---------------------------------------------------------------------------
 # Bootstrap logging
@@ -119,72 +121,101 @@ def claimed_by_label() -> str:
 # MT5 headless initialize (Enterprise Config Injection)
 # ---------------------------------------------------------------------------
 
-def mt5_init_headless(terminal_path: str, login: int, password: str, server: str, timeout: int) -> bool:
+def mt5_init_headless(
+    terminal_path: str,
+    login: int,
+    password: str,
+    server: str,
+    timeout: int,
+    progress_cb: Callable[[], None] | None = None,
+) -> bool:
     """
-    Enterprise-grade MT5 initialization.
-    Generates a temporary startup.ini file to feed to terminal64.exe on boot.
-    This entirely suppresses the 'Open an Account' wizard that causes IPC timeouts
-    on brand new portable installations.
-    """
-    base_folder = Path(terminal_path).parent
-    ini_path = base_folder / "startup.ini"
-    
-    # Write the temporary credentials configuration file
-    ini_content = f"""[Common]
-Login={login}
-Password={password}
-Server={server}
-"""
-    with open(ini_path, "w", encoding="utf-8") as f:
-        f.write(ini_content)
+    MT5 initialization with timeout + retries.
 
+    Important: avoid manually launching terminal64.exe here.
+    When `mt5.initialize(path=...)` is given a path, the MetaTrader5 Python API
+    may start/connect to the terminal itself; double-launching can cause
+    "terminal process already started" and clean exits (code 0), preventing IPC.
+    """
     deadline = time.time() + timeout
-    
-    try:
-        # Launch terminal explicitly with the config file
-        subprocess.Popen([
-            str(terminal_path), 
-            "/portable", 
-            f"/config:{ini_path}"
-        ])
-        time.sleep(5)  # Let MT5 process the config and bind the IPC port
-    except Exception as e:
-        print(f"Failed to start terminal: {e}")
 
-    try:
-        def try_init():
-            return mt5.initialize(
-                path=str(terminal_path),
-                portable=True,
-                server=server,
-                login=login,
-                password=password,
-                timeout=10000
-            )
-
-        result = try_init()
-        if result:
-            return True
-        
-        while not result and time.time() < deadline:
-            time.sleep(2)
-            result = try_init()
-            
-        return result
-    finally:
-        # Security: Destroy the plaintext config file immediately
+    def _progress() -> None:
+        if progress_cb is None:
+            return
         try:
-            if ini_path.exists():
-                ini_path.unlink()
+            progress_cb()
+        except Exception:
+            return
+
+    # Best-effort: terminate a stuck terminal for this exact portable path.
+    try:
+        import psutil  # type: ignore
+
+        target = str(Path(terminal_path))
+        for proc in psutil.process_iter(attrs=["pid", "exe"]):
+            try:
+                exe = proc.info.get("exe") or ""
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            if not exe:
+                continue
+            try:
+                if Path(exe).resolve() == Path(target).resolve():
+                    proc.terminate()
+            except Exception:
+                continue
+        time.sleep(1)
+    except Exception:
+        pass
+
+    # Repeatedly attempt initialization within the overall timeout window.
+    # Short per-call timeout keeps retries responsive.
+    per_call_timeout_ms = 15000
+    while time.time() < deadline:
+        _progress()
+        ok = mt5.initialize(
+            path=str(terminal_path),
+            portable=True,
+            server=server,
+            login=login,
+            password=password,
+            timeout=per_call_timeout_ms,
+        )
+        if ok:
+            return True
+
+        # Reset state between attempts.
+        try:
+            mt5.shutdown()
         except Exception:
             pass
 
+        time.sleep(2)
 
-def login_with_timeout(login: int, password: str, server: str, timeout: int) -> bool:
+    return False
+
+
+def login_with_timeout(
+    login: int,
+    password: str,
+    server: str,
+    timeout: int,
+    progress_cb: Callable[[], None] | None = None,
+) -> bool:
     """Attempt mt5.login() and wait up to timeout seconds."""
     deadline = time.time() + timeout
+    if progress_cb is not None:
+        try:
+            progress_cb()
+        except Exception:
+            pass
     result = mt5.login(login, password=password, server=server)
     while not result and time.time() < deadline:
+        if progress_cb is not None:
+            try:
+                progress_cb()
+            except Exception:
+                pass
         time.sleep(2)
         result = mt5.login(login, password=password, server=server)
     return result
@@ -530,23 +561,121 @@ def run_worker(connection_id: str):
     init_attempt = 0
     mt5_ready = False
 
-    while init_attempt < INIT_RETRIES and not mt5_ready:
-        init_attempt += 1
-        logger.info("MT5 init attempt %d/%d ...", init_attempt, INIT_RETRIES)
+    reprovisioned = False
 
-        if not mt5_init_headless(str(terminal_path / "terminal64.exe"), account_login, password, broker_server, INIT_TIMEOUT):
-            logger.warning("mt5.initialize() failed: %s", mt5.last_error())
-            mt5.shutdown()
-            time.sleep(3)
-            continue
+    last_init_heartbeat = 0.0
 
-        if not login_with_timeout(account_login, password, broker_server, LOGIN_TIMEOUT):
-            logger.warning("mt5.login() failed: %s", mt5.last_error())
-            mt5.shutdown()
-            time.sleep(3)
-            continue
+    def touch_starting_heartbeat() -> None:
+        nonlocal last_init_heartbeat
+        now = time.time()
+        if now - last_init_heartbeat < HEARTBEAT_INTERVAL:
+            return
+        last_init_heartbeat = now
+        try:
+            db.upsert_heartbeat(
+                connection_id,
+                pid,
+                "starting",
+                terminal_path=str(terminal_path),
+                started_at=started_at,
+            )
+        except Exception:
+            return
 
-        mt5_ready = True
+    def start_keepalive(status: str) -> threading.Event:
+        """Keep the heartbeat fresh while blocking calls (e.g., mt5.initialize)."""
+        stop_event = threading.Event()
+
+        def _loop() -> None:
+            # Fire immediately, then every HEARTBEAT_INTERVAL.
+            while not stop_event.is_set():
+                try:
+                    db.upsert_heartbeat(
+                        connection_id,
+                        pid,
+                        status,
+                        terminal_path=str(terminal_path),
+                        started_at=started_at,
+                    )
+                except Exception:
+                    pass
+                # Wait with early-exit support.
+                stop_event.wait(HEARTBEAT_INTERVAL)
+
+        threading.Thread(
+            target=_loop,
+            name=f"hb_keepalive_{connection_id[:8]}",
+            daemon=True,
+        ).start()
+        return stop_event
+
+    keepalive_stop = start_keepalive("starting")
+
+    try:
+        while init_attempt < INIT_RETRIES and not mt5_ready:
+            init_attempt += 1
+            logger.info("MT5 init attempt %d/%d ...", init_attempt, INIT_RETRIES)
+
+            if not mt5_init_headless(
+                str(terminal_path / "terminal64.exe"),
+                account_login,
+                password,
+                broker_server,
+                INIT_TIMEOUT,
+                progress_cb=touch_starting_heartbeat,
+            ):
+                err = mt5.last_error()
+                logger.warning("mt5.initialize() failed: %s", err)
+
+                # Auto-repair path: when MT5 IPC never answers, the portable folder
+                # is often in a bad state (partial LiveUpdate, corrupted config, etc).
+                # Re-provision once per worker start to avoid infinite loops.
+                if (
+                    (not reprovisioned)
+                    and isinstance(err, tuple)
+                    and len(err) >= 1
+                    and err[0] == -10003
+                ):
+                    reprovisioned = True
+                    logger.warning(
+                        "IPC init timeout (-10003). Forcing terminal reprovision for %s...",
+                        connection_id,
+                    )
+                    try:
+                        terminal_path = verify_or_reprovision(
+                            connection_id,
+                            broker_server=broker_server,
+                        )
+                        db.upsert_heartbeat(
+                            connection_id,
+                            pid,
+                            "starting",
+                            terminal_path=str(terminal_path),
+                            started_at=started_at,
+                        )
+                    except Exception as exc:
+                        logger.error("Forced reprovision failed: %s", exc)
+
+                mt5.shutdown()
+                time.sleep(3)
+                continue
+
+            if not login_with_timeout(
+                account_login,
+                password,
+                broker_server,
+                LOGIN_TIMEOUT,
+                progress_cb=touch_starting_heartbeat,
+            ):
+                logger.warning("mt5.login() failed: %s", mt5.last_error())
+                mt5.shutdown()
+                time.sleep(3)
+                continue
+
+            mt5_ready = True
+
+    finally:
+        keepalive_stop.set()
 
     if not mt5_ready:
         logger.error("MT5 failed to initialize after %d attempts. Cooling down.", INIT_RETRIES)
@@ -656,17 +785,35 @@ def run_worker(connection_id: str):
             mt5.shutdown()
             time.sleep(5)
 
-            if not mt5_init_headless(str(terminal_path / "terminal64.exe"), account_login, password, broker_server, INIT_TIMEOUT):
-                logger.error("Reinitialize failed. Exiting for supervisor restart.")
-                db.update_connection_status(connection_id, "error", "Reinitialize failed")
-                db.log_event("error", "worker", "Reinitialize failed — worker exiting", connection_id)
-                db.delete_heartbeat(connection_id)
-                sys.exit(2)
-                
-            if not login_with_timeout(account_login, password, broker_server, LOGIN_TIMEOUT):
-                logger.error("Relogin failed after reinitialize. Exiting.")
-                db.update_connection_status(connection_id, "error", "Relogin failed")
-                sys.exit(2)
+            reinit_keepalive_stop = start_keepalive("degraded")
+            try:
+                if not mt5_init_headless(
+                    str(terminal_path / "terminal64.exe"),
+                    account_login,
+                    password,
+                    broker_server,
+                    INIT_TIMEOUT,
+                    progress_cb=lambda: db.upsert_heartbeat(connection_id, pid, "degraded", started_at=started_at),
+                ):
+                    logger.error("Reinitialize failed. Exiting for supervisor restart.")
+                    db.update_connection_status(connection_id, "error", "Reinitialize failed")
+                    db.log_event("error", "worker", "Reinitialize failed — worker exiting", connection_id)
+                    db.delete_heartbeat(connection_id)
+                    sys.exit(2)
+
+                if not login_with_timeout(
+                    account_login,
+                    password,
+                    broker_server,
+                    LOGIN_TIMEOUT,
+                    progress_cb=lambda: db.upsert_heartbeat(connection_id, pid, "degraded", started_at=started_at),
+                ):
+                    logger.error("Relogin failed after reinitialize. Exiting.")
+                    db.update_connection_status(connection_id, "error", "Relogin failed")
+                    sys.exit(2)
+
+            finally:
+                reinit_keepalive_stop.set()
 
             backoff.sleep()
             continue

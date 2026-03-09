@@ -31,32 +31,193 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 
-def _enforce_venv() -> None:
-    root = Path(__file__).parent.parent
-    expected = root / ".venv" / "Scripts" / "python.exe"
-    if not expected.exists():
+def _acquire_single_instance_lock() -> None:
+    """Prevent multiple supervisors from running at once (Windows-friendly).
+
+    Uses a Windows named mutex when available (more reliable than file locking).
+    """
+
+    if os.name == "nt":
+        try:
+            import ctypes
+            import ctypes.wintypes as wt
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            create_mutex = kernel32.CreateMutexW
+            create_mutex.argtypes = [wt.LPVOID, wt.BOOL, wt.LPCWSTR]
+            create_mutex.restype = wt.HANDLE
+
+            wait_for_single_object = kernel32.WaitForSingleObject
+            wait_for_single_object.argtypes = [wt.HANDLE, wt.DWORD]
+            wait_for_single_object.restype = wt.DWORD
+
+            # Create + acquire ownership immediately to avoid a startup race.
+            # NOTE: In this environment, the OS-reported executable path can be
+            # misleading due to hardlinks/launcher behavior; use a named mutex
+            # to enforce a single active supervisor.
+            mutex_name = "Global\\IFX_MT5_SUPERVISOR"
+            handle = create_mutex(None, True, mutex_name)
+            if not handle:
+                raise OSError(f"CreateMutexW failed: {ctypes.get_last_error()}")
+
+            WAIT_OBJECT_0 = 0x00000000
+            WAIT_ABANDONED = 0x00000080
+            WAIT_TIMEOUT = 0x00000102
+
+            res = wait_for_single_object(handle, 0)
+            if res == WAIT_TIMEOUT:
+                print("Another supervisor instance is already running; exiting.")
+                raise SystemExit(0)
+            if res not in (WAIT_OBJECT_0, WAIT_ABANDONED):
+                raise OSError(f"WaitForSingleObject failed: {res}")
+
+            # Keep handle alive for the lifetime of the process.
+            globals()["_SUPERVISOR_MUTEX_HANDLE"] = handle
+            return
+        except SystemExit:
+            raise
+        except Exception:
+            # Fall back to file lock below.
+            pass
+
+    lock_path = Path(__file__).parent.parent / ".supervisor.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(lock_path, "a+", encoding="utf-8")
+    except Exception:
+        return
+
+    # Keep the handle alive for the lifetime of the process.
+    globals()["_SUPERVISOR_LOCK_FH"] = fh
+
+    if os.name != "nt":
         return
 
     try:
-        exe_path = Path(sys.executable).resolve()
-        expected_path = expected.resolve()
-    except Exception:
-        exe_path = Path(sys.executable)
-        expected_path = expected
+        import msvcrt
 
-    if exe_path != expected_path:
+        # Lock byte 0 (must seek before locking; Windows locks are relative
+        # to the current file pointer).
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+
+        # Best-effort: record PID for debugging.
+        fh.seek(0)
+        fh.truncate(0)
+        fh.write(str(os.getpid()))
+        fh.flush()
+    except Exception:
+        print("Another supervisor instance is already running; exiting.")
+        raise SystemExit(0)
+
+
+def _enforce_venv() -> None:
+    root = Path(__file__).parent.parent
+    venv_root = root / ".venv"
+    expected = venv_root / "Scripts" / "python.exe"
+    if not expected.exists():
+        return
+
+    expected_exe = os.path.normcase(os.path.abspath(str(expected)))
+    actual_exe = os.path.normcase(os.path.abspath(str(getattr(sys, "executable", ""))))
+    if expected_exe and actual_exe and actual_exe != expected_exe:
         print(
-            "Refusing to run supervisor with non-venv Python. "
-            f"Expected: {expected_path} | Got: {exe_path}"
+            "Refusing to run supervisor with non-venv Python executable. "
+            f"Expected sys.executable={expected_exe} | Got sys.executable={actual_exe}"
+        )
+        raise SystemExit(2)
+
+    expected_prefix = os.path.normcase(os.path.abspath(str(venv_root)))
+    actual_prefix = os.path.normcase(os.path.abspath(str(getattr(sys, "prefix", ""))))
+    if expected_prefix and actual_prefix and actual_prefix != expected_prefix:
+        print(
+            "Refusing to run supervisor outside the workspace venv. "
+            f"Expected sys.prefix={expected_prefix} | Got sys.prefix={actual_prefix}"
         )
         raise SystemExit(2)
 
 
 _enforce_venv()
+_acquire_single_instance_lock()
 
 import psutil
 
 import db_client as db
+
+
+def _kill_non_venv_duplicates() -> None:
+    """Kill duplicate worker/supervisor processes not running in the venv.
+
+    Sometimes older runs started before the venv existed, or external launchers
+    keep starting system-Python copies. Those copies can spawn duplicate workers
+    and trip flap protection.
+    """
+    # IMPORTANT:
+    # On this Windows host, a venv-launched python process can show up (via OS
+    # process APIs) as the *base* python executable, even though it is running
+    # inside the venv at runtime. Therefore, exe-path based classification will
+    # incorrectly kill legitimate worker/supervisor processes and cause flapping.
+    #
+    # Instead, only treat a process as rogue if it appears to be running our
+    # scripts but its working directory is NOT inside this workspace.
+    root = Path(__file__).parent.parent
+    root_norm = os.path.normcase(os.path.abspath(str(root)))
+
+    worker_script = (root / "runtime" / "job_worker.py")
+    worker_script_str = str(worker_script)
+
+    rogue_worker_pids: set[int] = set()
+    rogue_supervisor_pids: set[int] = set()
+
+    this_pid = os.getpid()
+
+    def _cwd_in_workspace(proc: psutil.Process) -> bool:
+        try:
+            cwd = proc.cwd() or ""
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            return False
+        if not cwd:
+            return False
+        cwd_norm = os.path.normcase(os.path.abspath(cwd))
+        return cwd_norm.startswith(root_norm)
+
+    for proc in psutil.process_iter(attrs=["pid", "cmdline"]):
+        try:
+            cmdline = proc.info.get("cmdline") or []
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+        if proc.pid == this_pid:
+            continue
+
+        if not cmdline:
+            continue
+
+        cmd_joined = " ".join(cmdline)
+
+        # Rogue worker (system python) running our worker script.
+        if worker_script_str in cmd_joined:
+            if not _cwd_in_workspace(proc):
+                rogue_worker_pids.add(proc.pid)
+            continue
+
+        # Rogue supervisor (system python) that can spawn duplicates.
+        if "main.py" in cmd_joined and "supervisor" in cmd_joined:
+            if not _cwd_in_workspace(proc):
+                rogue_supervisor_pids.add(proc.pid)
+            continue
+
+    for pid in sorted(rogue_worker_pids):
+        try:
+            psutil.Process(pid).terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    for pid in sorted(rogue_supervisor_pids):
+        try:
+            psutil.Process(pid).terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -88,6 +249,15 @@ STALE_SEC = CFG["HEARTBEAT_STALE_SEC"]
 GRACE_SEC = CFG["SUPERVISOR_GRACE_SEC"]
 FLAP_MAX = CFG["FLAP_MAX_RESTARTS"]
 FLAP_WINDOW = CFG["FLAP_WINDOW_SEC"]
+
+# When a connection is marked `error`, avoid immediate respawn thrash.
+# Use an explicit supervisor key if present; otherwise reuse worker cooldown.
+ERROR_COOLDOWN_SEC = int(
+    CFG.get(
+        "SUPERVISOR_ERROR_COOLDOWN_SEC",
+        CFG.get("MT5_INIT_COOLDOWN_SEC", 300),
+    )
+)
 
 WORKER_SCRIPT = Path(__file__).parent / "job_worker.py"
 PYTHON_EXE = sys.executable  # same venv
@@ -167,6 +337,19 @@ def spawn_worker(connection_id: str) -> subprocess.Popen:
             env=os.environ.copy(),
         )
     logger.info("[%s] Spawned worker PID %d.", connection_id[:8], proc.pid)
+
+    # Seed/reset heartbeat immediately so the supervisor doesn't thrash due to a
+    # stale heartbeat row from a previous worker PID.
+    try:
+        db.upsert_heartbeat(
+            connection_id=connection_id,
+            pid=proc.pid,
+            status="starting",
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception as exc:
+        logger.warning("[%s] Failed to seed heartbeat for new worker PID %d: %s", connection_id[:8], proc.pid, exc)
+
     return proc
 
 
@@ -175,11 +358,15 @@ def spawn_worker(connection_id: str) -> subprocess.Popen:
 # ---------------------------------------------------------------------------
 
 # Track spawned processes in memory (supervisor lifetime only)
-# { connection_id: Popen }
-running_workers: dict[str, subprocess.Popen] = {}
+# { connection_id: Popen | None }
+# None sentinel means: worker was adopted (tracked via heartbeat PID), not spawned
+# by this supervisor instance.
+running_workers: dict[str, subprocess.Popen | None] = {}
 
 
 def supervisor_cycle():
+    _kill_non_venv_duplicates()
+
     # 1. Fetch active connections
     try:
         connections = db.get_active_connections()
@@ -216,11 +403,35 @@ def supervisor_cycle():
         conn_id = conn["id"]
         hb = heartbeats.get(conn_id)
 
+        conn_status = (conn.get("status") or "").lower()
+        if conn_status == "disabled":
+            # Explicitly disabled by user/admin — never spawn.
+            continue
+
+        if conn_status == "error":
+            updated_at_raw = conn.get("updated_at")
+            if updated_at_raw:
+                try:
+                    updated_at = datetime.fromisoformat(updated_at_raw.replace("Z", "+00:00"))
+                    age = (now_utc - updated_at).total_seconds()
+                    if age < ERROR_COOLDOWN_SEC:
+                        # Cooldown window after error (including flapping).
+                        continue
+                except Exception:
+                    # If parsing fails, fall through and manage via flap logic.
+                    pass
+
         # Check if in-memory process is alive
         proc = running_workers.get(conn_id)
-        proc_alive = proc is not None and is_process_alive(proc.pid)
 
-        # If heartbeat says a different PID is running (survived supervisor restart)
+        # If we previously adopted a worker (None sentinel), consider it alive
+        # as long as the heartbeat PID is still alive.
+        if conn_id in running_workers and proc is None:
+            proc_alive = bool(hb and is_process_alive(hb.get("pid", 0)))
+        else:
+            proc_alive = proc is not None and is_process_alive(proc.pid)
+
+        # If heartbeat says a worker PID is running (survived supervisor restart)
         if hb and not proc_alive:
             hb_pid = hb.get("pid")
             if hb_pid and is_process_alive(hb_pid):
@@ -283,12 +494,19 @@ def supervisor_cycle():
                     conn_id, {"pid": hb_pid},
                 )
 
-                if hb_pid:
-                    kill_worker(hb_pid, conn_id)
+                # Only kill processes that are actually alive. A stale heartbeat
+                # PID from an old run should not cause us to kill a freshly
+                # spawned worker.
+                pids_to_kill: set[int] = set()
+                if hb_pid and is_process_alive(hb_pid):
+                    pids_to_kill.add(hb_pid)
 
                 proc = running_workers.get(conn_id)
-                if proc and proc.pid and proc.pid != hb_pid:
-                    kill_worker(proc.pid, conn_id)
+                if proc and proc.pid and is_process_alive(proc.pid):
+                    pids_to_kill.add(proc.pid)
+
+                for pid in sorted(pids_to_kill):
+                    kill_worker(pid, conn_id)
 
                 running_workers.pop(conn_id, None)
 
@@ -315,6 +533,19 @@ def supervisor_cycle():
 
 def main():
     logger.info("=== IFX MT5 Supervisor starting ===")
+    logger.info(
+        "Supervisor identity: pid=%s exe=%s cwd=%s file=%s",
+        os.getpid(),
+        sys.executable,
+        os.getcwd(),
+        __file__,
+    )
+    logger.info(
+        "Supervisor thresholds: HEARTBEAT_STALE_SEC=%s SUPERVISOR_GRACE_SEC=%s SUPERVISOR_POLL_SEC=%s",
+        STALE_SEC,
+        GRACE_SEC,
+        POLL_SEC,
+    )
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     while True:

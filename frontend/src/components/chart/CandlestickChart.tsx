@@ -122,6 +122,9 @@ export function CandlestickChart({
   const [historyVersion, setHistoryVersion] = useState(0);
 
   const HISTORY_COUNT = 200; // must roughly match engine structure window
+  const LOCAL_RELAY_RETRY_COOLDOWN_MS = 30_000;
+  const localRelayBlockedUntilRef = useRef<number>(0);
+  const localRelayWarnedRef = useRef<boolean>(false);
 
   // ── Mount chart (once) ────────────────────────────────────────────────────
   useEffect(() => {
@@ -272,16 +275,31 @@ export function CandlestickChart({
         }
       }
 
-      // 2) Local relay — always try if Railway returned fewer than MIN_RAILWAY_BARS
-      //    (handles post-deploy state wipe, relay returning 1 forming bar, etc.)
-      if (railwayBars.length < MIN_RAILWAY_BARS) {
+      // 2) Local relay fallback (cooldown-aware)
+      //    We pause retries briefly after a localhost connection failure to
+      //    avoid flooding the console every poll tick when relay is offline.
+      const shouldTryLocalRelay =
+        railwayBars.length < MIN_RAILWAY_BARS &&
+        Date.now() >= localRelayBlockedUntilRef.current;
+
+      if (shouldTryLocalRelay) {
         try {
           const r2 = await fetch(localRelayUrl, { signal: ac.signal, cache: "no-store" });
           const d2 = (await r2.json()) as { bars?: RawCandleBar[] };
           relayBars = d2.bars ?? [];
+          localRelayBlockedUntilRef.current = 0;
+          localRelayWarnedRef.current = false;
         } catch (err) {
           if ((err as Error)?.name !== "AbortError") {
-            console.warn("[CandlestickChart] localhost relay fetch failed:", err);
+            const now = Date.now();
+            localRelayBlockedUntilRef.current = now + LOCAL_RELAY_RETRY_COOLDOWN_MS;
+            if (!localRelayWarnedRef.current) {
+              console.warn(
+                `[CandlestickChart] localhost relay fetch failed; pausing retries for ${Math.round(LOCAL_RELAY_RETRY_COOLDOWN_MS / 1000)}s:`,
+                err
+              );
+              localRelayWarnedRef.current = true;
+            }
           }
         }
       }

@@ -26,6 +26,26 @@ Components covered:
 3. Always run with venv Python:
 - `C:\mt5system\.venv\Scripts\python.exe`
 
+## Create 3 Supabase Login Users
+
+This creates three Supabase Auth users (auto-confirmed) so you can log in:
+
+- `user1@ifxsystem.com`
+- `user2@ifxsystem.com`
+- `user3@ifxsystem.com`
+
+Run (interactive password prompt):
+
+```powershell
+C:/mt5system/.venv/Scripts/python.exe create_supabase_users.py
+```
+
+Or set the password non-interactively:
+
+```powershell
+C:/mt5system/.venv/Scripts/python.exe create_supabase_users.py --password "YourPassword"
+```
+
 ## Standard Restart (Authoritative Procedure)
 
 Open **one PowerShell** at `C:\mt5system` and run:

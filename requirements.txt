@@ -4,11 +4,20 @@
 # Supabase
 supabase>=2.0.0
 
+# HTTP client (used by runtime/poller.py)
+httpx>=0.27.0
+
+# .env loading (used by runtime/poller.py)
+python-dotenv>=1.0.1
+
 # Cryptography (AES-256-GCM)
 cryptography>=42.0.0
 
 # Process management (supervisor watchdog)
 psutil>=5.9.0
+
+# HTTP client (used by runtime/price_relay.py to forward ingest)
+requests>=2.31.0
 
 # Phase 2: Windows Credential Manager (uncomment when moving to Phase 3 security)
 # keyring>=25.0.0

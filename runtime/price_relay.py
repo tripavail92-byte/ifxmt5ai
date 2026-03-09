@@ -46,6 +46,85 @@ from urllib.parse import parse_qs, urlparse
 import requests
 
 
+def _acquire_single_instance_lock() -> None:
+    """Prevent multiple relay instances from running at once (Windows-friendly)."""
+    workspace_root = Path(__file__).resolve().parents[1]
+    lock_path = workspace_root / ".price_relay.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(lock_path, "a+", encoding="utf-8")
+    except Exception:
+        return
+
+    # Keep the handle alive for the lifetime of the process.
+    globals()["_PRICE_RELAY_LOCK_FH"] = fh
+
+    if os.name != "nt":
+        return
+
+    try:
+        import msvcrt
+
+        # Lock byte 0 (must seek before locking; Windows locks are relative
+        # to the current file pointer).
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+
+        # Best-effort: record PID for debugging.
+        fh.seek(0)
+        fh.truncate(0)
+        fh.write(str(os.getpid()))
+        fh.flush()
+    except Exception:
+        log.error("Another relay instance is already running; exiting.")
+        raise SystemExit(0)
+
+
+def _kill_non_venv_relay_duplicates() -> None:
+    """Kill any other relay processes not running in the workspace venv.
+
+    This prevents system-Python copies from competing on port 8082.
+    """
+    try:
+        import psutil
+    except Exception:
+        return
+
+    workspace_root = Path(__file__).resolve().parents[1]
+    expected_venv_python = workspace_root / ".venv" / "Scripts" / "python.exe"
+    expected_norm = os.path.normcase(os.path.abspath(str(expected_venv_python)))
+
+    this_pid = os.getpid()
+    relay_script_str = str((Path(__file__).resolve()))
+
+    for proc in psutil.process_iter(attrs=["pid", "exe", "cmdline"]):
+        try:
+            if proc.info.get("pid") == this_pid:
+                continue
+
+            cmdline = proc.info.get("cmdline") or []
+            if not cmdline:
+                continue
+
+            cmd_joined = " ".join(cmdline)
+            if relay_script_str not in cmd_joined and "price_relay.py" not in cmd_joined:
+                continue
+
+            exe = proc.info.get("exe") or ""
+            exe_norm = os.path.normcase(os.path.abspath(str(exe))) if exe else ""
+
+            # If this relay is venv-based, we only kill non-venv ones.
+            if expected_norm and exe_norm == expected_norm:
+                continue
+
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+
 def _load_dotenv(dotenv_path: Path) -> None:
     """Best-effort .env loader (does not override existing env vars)."""
     try:
@@ -369,21 +448,52 @@ def _aggregate_tf(bars_1m: list, tf_minutes: int) -> list:
 
 
 def _get_candles(conn_id: str, symbol: str, tf: str, count: int) -> list:
-    """Return up to `count` broker-native bars for symbol/tf, oldest-first.
+    """Return up to `count` bars for symbol/tf, oldest-first.
 
-    Golden rule: no synthetic candles anywhere for charting.
-    This endpoint must mirror the user's MT5 broker candles.
+    Priority order:
+      1. In-memory candle_buffer for the exact conn_id  (fastest — no IPC)
+      2. In-memory candle_buffer from ANY conn_id that has the symbol
+         (handles conn_id mismatch between browser and EA)
+      3. MT5 IPC broker fetch  (slowest, requires terminal to be running)
+
+    The "no synthetic candles" rule is preserved: all paths return
+    broker-provided OHLCV data; we only aggregate 1m→higher-TF here.
     """
+    tf_min = TF_MINUTES.get(tf, 1)
 
-    from runtime.mt5_candles import get_broker_candles
+    # ── Step 1: Buffer for exact conn_id ─────────────────────────────────────
+    with _state_lock:
+        exact = list(candle_buffer.get(conn_id, {}).get(symbol, []))
 
-    return get_broker_candles(
-        connection_id=conn_id,
-        symbol=symbol,
-        timeframe=tf,
-        count=count,
-        include_current=True,
-    )
+    if exact:
+        agg = _aggregate_tf(exact, tf_min)
+        return agg[-count:] if len(agg) > count else agg
+
+    # ── Step 2: Cross-conn buffer lookup ─────────────────────────────────────
+    with _state_lock:
+        best_bars: list = []
+        for cid, sym_map in candle_buffer.items():
+            bars = list(sym_map.get(symbol, []))
+            if len(bars) > len(best_bars):
+                best_bars = bars
+
+    if best_bars:
+        agg = _aggregate_tf(best_bars, tf_min)
+        return agg[-count:] if len(agg) > count else agg
+
+    # ── Step 3: MT5 IPC broker fetch (terminal must be running) ──────────────
+    try:
+        from runtime.mt5_candles import get_broker_candles
+        return get_broker_candles(
+            connection_id=conn_id,
+            symbol=symbol,
+            timeframe=tf,
+            count=count,
+            include_current=True,
+        )
+    except Exception as exc:
+        log.debug("_get_candles MT5 IPC fallback failed for %s/%s: %r", symbol, tf, exc)
+        return []
 
 
 # ─── HMAC verification ────────────────────────────────────────────────────────
@@ -462,6 +572,10 @@ class RelayHandler(BaseHTTPRequestHandler):
         else:
             self._send(404, b'{"error":"not found"}')
 
+    def do_OPTIONS(self):
+        # CORS preflight support (browser -> localhost relay)
+        self._send(204, b"")
+
     def _handle_debug_mt5_status(self, qs: dict) -> None:
         """GET /debug/mt5_status?conn_id=...&symbol=...&tf=...&token=...
 
@@ -516,11 +630,37 @@ class RelayHandler(BaseHTTPRequestHandler):
         log.debug(f"[{conn_id[:8]}] GET /config → {len(symbols)} symbols")
 
     def _handle_get_candles(self, qs: dict):
-        """GET /candles?symbol=BTCUSDm&tf=1h&count=200&conn_id=..."""
-        symbol  = (qs.get("symbol",  [""])[0]).strip()
-        tf      = (qs.get("tf",      ["1m"])[0]).strip()
-        count   = int(qs.get("count", ["200"])[0])
-        conn_id = (qs.get("conn_id", [""])[0]).strip()
+        """GET /candles?symbol=BTCUSDm&tf=1h&count=200&conn_id=...
+
+        Also accepts:
+          - timeframe=<M1|H1|D1|1m|5m...>
+          - limit=<int>
+
+        This endpoint is frequently called from browsers; it must never crash
+        the relay process on bad input or MT5 IPC errors.
+        """
+
+        def _first(key: str) -> str:
+            return (qs.get(key, [""])[0] or "").strip()
+
+        symbol = _first("symbol") or _first("sym")
+        conn_id = _first("conn_id") or (self.headers.get("X-IFX-CONN-ID", "") or "").strip()
+
+        tf_raw = _first("tf") or _first("timeframe") or "1m"
+        tf_norm = (tf_raw or "").strip().lower()
+        if tf_norm in {"m1", "m3", "m5", "m15", "m30"}:
+            tf_norm = tf_norm[1:] + "m"
+        elif tf_norm in {"h1", "h4"}:
+            tf_norm = tf_norm[1:] + "h"
+        elif tf_norm in {"d1"}:
+            tf_norm = "1d"
+
+        count_raw = _first("count") or _first("limit") or "200"
+        try:
+            count = int(count_raw)
+        except Exception:
+            count = 200
+        count = max(1, min(count, 5000))
 
         if not symbol:
             self._send(400, b'{"error":"symbol required"}')
@@ -528,14 +668,18 @@ class RelayHandler(BaseHTTPRequestHandler):
         if not conn_id:
             self._send(400, b'{"error":"conn_id required"}')
             return
-        if tf not in TF_MINUTES:
+        if tf_norm not in TF_MINUTES:
             self._send(400, json.dumps({"error": f"tf must be one of {list(TF_MINUTES)}"}).encode())
             return
 
-        bars = _get_candles(conn_id, symbol, tf, count)
-
-        body = json.dumps({"symbol": symbol, "tf": tf, "count": len(bars), "bars": bars}).encode()
-        self._send(200, body)
+        try:
+            bars = _get_candles(conn_id, symbol, tf_norm, count)
+            body = json.dumps({"symbol": symbol, "tf": tf_norm, "count": len(bars), "bars": bars}).encode()
+            self._send(200, body)
+        except Exception as exc:
+            log.warning(f"GET /candles error conn={conn_id[:8]} symbol={symbol} tf={tf_norm}: {exc!r}")
+            body = json.dumps({"symbol": symbol, "tf": tf_norm, "count": 0, "bars": [], "error": repr(exc)}).encode()
+            self._send(200, body)
 
     def _handle_get_prices(self, qs: dict):
         """GET /prices?conn_id=...  — latest bid/ask per symbol snapshot"""
@@ -738,35 +882,61 @@ class RelayHandler(BaseHTTPRequestHandler):
 
     def _send(self, code: int, body: bytes):
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
+        # CORS: allow a web UI to call the localhost relay directly.
+        # Relay only binds to 127.0.0.1, so it's not remotely reachable.
+        origin = self.headers.get("Origin")
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        else:
+            self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Authorization, X-IFX-TS, X-IFX-NONCE, X-IFX-SIGNATURE, X-IFX-CONN-ID",
+        )
+        self.send_header("Access-Control-Max-Age", "600")
+
+        if body:
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+        else:
+            self.send_header("Content-Length", "0")
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(body)
+        if body:
+            self.wfile.write(body)
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 def main():
     expected_venv_python = _WORKSPACE_ROOT / ".venv" / "Scripts" / "python.exe"
-    try:
-        exe_path = Path(sys.executable).resolve()
-    except Exception:
-        exe_path = Path(sys.executable)
-
-    if expected_venv_python.exists():
-        try:
-            expected_path = expected_venv_python.resolve()
-        except Exception:
-            expected_path = expected_venv_python
-
-        if exe_path != expected_path:
+    venv_root = _WORKSPACE_ROOT / ".venv"
+    if expected_venv_python.exists() and venv_root.exists():
+        expected_exe = os.path.normcase(os.path.abspath(str(expected_venv_python)))
+        actual_exe = os.path.normcase(os.path.abspath(str(getattr(sys, "executable", ""))))
+        if expected_exe and actual_exe and actual_exe != expected_exe:
             log.error(
-                "Refusing to run with non-venv Python. "
-                f"Expected: {expected_path} | Got: {exe_path}"
+                "Refusing to run with non-venv Python executable. "
+                f"Expected sys.executable={expected_exe} | Got sys.executable={actual_exe}"
             )
-            log.error(f"Run with: {expected_path} runtime/price_relay.py")
+            log.error(f"Run with: {expected_venv_python} runtime/price_relay.py")
             sys.exit(2)
+
+        expected_prefix = os.path.normcase(os.path.abspath(str(venv_root)))
+        actual_prefix = os.path.normcase(os.path.abspath(str(getattr(sys, "prefix", ""))))
+        if expected_prefix and actual_prefix and actual_prefix != expected_prefix:
+            log.error(
+                "Refusing to run outside the workspace venv. "
+                f"Expected sys.prefix={expected_prefix} | Got sys.prefix={actual_prefix}"
+            )
+            log.error(f"Run with: {expected_venv_python} runtime/price_relay.py")
+            sys.exit(2)
+
+    # Ensure we don't have an old system-Python relay competing on the port.
+    _kill_non_venv_relay_duplicates()
+    _acquire_single_instance_lock()
 
     log.info("=" * 60)
     log.info("  IFX Price Bridge -- Production Relay  (Sprint 3)")

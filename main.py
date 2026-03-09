@@ -41,24 +41,43 @@ sys.path.insert(0, str(ROOT))
 def main():
     load_dotenv(ROOT / ".env")
 
-    expected_venv_python = ROOT / ".venv" / "Scripts" / "python.exe"
+    # Minimal startup trace for diagnosing duplicate launcher issues.
+    # Appends a single line per invocation; safe to leave enabled.
     try:
-        exe_path = Path(sys.executable).resolve()
-    except Exception:
-        exe_path = Path(sys.executable)
-
-    if expected_venv_python.exists():
-        try:
-            expected_path = expected_venv_python.resolve()
-        except Exception:
-            expected_path = expected_venv_python
-
-        if exe_path != expected_path:
-            print(
-                "Refusing to run with non-venv Python. "
-                f"Expected: {expected_path} | Got: {exe_path}"
+        trace_path = ROOT / "runtime" / "logs" / "launcher_trace.log"
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(trace_path, "a", encoding="utf-8") as fh:
+            fh.write(
+                f"pid={os.getpid()} argv={sys.argv} exe={sys.executable} prefix={getattr(sys, 'prefix', '')}\n"
             )
-            print(f"Run with: {expected_path} main.py <command>")
+    except Exception:
+        pass
+
+    # Enforce running inside the workspace venv.
+    # Note: do NOT use Path.resolve() here — venv python.exe can be a symlink
+    # to the base interpreter, which would make system-Python appear identical.
+    venv_root = ROOT / ".venv"
+    if venv_root.exists():
+        expected_venv_python = venv_root / "Scripts" / "python.exe"
+
+        expected_exe = os.path.normcase(os.path.abspath(str(expected_venv_python)))
+        actual_exe = os.path.normcase(os.path.abspath(str(getattr(sys, "executable", ""))))
+        if expected_exe and actual_exe and actual_exe != expected_exe:
+            print(
+                "Refusing to run with non-venv Python executable. "
+                f"Expected sys.executable={expected_exe} | Got sys.executable={actual_exe}"
+            )
+            print(f"Run with: {expected_venv_python} main.py <command>")
+            sys.exit(2)
+
+        expected_prefix = os.path.normcase(os.path.abspath(str(venv_root)))
+        actual_prefix = os.path.normcase(os.path.abspath(str(getattr(sys, "prefix", ""))))
+        if expected_prefix and actual_prefix and actual_prefix != expected_prefix:
+            print(
+                "Refusing to run outside the workspace venv. "
+                f"Expected sys.prefix={expected_prefix} | Got sys.prefix={actual_prefix}"
+            )
+            print(f"Run with: {expected_venv_python} main.py <command>")
             sys.exit(2)
 
     if len(sys.argv) < 2:
@@ -66,6 +85,61 @@ def main():
         sys.exit(1)
 
     command = sys.argv[1].lower()
+
+    # Guard against duplicate supervisor launches as early as possible.
+    if command == "supervisor" and os.name == "nt":
+        try:
+            import ctypes
+            import ctypes.wintypes as wt
+
+            def _append_trace(msg: str) -> None:
+                try:
+                    trace_path = ROOT / "runtime" / "logs" / "launcher_trace.log"
+                    trace_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(trace_path, "a", encoding="utf-8") as fh:
+                        fh.write(f"pid={os.getpid()} supervisor_mutex {msg}\n")
+                except Exception:
+                    pass
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            create_mutex = kernel32.CreateMutexW
+            create_mutex.argtypes = [wt.LPVOID, wt.BOOL, wt.LPCWSTR]
+            create_mutex.restype = wt.HANDLE
+
+            wait_for_single_object = kernel32.WaitForSingleObject
+            wait_for_single_object.argtypes = [wt.HANDLE, wt.DWORD]
+            wait_for_single_object.restype = wt.DWORD
+
+            # Use Local namespace to avoid Global namespace privilege/session issues.
+            mutex_name = "Local\\IFX_MT5_SUPERVISOR_LAUNCH"
+
+            # Create and immediately acquire ownership to avoid a startup race.
+            handle = create_mutex(None, True, mutex_name)
+            if not handle:
+                raise OSError(f"CreateMutexW failed: {ctypes.get_last_error()}")
+
+            last_err = ctypes.get_last_error()
+
+            WAIT_OBJECT_0 = 0x00000000
+            WAIT_ABANDONED = 0x00000080
+            WAIT_TIMEOUT = 0x00000102
+
+            # If the mutex already existed, we may not own it; check if we can acquire.
+            res = wait_for_single_object(handle, 0)
+            if res == WAIT_TIMEOUT:
+                _append_trace(f"name={mutex_name} owned_by_other last_error={last_err}")
+                print("Another supervisor launcher is already running; exiting.")
+                sys.exit(0)
+            if res not in (WAIT_OBJECT_0, WAIT_ABANDONED):
+                raise OSError(f"WaitForSingleObject failed: {res}")
+
+            _append_trace(f"name={mutex_name} acquired res={res} last_error={last_err}")
+
+            globals()["_SUPERVISOR_LAUNCH_MUTEX_HANDLE"] = handle
+        except SystemExit:
+            raise
+        except Exception as exc:
+            print(f"Supervisor launcher mutex error: {exc}")
 
     if command == "supervisor":
         from runtime.supervisor import main as run
