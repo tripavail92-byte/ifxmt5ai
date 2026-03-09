@@ -121,7 +121,10 @@ export function CandlestickChart({
   // Bumped after setData() so overlays can refresh off the same timebase
   const [historyVersion, setHistoryVersion] = useState(0);
 
-  const HISTORY_COUNT = 200; // must roughly match engine structure window
+  const HISTORY_COUNT = Math.min(
+    1500,
+    Math.max(200, Number.parseInt(process.env.NEXT_PUBLIC_CHART_HISTORY_COUNT ?? "1200", 10) || 1200)
+  );
 
   // ── Mount chart (once) ────────────────────────────────────────────────────
   useEffect(() => {
