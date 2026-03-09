@@ -126,6 +126,10 @@ export function CandlestickChart({
   const localRelayBlockedUntilRef = useRef<number>(0);
   const localRelayWarnedRef = useRef<boolean>(false);
 
+  const isBrowserLocalhost =
+    typeof window !== "undefined" &&
+    (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+
   // ── Mount chart (once) ────────────────────────────────────────────────────
   useEffect(() => {
     const el = containerRef.current;
@@ -279,6 +283,7 @@ export function CandlestickChart({
       //    We pause retries briefly after a localhost connection failure to
       //    avoid flooding the console every poll tick when relay is offline.
       const shouldTryLocalRelay =
+        isBrowserLocalhost &&
         railwayBars.length < MIN_RAILWAY_BARS &&
         Date.now() >= localRelayBlockedUntilRef.current;
 
