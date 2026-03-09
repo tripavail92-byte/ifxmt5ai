@@ -224,39 +224,65 @@ export function CandlestickChart({
     const tf  = activeTf;
     const ac  = new AbortController();
     const connQ = connId ? `&conn_id=${encodeURIComponent(connId)}` : "";
-    const url = `/api/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${TF_API[tf]}&count=${HISTORY_COUNT}${connQ}`;
 
-    fetch(url, { signal: ac.signal })
-      .then(r => r.json())
-      .then((data: { bars?: RawCandleBar[] }) => {
-        if (ac.signal.aborted) return;
-        const bars = data.bars ?? [];
-        // Nothing from API yet — leave chart as-is, retry timer will try again
-        if (bars.length === 0) return;
+    const apiUrl = `/api/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${TF_API[tf]}&count=${HISTORY_COUNT}${connQ}`;
+    const localRelayUrl = `http://127.0.0.1:8082/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${TF_API[tf]}&count=${HISTORY_COUNT}${connQ}`;
 
-        const mapped: CandlestickData[] = bars.map(b => ({
-          time:  b.t as Time,
-          open:  b.o,
-          high:  b.h,
-          low:   b.l,
-          close: b.c,
-        }));
+    const applyBars = (bars: RawCandleBar[]) => {
+      if (ac.signal.aborted) return;
+      if (!bars.length) return;
 
-        const s = seriesRef.current;
-        if (!s) return;
-        s.setData(mapped);
-        historyRef.current = mapped;
-        setHistoryVersion(v => v + 1);
-        lastBarTimeRef.current = mapped[mapped.length - 1].time as number;
-        chartRef.current?.timeScale().fitContent();
-        hasRealDataRef.current = true;
-        setIsLive(true);
-      })
-      .catch(err => {
-        if ((err as Error)?.name !== "AbortError") {
-          console.warn("[CandlestickChart] fetch error:", err);
+      const mapped: CandlestickData[] = bars.map(b => ({
+        time:  b.t as Time,
+        open:  b.o,
+        high:  b.h,
+        low:   b.l,
+        close: b.c,
+      }));
+
+      const s = seriesRef.current;
+      if (!s) return;
+      s.setData(mapped);
+      historyRef.current = mapped;
+      setHistoryVersion(v => v + 1);
+      lastBarTimeRef.current = mapped[mapped.length - 1].time as number;
+      chartRef.current?.timeScale().fitContent();
+      hasRealDataRef.current = true;
+      setIsLive(true);
+    };
+
+    const load = async () => {
+      try {
+        // 1) Preferred: same-origin API (Railway may proxy to relay/state)
+        const r1 = await fetch(apiUrl, { signal: ac.signal, cache: "no-store" });
+        const d1 = (await r1.json()) as { bars?: RawCandleBar[] };
+        const bars1 = d1.bars ?? [];
+        if (bars1.length) {
+          applyBars(bars1);
+          return;
         }
-      });
+      } catch (err) {
+        if ((err as Error)?.name !== "AbortError") {
+          console.warn("[CandlestickChart] /api/candles failed:", err);
+        }
+      }
+
+      // 2) Fallback: local relay on the user's machine (works without extension if CORS is enabled)
+      try {
+        const r2 = await fetch(localRelayUrl, { signal: ac.signal, cache: "no-store" });
+        const d2 = (await r2.json()) as { bars?: RawCandleBar[] };
+        const bars2 = d2.bars ?? [];
+        if (bars2.length) {
+          applyBars(bars2);
+        }
+      } catch (err) {
+        if ((err as Error)?.name !== "AbortError") {
+          console.warn("[CandlestickChart] localhost relay fetch failed:", err);
+        }
+      }
+    };
+
+    void load();
 
     return () => ac.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps

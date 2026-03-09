@@ -12,19 +12,28 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { TF_MINUTES } from "@/lib/mt5-state";
+import { mt5State, TF_MINUTES } from "@/lib/mt5-state";
 
 export const runtime = "nodejs";
 
 const PRICE_RELAY_URL = (process.env.PRICE_RELAY_URL ?? "").trim();
+const PRICE_RELAY_TIMEOUT_MS = Math.max(
+  500,
+  Number.parseInt((process.env.PRICE_RELAY_TIMEOUT_MS ?? "5000").trim(), 10) || 5000
+);
+
+type RelayFetchResult = {
+  bars: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }> | null;
+  error?: string;
+};
 
 async function fetchRelayCandles(opts: {
   symbol: string;
   tf: string;
   count: number;
   connId?: string;
-}): Promise<Array<{ t: number; o: number; h: number; l: number; c: number; v: number }> | null> {
-  if (!PRICE_RELAY_URL) return null;
+}): Promise<RelayFetchResult> {
+  if (!PRICE_RELAY_URL) return { bars: null, error: "PRICE_RELAY_URL not configured" };
 
   const url = new URL("/candles", PRICE_RELAY_URL);
   url.searchParams.set("symbol", opts.symbol);
@@ -33,7 +42,7 @@ async function fetchRelayCandles(opts: {
   if (opts.connId) url.searchParams.set("conn_id", opts.connId);
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 1200);
+  const timeout = setTimeout(() => controller.abort(), PRICE_RELAY_TIMEOUT_MS);
   try {
     const resp = await fetch(url.toString(), {
       method: "GET",
@@ -41,12 +50,19 @@ async function fetchRelayCandles(opts: {
       signal: controller.signal,
       cache: "no-store",
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      return { bars: null, error: `relay returned ${resp.status}` };
+    }
     const data = (await resp.json()) as { bars?: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }> };
-    if (!data?.bars?.length) return [];
-    return data.bars;
-  } catch {
-    return null;
+    if (!data?.bars?.length) return { bars: [] };
+    return { bars: data.bars };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isAbort = msg.toLowerCase().includes("abort");
+    if (isAbort) {
+      return { bars: null, error: `relay timeout after ${PRICE_RELAY_TIMEOUT_MS}ms` };
+    }
+    return { bars: null, error: `relay fetch failed: ${msg}` };
   } finally {
     clearTimeout(timeout);
   }
@@ -73,17 +89,50 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  if (!PRICE_RELAY_URL) {
-    return NextResponse.json({ error: "PRICE_RELAY_URL not configured" }, { status: 503 });
+  // Fast-path: serve from in-memory state (populated via /api/mt5/ingest).
+  // This keeps charts alive even if the relay REST endpoint is down.
+  // Try the exact conn_id first, then fall back to merged-all-connections
+  // (handles the case where the relay pushes under a different UUID than the
+  //  browser's selected connection — both yield the same broker's candles).
+  let stateBars = mt5State.getCandles(connId, symbol, tf, count);
+  if (!stateBars.length) {
+    // Empty string → getCandles merges across all known connections
+    stateBars = mt5State.getCandles("", symbol, tf, count);
+  }
+  if (stateBars.length) {
+    return NextResponse.json(
+      { symbol, tf, count: stateBars.length, source: "state", bars: stateBars },
+      { headers: { "Cache-Control": "no-store" } }
+    );
   }
 
-  const relayBars = await fetchRelayCandles({ symbol, tf, count, connId });
-  if (relayBars === null) {
-    return NextResponse.json({ error: "relay unavailable" }, { status: 503 });
+  if (!PRICE_RELAY_URL) {
+    // No relay configured, and no state bars available yet.
+    return NextResponse.json(
+      { symbol, tf, count: 0, source: "state", bars: [] },
+      { headers: { "Cache-Control": "no-store" } }
+    );
+  }
+
+  const relay = await fetchRelayCandles({ symbol, tf, count, connId });
+  if (relay.bars === null) {
+    // Relay unavailable; return empty bars rather than 503 so the UI can
+    // keep running and potentially fill from SSE/state later.
+    return NextResponse.json(
+      { symbol, tf, count: 0, source: "state", bars: [] },
+      { headers: { "Cache-Control": "no-store" } }
+    );
+  }
+
+  // Seed state from relay history so subsequent calls can hit the fast-path.
+  try {
+    mt5State.applyHistoricalBulk(connId, [{ symbol, bars: relay.bars }]);
+  } catch {
+    // Best-effort seeding only.
   }
 
   return NextResponse.json(
-    { symbol, tf, count: relayBars.length, source: "relay", bars: relayBars },
+    { symbol, tf, count: relay.bars.length, source: "relay", bars: relay.bars },
     {
       headers: {
         "Cache-Control": "no-store",
