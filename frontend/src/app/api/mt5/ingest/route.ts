@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { mt5State } from "@/lib/mt5-state";
 
 const INGEST_TOKEN = process.env.RELAY_INGEST_TOKEN ?? "";
+const INSTANCE_ID = process.env.RAILWAY_REPLICA_ID ?? process.env.HOSTNAME ?? "unknown";
 
 export const runtime = "nodejs";  // required for in-memory state access
 
@@ -101,5 +102,6 @@ export async function GET() {
     status:      "ok",
     subscribers: mt5State.subscriberCount,
     symbols:     mt5State.getSymbols(),
+    instance:    INSTANCE_ID,
   });
 }

@@ -16,6 +16,7 @@ import { mt5State, TF_MINUTES } from "@/lib/mt5-state";
 
 export const runtime = "nodejs";
 const MIN_STATE_BARS = 20;
+const INSTANCE_ID = process.env.RAILWAY_REPLICA_ID ?? process.env.HOSTNAME ?? "unknown";
 
 const PRICE_RELAY_URL = (process.env.PRICE_RELAY_URL ?? "").trim();
 const PRICE_RELAY_TIMEOUT_MS = Math.max(
@@ -107,7 +108,11 @@ export async function GET(req: NextRequest) {
         count: stateBars.length,
         source: "state",
         bars: stateBars,
-        debug: { exact_state_count: exactStateBars.length, merged_state_count: mergedStateBars.length },
+        debug: {
+          exact_state_count: exactStateBars.length,
+          merged_state_count: mergedStateBars.length,
+          instance: INSTANCE_ID,
+        },
       },
       { headers: { "Cache-Control": "no-store" } }
     );
@@ -122,7 +127,11 @@ export async function GET(req: NextRequest) {
         count: stateBars.length,
         source: "state",
         bars: stateBars,
-        debug: { exact_state_count: exactStateBars.length, merged_state_count: mergedStateBars.length },
+        debug: {
+          exact_state_count: exactStateBars.length,
+          merged_state_count: mergedStateBars.length,
+          instance: INSTANCE_ID,
+        },
       },
       { headers: { "Cache-Control": "no-store" } }
     );
@@ -139,7 +148,11 @@ export async function GET(req: NextRequest) {
         count: stateBars.length,
         source: "state",
         bars: stateBars,
-        debug: { exact_state_count: exactStateBars.length, merged_state_count: mergedStateBars.length },
+        debug: {
+          exact_state_count: exactStateBars.length,
+          merged_state_count: mergedStateBars.length,
+          instance: INSTANCE_ID,
+        },
       },
       { headers: { "Cache-Control": "no-store" } }
     );
@@ -168,6 +181,7 @@ export async function GET(req: NextRequest) {
         exact_state_count: exactStateBars.length,
         merged_state_count: mergedStateBars.length,
         relay_count: relay.bars.length,
+        instance: INSTANCE_ID,
       },
     },
     {
