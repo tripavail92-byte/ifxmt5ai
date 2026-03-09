@@ -122,10 +122,6 @@ export function CandlestickChart({
   const [historyVersion, setHistoryVersion] = useState(0);
 
   const HISTORY_COUNT = 200; // must roughly match engine structure window
-  const LOCAL_RELAY_RETRY_COOLDOWN_MS = 30_000;
-  const localRelayBlockedUntilRef = useRef<number>(0);
-  const localRelayWarnedRef = useRef<boolean>(false);
-  const ENABLE_LOCAL_RELAY_FALLBACK = process.env.NEXT_PUBLIC_ENABLE_LOCAL_RELAY_FALLBACK !== "0";
 
   // ── Mount chart (once) ────────────────────────────────────────────────────
   useEffect(() => {
@@ -230,7 +226,6 @@ export function CandlestickChart({
     const connQ = connId ? `&conn_id=${encodeURIComponent(connId)}` : "";
 
     const apiUrl = `/api/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${TF_API[tf]}&count=${HISTORY_COUNT}${connQ}`;
-    const localRelayUrl = `http://127.0.0.1:8082/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${TF_API[tf]}&count=${HISTORY_COUNT}${connQ}`;
 
     const applyBars = (bars: RawCandleBar[]) => {
       if (ac.signal.aborted) return;
@@ -255,60 +250,21 @@ export function CandlestickChart({
       setIsLive(true);
     };
 
-    // Minimum bars Railway must return before we trust it as the sole source.
-    // After a Railway redeploy the in-memory state resets and may hold only the
-    // current forming bar (count=1). We always also query the local relay and
-    // use whichever source returns more bars.
-    const MIN_RAILWAY_BARS = 20;
-
     const load = async () => {
-      let railwayBars: RawCandleBar[] = [];
-      let relayBars:   RawCandleBar[] = [];
+      let bars: RawCandleBar[] = [];
 
-      // 1) Same-origin Railway API (state-first, avoids relay dependency)
+      // Single source: same-origin API route handles state/relay fallback
       try {
         const r1 = await fetch(apiUrl, { signal: ac.signal, cache: "no-store" });
         const d1 = (await r1.json()) as { bars?: RawCandleBar[] };
-        railwayBars = d1.bars ?? [];
+        bars = d1.bars ?? [];
       } catch (err) {
         if ((err as Error)?.name !== "AbortError") {
           console.warn("[CandlestickChart] /api/candles failed:", err);
         }
       }
 
-      // 2) Local relay fallback (cooldown-aware)
-      //    We pause retries briefly after a localhost connection failure to
-      //    avoid flooding the console every poll tick when relay is offline.
-      const shouldTryLocalRelay =
-        ENABLE_LOCAL_RELAY_FALLBACK &&
-        railwayBars.length < MIN_RAILWAY_BARS &&
-        Date.now() >= localRelayBlockedUntilRef.current;
-
-      if (shouldTryLocalRelay) {
-        try {
-          const r2 = await fetch(localRelayUrl, { signal: ac.signal, cache: "no-store" });
-          const d2 = (await r2.json()) as { bars?: RawCandleBar[] };
-          relayBars = d2.bars ?? [];
-          localRelayBlockedUntilRef.current = 0;
-          localRelayWarnedRef.current = false;
-        } catch (err) {
-          if ((err as Error)?.name !== "AbortError") {
-            const now = Date.now();
-            localRelayBlockedUntilRef.current = now + LOCAL_RELAY_RETRY_COOLDOWN_MS;
-            if (!localRelayWarnedRef.current) {
-              console.warn(
-                `[CandlestickChart] localhost relay fetch failed; pausing retries for ${Math.round(LOCAL_RELAY_RETRY_COOLDOWN_MS / 1000)}s:`,
-                err
-              );
-              localRelayWarnedRef.current = true;
-            }
-          }
-        }
-      }
-
-      // Use whichever source has more bars
-      const best = relayBars.length > railwayBars.length ? relayBars : railwayBars;
-      if (best.length) applyBars(best);
+      if (bars.length) applyBars(bars);
     };
 
     void load();
