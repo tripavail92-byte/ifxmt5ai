@@ -125,11 +125,7 @@ export function CandlestickChart({
   const LOCAL_RELAY_RETRY_COOLDOWN_MS = 30_000;
   const localRelayBlockedUntilRef = useRef<number>(0);
   const localRelayWarnedRef = useRef<boolean>(false);
-  const ENABLE_LOCAL_RELAY_FALLBACK = process.env.NEXT_PUBLIC_ENABLE_LOCAL_RELAY_FALLBACK === "1";
-
-  const isBrowserLocalhost =
-    typeof window !== "undefined" &&
-    (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+  const ENABLE_LOCAL_RELAY_FALLBACK = process.env.NEXT_PUBLIC_ENABLE_LOCAL_RELAY_FALLBACK !== "0";
 
   // ── Mount chart (once) ────────────────────────────────────────────────────
   useEffect(() => {
@@ -285,8 +281,7 @@ export function CandlestickChart({
       //    avoid flooding the console every poll tick when relay is offline.
       const shouldTryLocalRelay =
         ENABLE_LOCAL_RELAY_FALLBACK &&
-        isBrowserLocalhost &&
-        railwayBars.length < MIN_RAILWAY_BARS &&
+        railwayBars.length === 0 &&
         Date.now() >= localRelayBlockedUntilRef.current;
 
       if (shouldTryLocalRelay) {

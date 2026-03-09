@@ -18,12 +18,19 @@ export async function GET(req: NextRequest) {
   const connId = searchParams.get("conn_id") ?? undefined;
   const symbol = searchParams.get("symbol")  ?? undefined;
 
-  const all = mt5State.getPrices(connId);
+  let all = mt5State.getPrices(connId);
+  if (connId && !Object.keys(all).length) {
+    all = mt5State.getPrices();
+  }
 
   const prices = symbol ? (all[symbol] ? { [symbol]: all[symbol] } : {}) : all;
 
+  const symbols = connId
+    ? (mt5State.getSymbols(connId).length ? mt5State.getSymbols(connId) : mt5State.getSymbols())
+    : mt5State.getSymbols();
+
   return NextResponse.json(
-    { prices, symbols: mt5State.getSymbols(connId) },
+    { prices, symbols },
     {
       headers: { "Cache-Control": "no-store" },
     }
