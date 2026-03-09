@@ -281,7 +281,7 @@ export function CandlestickChart({
       //    avoid flooding the console every poll tick when relay is offline.
       const shouldTryLocalRelay =
         ENABLE_LOCAL_RELAY_FALLBACK &&
-        railwayBars.length === 0 &&
+        railwayBars.length < MIN_RAILWAY_BARS &&
         Date.now() >= localRelayBlockedUntilRef.current;
 
       if (shouldTryLocalRelay) {

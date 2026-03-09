@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { mt5State, TF_MINUTES } from "@/lib/mt5-state";
 
 export const runtime = "nodejs";
+const MIN_STATE_BARS = 20;
 
 const PRICE_RELAY_URL = (process.env.PRICE_RELAY_URL ?? "").trim();
 const PRICE_RELAY_TIMEOUT_MS = Math.max(
@@ -90,16 +91,16 @@ export async function GET(req: NextRequest) {
   }
 
   // Fast-path: serve from in-memory state (populated via /api/mt5/ingest).
-  // This keeps charts alive even if the relay REST endpoint is down.
-  // Try the exact conn_id first, then fall back to merged-all-connections
-  // (handles the case where the relay pushes under a different UUID than the
-  //  browser's selected connection — both yield the same broker's candles).
+  // Try exact conn_id first, then merged-all-connections to handle conn_id
+  // drift between browser selection and relay push source.
   let stateBars = mt5State.getCandles(connId, symbol, tf, count);
   if (!stateBars.length) {
     // Empty string → getCandles merges across all known connections
     stateBars = mt5State.getCandles("", symbol, tf, count);
   }
-  if (stateBars.length) {
+
+  // If state has enough bars, trust it and skip relay fetch.
+  if (stateBars.length >= MIN_STATE_BARS) {
     return NextResponse.json(
       { symbol, tf, count: stateBars.length, source: "state", bars: stateBars },
       { headers: { "Cache-Control": "no-store" } }
@@ -107,32 +108,37 @@ export async function GET(req: NextRequest) {
   }
 
   if (!PRICE_RELAY_URL) {
-    // No relay configured, and no state bars available yet.
+    // No relay configured; return whatever state has (possibly empty).
     return NextResponse.json(
-      { symbol, tf, count: 0, source: "state", bars: [] },
+      { symbol, tf, count: stateBars.length, source: "state", bars: stateBars },
       { headers: { "Cache-Control": "no-store" } }
     );
   }
 
   const relay = await fetchRelayCandles({ symbol, tf, count, connId });
   if (relay.bars === null) {
-    // Relay unavailable; return empty bars rather than 503 so the UI can
-    // keep running and potentially fill from SSE/state later.
+    // Relay unavailable; return current state bars (possibly empty) so UI keeps
+    // running and can fill via SSE/state later.
     return NextResponse.json(
-      { symbol, tf, count: 0, source: "state", bars: [] },
+      { symbol, tf, count: stateBars.length, source: "state", bars: stateBars },
       { headers: { "Cache-Control": "no-store" } }
     );
   }
 
+  const bestBars = relay.bars.length > stateBars.length ? relay.bars : stateBars;
+  const source = relay.bars.length > stateBars.length ? "relay" : "state";
+
   // Seed state from relay history so subsequent calls can hit the fast-path.
   try {
-    mt5State.applyHistoricalBulk(connId, [{ symbol, bars: relay.bars }]);
+    if (relay.bars.length) {
+      mt5State.applyHistoricalBulk(connId, [{ symbol, bars: relay.bars }]);
+    }
   } catch {
     // Best-effort seeding only.
   }
 
   return NextResponse.json(
-    { symbol, tf, count: relay.bars.length, source: "relay", bars: relay.bars },
+    { symbol, tf, count: bestBars.length, source, bars: bestBars },
     {
       headers: {
         "Cache-Control": "no-store",
