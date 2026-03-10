@@ -508,7 +508,9 @@ def run_worker(connection_id: str):
     pid = os.getpid()
     cb_label = claimed_by_label()
     backoff = ExponentialBackoff()
-    last_heartbeat = 0.0
+    last_heartbeat    = 0.0
+    last_status_sync  = 0.0   # tracks when we last pushed 'online' to connections table
+    STATUS_SYNC_INTERVAL = 60  # seconds between connection-status refreshes
 
     # ------------------------------------------------------------------ #
     # Step 1: Get connection credentials
@@ -776,6 +778,12 @@ def run_worker(connection_id: str):
             )
             last_heartbeat = now
 
+            # Periodically sync connection status to 'online' so stale
+            # 'degraded' / 'error' statuses self-heal when the terminal is healthy.
+            if now - last_status_sync >= STATUS_SYNC_INTERVAL:
+                db.update_connection_status(connection_id, "online")
+                last_status_sync = now
+
         # --- Terminal health check ---
         if not check_terminal_health(logger):
             logger.warning("Terminal health check failed. Attempting reinitialize...")
@@ -815,6 +823,9 @@ def run_worker(connection_id: str):
             finally:
                 reinit_keepalive_stop.set()
 
+            # Reinit succeeded — reset connection status so UI shows recovery.
+            db.update_connection_status(connection_id, "online")
+            last_status_sync = time.time()
             backoff.sleep()
             continue
 
