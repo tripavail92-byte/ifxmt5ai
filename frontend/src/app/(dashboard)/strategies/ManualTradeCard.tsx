@@ -230,7 +230,13 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   }>>({});
 
   // Live price feed (SSE)
-  const { prices, symbols: liveSymbols } = usePriceFeed(autoConn?.id);
+  const {
+    prices,
+    forming,
+    lastClose,
+    symbols: liveSymbols,
+    isConnected,
+  } = usePriceFeed(autoConn?.id);
 
   // Hydrate from localStorage on first render
   useEffect(() => {
