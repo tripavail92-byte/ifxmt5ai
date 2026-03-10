@@ -229,6 +229,9 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     trade_now_active?: boolean;
   }>>({});
 
+  // Live price feed (SSE)
+  const { prices, symbols: liveSymbols } = usePriceFeed(autoConn?.id);
+
   // Hydrate from localStorage on first render
   useEffect(() => {
     const storedSlots = loadStoredSymbols();
