@@ -230,32 +230,36 @@ class SetupManager:
         _ensure_path()
         from runtime.mt5_candles import get_broker_candles
 
-        # Snapshot relevant setups (minimise time under lock)
+        # Snapshot relevant setups (minimise time under lock).
+        # Match by symbol only — any connection reporting a candle-close for this
+        # symbol is sufficient to trigger structure evaluation.  Candle fetching
+        # uses setup.connection_id (the setup's own MT5 terminal) so the right
+        # broker data is always used regardless of which terminal sent the tick.
         with self._lock:
             setups = [
                 (setup_id, setup)
                 for setup_id, setup in self._setups.items()
-                if setup.connection_id == conn_id
-                and setup.symbol == symbol
+                if setup.symbol == symbol
                 and setup.state == STALKING
             ]
 
         if not setups:
             return
 
-        # Group by timeframe to avoid recomputing aggregated bars
-        by_tf: dict[str, list[tuple[str, object]]] = {}
+        # Group by (timeframe, connection_id) to avoid recomputing bars for same setup context.
+        # Each group shares both TF and the broker connection used for candle fetching.
+        by_tf_conn: dict[tuple, list[tuple[str, object]]] = {}
         for setup_id, setup in setups:
             tf = (getattr(setup, "timeframe", None) or "5m").strip()
             if tf not in TF_ALLOWED:
                 tf = "5m"
-            by_tf.setdefault(tf, []).append((setup_id, setup))
+            by_tf_conn.setdefault((tf, setup.connection_id), []).append((setup_id, setup))
 
-        for tf, group in by_tf.items():
+        for (tf, setup_conn_id), group in by_tf_conn.items():
             # Use broker-native candles for this timeframe (no synthetic aggregation).
-            # First, a cheap tail fetch to see if a new closed candle exists.
-            key = (conn_id, symbol, tf)
-            tail = get_broker_candles(conn_id, symbol, tf, count=3)
+            # Use setup's own connection_id for MT5 candle fetch, not the relay conn_id.
+            key = (setup_conn_id, symbol, tf)
+            tail = get_broker_candles(setup_conn_id, symbol, tf, count=3)
             if len(tail) < 2:
                 continue
             last_closed_t = int(tail[-1]["t"])
@@ -263,7 +267,7 @@ class SetupManager:
                 continue
             self._last_structure_eval_time_by_key[key] = last_closed_t
 
-            bars = get_broker_candles(conn_id, symbol, tf, count=200)
+            bars = get_broker_candles(setup_conn_id, symbol, tf, count=200)
             # Defensive: enforce ascending ordering.
             bars.sort(key=lambda b: int(b.get("t", 0) or 0))
 
@@ -354,12 +358,17 @@ class SetupManager:
     # ------------------------------------------------------------------ #
 
     def _eval_tick(self, conn_id: str, symbol: str, price: float) -> None:
-        """Evaluate tick rules for all setups matching conn_id + symbol."""
+        """Evaluate tick rules for all setups matching symbol (any connection).
+
+        Zone monitoring (IDLE ↔ STALKING) does not require connection_id to
+        match — the same price feed from any terminal is valid for zone detection.
+        The conn_id is preserved for log context only.
+        """
         from ai_engine.setup_engine import evaluate_tick, DEAD  # local import — fast after first call
 
         with self._lock:
             for setup_id, setup in list(self._setups.items()):
-                if setup.connection_id != conn_id or setup.symbol != symbol:
+                if setup.symbol != symbol:
                     continue
                 if setup.state == DEAD:
                     continue  # T1: ticks blocked for DEAD setups
@@ -426,12 +435,12 @@ class SetupManager:
         h1_close:      float,
         h1_candle_time: int,
     ) -> None:
-        """Evaluate H1 candle-close rules for all setups matching conn_id + symbol."""
+        """Evaluate H1 candle-close rules for all setups matching symbol (any connection)."""
         from ai_engine.setup_engine import evaluate_candle, DEAD
 
         with self._lock:
             for setup_id, setup in list(self._setups.items()):
-                if setup.connection_id != conn_id or setup.symbol != symbol:
+                if setup.symbol != symbol:
                     continue
 
                 new_state = evaluate_candle(setup, h1_close, h1_candle_time)

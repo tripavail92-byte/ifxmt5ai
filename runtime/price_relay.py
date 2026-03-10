@@ -143,38 +143,6 @@ def _load_dotenv(dotenv_path: Path) -> None:
         # Never fail relay startup because of a dotenv parsing issue.
         return
 
-# ─── Setup state machine (optional — no-op if Supabase not configured) ─────────
-try:
-    import os as _os, sys as _sys
-    _root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-    if _root not in _sys.path:
-        _sys.path.insert(0, _root)
-    from ai_engine.setup_manager import setup_manager as _setup_manager
-    log_setup = logging.getLogger("setup_manager")
-    log_setup.info("setup_manager imported OK")
-except Exception as _sm_err:
-    _setup_manager = None
-    logging.getLogger("setup_manager").warning(
-        "setup_manager not available: %r — state machine disabled", _sm_err
-    )
-
-
-def _sm_on_tick_batch(conn_id: str, ticks: list) -> None:
-    if _setup_manager is not None:
-        try:
-            _setup_manager.on_tick_batch(conn_id, ticks)
-        except Exception as _e:
-            log.debug("setup_manager.on_tick_batch error: %r", _e)
-
-
-def _sm_on_candle_close(conn_id: str, symbol: str, bar: dict) -> None:
-    if _setup_manager is not None:
-        try:
-            _setup_manager.on_candle_close(conn_id, symbol, bar)
-        except Exception as _e:
-            log.debug("setup_manager.on_candle_close error: %r", _e)
-
-
 # ─── Logging ─────────────────────────────────────────────────────────────────
 
 LOG_DIR = Path(__file__).parent / "logs"
@@ -196,6 +164,39 @@ log = logging.getLogger("price_relay")
 # of the runtime). Environment variables already present take precedence.
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 _load_dotenv(_WORKSPACE_ROOT / ".env")
+
+# ─── Setup state machine (optional — no-op if Supabase not configured) ─────────
+# IMPORTANT: this block must run AFTER _load_dotenv() so that SUPABASE_URL is
+# present in os.environ when setup_manager.start() checks for it.
+try:
+    _root = str(_WORKSPACE_ROOT)
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+    from ai_engine.setup_manager import setup_manager as _setup_manager
+    # If the env was missing at first import (shouldn't happen now), retry start.
+    if not _setup_manager._started:
+        _setup_manager.start()
+    log.info("[relay] setup_manager imported OK — started=%s", _setup_manager._started)
+except Exception as _sm_err:
+    _setup_manager = None
+    log.warning("[relay] setup_manager not available: %r — state machine disabled", _sm_err)
+
+
+def _sm_on_tick_batch(conn_id: str, ticks: list) -> None:
+    if _setup_manager is not None:
+        try:
+            _setup_manager.on_tick_batch(conn_id, ticks)
+        except Exception as _e:
+            log.debug("setup_manager.on_tick_batch error: %r", _e)
+
+
+def _sm_on_candle_close(conn_id: str, symbol: str, bar: dict) -> None:
+    if _setup_manager is not None:
+        try:
+            _setup_manager.on_candle_close(conn_id, symbol, bar)
+        except Exception as _e:
+            log.debug("setup_manager.on_candle_close error: %r", _e)
+
 
 PORT             = int(os.getenv("RELAY_PORT", "8082"))
 RELAY_SECRET     = os.getenv("RELAY_SECRET", "")              # blank = skip HMAC verify

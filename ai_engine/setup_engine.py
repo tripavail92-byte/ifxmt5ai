@@ -72,10 +72,6 @@ class Setup:
     # Chart timeframe used for structure / CHOCH-BOS detection (e.g., '5m', '1h')
     timeframe:        str
 
-    # AI sensitivity (NI) used for structure analysis.
-    # Direct correlation: pivot_window = ai_sensitivity (1–10)
-    ai_sensitivity:   int = 5
-
     entry_price:      float
     zone_low:         float          # entry * (1 - zone_percent/100)
     zone_high:        float          # entry * (1 + zone_percent/100)
@@ -86,7 +82,13 @@ class Setup:
     loss_edge:        float
     target:           float
 
-    state:            SetupState     # current state
+    state:            SetupState
+
+    # --- fields with defaults (must follow all required fields) ---
+
+    # AI sensitivity (1–10): direct correlation to pivot_window for CHOCH/BOS.
+    ai_sensitivity:   int = 5
+
     dead_trigger_candle_time: Optional[int] = None  # epoch_s of H1 that caused DEAD
 
     # Trade Now: when True, setup_manager fires a 0.01-lot market order
