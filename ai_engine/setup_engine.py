@@ -89,6 +89,10 @@ class Setup:
     state:            SetupState     # current state
     dead_trigger_candle_time: Optional[int] = None  # epoch_s of H1 that caused DEAD
 
+    # Trade Now: when True, setup_manager fires a 0.01-lot market order
+    # the moment STALKING + matching structure break is detected (one-shot).
+    trade_now_active: bool = False
+
     # Optional metadata (not used by engine logic)
     user_id:          Optional[str]  = None
     notes:            Optional[str]  = None
@@ -218,5 +222,6 @@ def build_setup_from_row(row: dict) -> Setup:
         target                   = float(row["target"]),
         state                    = row.get("state", IDLE),
         dead_trigger_candle_time = row.get("dead_trigger_candle_time"),
+        trade_now_active         = bool(row.get("trade_now_active", False)),
         notes                    = row.get("notes"),
     )

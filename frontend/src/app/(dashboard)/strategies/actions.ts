@@ -81,3 +81,54 @@ export async function placeManualTrade(formData: FormData) {
   revalidatePath("/trades");
   revalidatePath("/strategies");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trade Now: arm a setup so setup_manager fires a 0.01-lot test trade the
+// moment  state == STALKING  AND  a matching CHOCH/BOS structure break fires.
+// ─────────────────────────────────────────────────────────────────────────────
+export async function activateTradeNow(params: {
+  connection_id: string;
+  symbol: string;
+  side: string;
+  entry_price: number;
+  zone_percent: number;
+  timeframe: string;
+  ai_sensitivity: number;
+  setup_id?: string | null;
+}): Promise<string> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("Unauthorized");
+
+  // 1. Upsert (or create) the trading setup row
+  const { data: newId, error: upsertErr } = await supabase.rpc("upsert_trading_setup", {
+    p_user_id:        user.id,
+    p_connection_id:  params.connection_id,
+    p_symbol:         params.symbol,
+    p_side:           params.side,
+    p_entry_price:    params.entry_price,
+    p_zone_percent:   params.zone_percent,
+    p_timeframe:      params.timeframe,
+    p_ai_sensitivity: params.ai_sensitivity,
+    p_setup_id:       params.setup_id ?? null,
+  });
+
+  if (upsertErr) throw new Error(upsertErr.message);
+  const setupId = newId as string;
+
+  // 2. Arm the Trade Now flag using service role (bypasses RLS on the update)
+  const service = createServiceClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  );
+  const { error: flagErr } = await service
+    .from("trading_setups")
+    .update({ trade_now_active: true })
+    .eq("id", setupId);
+
+  if (flagErr) throw new Error(`Could not arm Trade Now: ${flagErr.message}`);
+
+  revalidatePath("/strategies");
+  revalidatePath("/trades");
+  return setupId;
+}

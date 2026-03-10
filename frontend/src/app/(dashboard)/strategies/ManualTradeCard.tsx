@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { placeManualTrade } from "./actions";
+import { placeManualTrade, activateTradeNow } from "./actions";
 import { createClient } from "@/utils/supabase/client";
 import { usePriceFeed } from "@/hooks/usePriceFeed";
 
@@ -213,6 +213,11 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   // Real-time state of the tracked setup for the active symbol
   const [activeSetupState, setActiveSetupState] = useState<SetupState | null>(null);
 
+  // Trade Now: per-symbol armed status + loading + result feedback
+  const [tradeNowBySymbol, setTradeNowBySymbol]   = useState<Record<string, boolean>>({});
+  const [tradeNowSaving, setTradeNowSaving]         = useState(false);
+  const [tradeNowResult, setTradeNowResult]         = useState<{ ok: boolean; msg: string } | null>(null);
+
   const [setupsBySymbol, setSetupsBySymbol] = useState<Record<string, {
     id: string;
     symbol: string;
@@ -221,14 +226,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     zone_percent: number;
     timeframe: string;
     ai_sensitivity?: number;
-  }>>({});
-
-  // Live feed
-  const { forming, lastClose, prices, isConnected, symbols: liveSymbols } = usePriceFeed(autoConn?.id);
-
-  // Hydrate from localStorage on first render
-  useEffect(() => {
-    const storedSlots = loadStoredSymbols();
+    trade_now_active?: boolean;
     const storedActive = loadStoredActive(storedSlots);
     setSlots(storedSlots);
     setActiveSlot(storedActive);
@@ -284,6 +282,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
           zone_percent: number;
           timeframe: string;
           ai_sensitivity?: number;
+          trade_now_active?: boolean;
         }>;
 
         const bySymbol: Record<string, typeof rows[number]> = {};
@@ -297,6 +296,15 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
           const next = { ...prev };
           for (const sym of Object.keys(bySymbol)) {
             next[sym] = bySymbol[sym].id;
+          }
+          return next;
+        });
+
+        // Hydrate Trade Now armed status from DB
+        setTradeNowBySymbol(prev => {
+          const next = { ...prev };
+          for (const sym of Object.keys(bySymbol)) {
+            next[sym] = Boolean(bySymbol[sym].trade_now_active);
           }
           return next;
         });
@@ -425,6 +433,53 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     }
   }
 
+  async function handleTradeNow() {
+    if (!validEp || !autoConn) return;
+    setTradeNowSaving(true);
+    setTradeNowResult(null);
+    try {
+      const supabase = createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error("Not authenticated");
+
+      const setupId = await activateTradeNow({
+        connection_id:  autoConn.id,
+        symbol:         formSymbol,
+        side,
+        entry_price:    ep,
+        zone_percent:   zonePercent,
+        timeframe:      getSelectedSetupTimeframe(),
+        ai_sensitivity: aiSensitivity,
+        setup_id:       slotSetupIds[formSymbol] ?? null,
+      });
+
+      // Update local IDs so the monitoring strip appears
+      setSlotSetupIds(prev => ({ ...prev, [formSymbol]: setupId }));
+      setSetupsBySymbol(prev => ({
+        ...prev,
+        [formSymbol]: {
+          id: setupId,
+          symbol: formSymbol,
+          side,
+          entry_price: ep,
+          zone_percent: zonePercent,
+          timeframe: getSelectedSetupTimeframe(),
+          ai_sensitivity: aiSensitivity,
+          trade_now_active: true,
+        },
+      }));
+      setTradeNowBySymbol(prev => ({ ...prev, [formSymbol]: true }));
+      setTradeNowResult({
+        ok:  true,
+        msg: "ARMED — waiting for STALKING state + matching structure break",
+      });
+    } catch (err: unknown) {
+      setTradeNowResult({ ok: false, msg: err instanceof Error ? err.message : "Arm failed" });
+    } finally {
+      setTradeNowSaving(false);
+    }
+  }
+
   // Load per-symbol config when symbol changes (prefer DB setup, else local draft)
   useEffect(() => {
     if (!hydrated) return;
@@ -476,11 +531,14 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
 
     // Load current state immediately
     sb.from("trading_setups")
-      .select("state")
+      .select("state, trade_now_active")
       .eq("id", setupId)
       .single()
       .then(({ data }) => {
         if (!cancelled && data?.state) setActiveSetupState(data.state as SetupState);
+        if (!cancelled && typeof data?.trade_now_active === "boolean") {
+          setTradeNowBySymbol(prev => ({ ...prev, [formSymbol]: data.trade_now_active }));
+        }
       });
 
     // Subscribe to realtime row updates
@@ -496,6 +554,23 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       }, (payload: any) => {
         if (payload.new?.state) setActiveSetupState(payload.new.state as SetupState);
+
+        // Detect Trade Now completion: trade_now_active flipped false → trade was fired
+        if (typeof payload.new?.trade_now_active === "boolean") {
+          const nowArmed = payload.new.trade_now_active as boolean;
+          setTradeNowBySymbol(prev => {
+            // Use functional update so `prev` is always the current value (avoids stale closure)
+            const wasArmed = prev[formSymbol];
+            if (wasArmed && !nowArmed) {
+              // Trade fired — schedule feedback display
+              setTimeout(() => setTradeNowResult({
+                ok:  true,
+                msg: "TRADE FIRED — 0.01 lot order queued. Check Trades page for status.",
+              }), 0);
+            }
+            return { ...prev, [formSymbol]: nowArmed };
+          });
+        }
       })
       .subscribe();
 
@@ -747,6 +822,56 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                   : "bg-red-500/10 text-red-400 border-red-500/20"
                 }`}>
                 {setupResult.msg}
+              </div>
+            )}
+
+            {/* ── TRADE NOW ─────────────────────────────────────────────────── */}
+            {validEp && (
+              <div className="mt-1 space-y-1.5 pt-2 border-t border-[#1e1e1e]">
+                {/* Armed status strip — visible while Trade Now is active */}
+                {tradeNowBySymbol[formSymbol] && (
+                  <div className="flex items-center gap-2 px-2.5 py-1.5 rounded border border-orange-500/30 bg-orange-500/10">
+                    <span className="w-2 h-2 rounded-full bg-orange-400 animate-pulse shrink-0" />
+                    <span className="text-[10px] font-bold text-orange-400 tracking-wide">
+                      ARMED — waiting for STALKING + structure break
+                    </span>
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleTradeNow}
+                  disabled={tradeNowSaving || !autoConn || Boolean(tradeNowBySymbol[formSymbol])}
+                  className={[
+                    "w-full h-9 rounded text-[12px] font-extrabold tracking-widest transition-all border",
+                    "disabled:opacity-50 disabled:cursor-not-allowed",
+                    tradeNowBySymbol[formSymbol]
+                      ? "bg-orange-500/10 text-orange-400 border-orange-500/30"
+                      : "bg-orange-600 hover:bg-orange-500 text-white border-orange-700 shadow-lg shadow-orange-900/30",
+                  ].join(" ")}
+                >
+                  {tradeNowSaving
+                    ? "Arming…"
+                    : tradeNowBySymbol[formSymbol]
+                      ? "ARMED"
+                      : "TRADE NOW"
+                  }
+                </button>
+
+                <p className="text-[9px] text-gray-700 text-center px-1">
+                  Fires a 0.01-lot test order when STALKING + CHOCH/BOS matches direction
+                </p>
+
+                {tradeNowResult && (
+                  <div className={[
+                    "px-2.5 py-1.5 rounded text-[11px] font-medium border",
+                    tradeNowResult.ok
+                      ? "bg-orange-500/10 text-orange-400 border-orange-500/20"
+                      : "bg-red-500/10 text-red-400 border-red-500/20",
+                  ].join(" ")}>
+                    {tradeNowResult.msg}
+                  </div>
+                )}
               </div>
             )}
           </div>

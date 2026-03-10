@@ -325,8 +325,32 @@ class SetupManager:
                     int(evt.candle_time),
                 )
 
+                # ── Trade Now: fire a test trade when break matches side ──────
+                if getattr(setup, 'trade_now_active', False):
+                    side_val = getattr(setup, 'side', '')
+                    direction_match = (
+                        (side_val == 'buy'  and evt.break_dir == 'bull') or
+                        (side_val == 'sell' and evt.break_dir == 'bear')
+                    )
+                    if direction_match:
+                        log.info(
+                            "[trade_now] Armed setup %s matched %s_%s — queuing trade",
+                            setup_id[:8], evt.break_dir, evt.event_type,
+                        )
+                        # Deactivate in memory immediately (one-shot — no double-fire)
+                        setup.trade_now_active = False
+                        self._queue_trade_now(
+                            setup_id=setup_id,
+                            connection_id=conn_id,
+                            symbol=getattr(setup, 'symbol', ''),
+                            side=side_val,
+                            sl=float(getattr(setup, 'loss_edge', 0.0)),
+                            tp=float(getattr(setup, 'target', 0.0)),
+                            close_price=evt.close_price,
+                        )
+
     # ------------------------------------------------------------------ #
-    # Internal: state evaluation                                           #
+    # Internal: tick evaluation                                            #
     # ------------------------------------------------------------------ #
 
     def _eval_tick(self, conn_id: str, symbol: str, price: float) -> None:
@@ -471,6 +495,13 @@ class SetupManager:
                     existing.entry_price = float(row["entry_price"])
                     existing.timeframe   = (row.get("timeframe") or "5m")
                     existing.ai_sensitivity = int(row.get("ai_sensitivity") or getattr(existing, "ai_sensitivity", 5) or 5)
+                    # Refresh trade_now_active from DB so new arming is picked up.
+                    # Do NOT overwrite if currently True in memory (fire hasn't persisted yet).
+                    db_trade_now = bool(row.get("trade_now_active", False))
+                    if db_trade_now:
+                        existing.trade_now_active = True
+                    # If memory=True but DB=False it means we deactivated it — keep memory=False
+                    # (The _persist handler already set it to False in memory before writing to DB)
                     new_setups[sid]      = existing
                 else:
                     # New setup — build fresh from DB row
@@ -541,6 +572,34 @@ class SetupManager:
                 setup_id[:8],
             )
 
+    def _queue_trade_now(
+        self,
+        setup_id: str,
+        connection_id: str,
+        symbol: str,
+        side: str,
+        sl: float,
+        tp: float,
+        close_price: float,
+    ) -> None:
+        """Queue a test trade (0.01 lot) triggered by Trade Now + structure break."""
+        try:
+            self._write_q.put_nowait({
+                "type":         "trade_now",
+                "setup_id":     setup_id,
+                "connection_id": connection_id,
+                "symbol":       symbol,
+                "side":         side,
+                "sl":           sl,
+                "tp":           tp,
+                "close_price":  close_price,
+            })
+        except queue.Full:
+            log.warning(
+                "[setup_manager] write queue full — dropped trade_now for %s",
+                setup_id[:8],
+            )
+
     def _write_loop(self) -> None:
         """Drain the write queue and persist each state change to Supabase."""
         while True:
@@ -603,6 +662,45 @@ class SetupManager:
                 "candle_time": item["candle_time"],
             }
             db.table("setup_structure_events").insert(row).execute()
+            return
+
+        if kind == "trade_now":
+            import time as _time
+            setup_id       = item["setup_id"]
+            connection_id  = item["connection_id"]
+            symbol         = item["symbol"]
+            side           = item["side"]
+            close_price    = float(item["close_price"])
+
+            idempotency_key = (
+                f"trade_now:{setup_id}:{int(close_price * 1e5)}:{int(_time.time())}"
+            )
+
+            # Insert a queued market-order trade job (0.01 lot test)
+            db.table("trade_jobs").insert({
+                "connection_id":   connection_id,
+                "symbol":          symbol,
+                "side":            side,
+                "volume":          0.01,
+                "sl":              item["sl"] if item["sl"] else None,
+                "tp":              item["tp"] if item["tp"] else None,
+                "idempotency_key": idempotency_key,
+                "status":          "queued",
+                "created_at":      __import__('datetime').datetime.utcnow().isoformat() + "Z",
+            }).execute()
+
+            # Reset trade_now_active flag in DB so UI reflects one-shot completion
+            db.table("trading_setups") \
+              .update({"trade_now_active": False}) \
+              .eq("id", setup_id) \
+              .execute()
+
+            log.info(
+                "[trade_now] TRADE FIRED: %s %s @ %.5f  sl=%.5f tp=%.5f  setup=%s",
+                symbol, side.upper(), close_price,
+                float(item["sl"]), float(item["tp"]),
+                setup_id[:8],
+            )
             return
 
     # ------------------------------------------------------------------ #
