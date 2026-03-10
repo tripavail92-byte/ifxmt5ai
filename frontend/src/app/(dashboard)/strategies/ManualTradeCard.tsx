@@ -231,7 +231,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
 
   // Hydrate from localStorage on first render
   useEffect(() => {
-    const storedSlots = loadStoredSlots();
+    const storedSlots = loadStoredSymbols();
     const storedActive = loadStoredActive(storedSlots);
     setSlots(storedSlots);
     setActiveSlot(storedActive);
