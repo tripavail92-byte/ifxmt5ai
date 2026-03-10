@@ -227,6 +227,11 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     timeframe: string;
     ai_sensitivity?: number;
     trade_now_active?: boolean;
+  }>>({});
+
+  // Hydrate from localStorage on first render
+  useEffect(() => {
+    const storedSlots = loadStoredSlots();
     const storedActive = loadStoredActive(storedSlots);
     setSlots(storedSlots);
     setActiveSlot(storedActive);
