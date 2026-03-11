@@ -1,7 +1,7 @@
 "use client";
 
 import { useTheme } from "next-themes";
-import { Moon, Sun, Monitor, Menu } from "lucide-react";
+import { Moon, Sun, Monitor, Menu, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,7 +20,7 @@ import { toast } from "sonner";
 import { LayoutDashboard, Network, Settings, History, Activity } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const navItems = [
+const baseNavItems = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Connections", href: "/connections", icon: Network },
   { name: "Strategies", href: "/strategies", icon: Settings },
@@ -28,11 +28,14 @@ const navItems = [
   { name: "System Logs", href: "/logs", icon: Activity },
 ];
 
-export function Header() {
+export function Header({ isAdmin = false }: { isAdmin?: boolean }) {
   const { setTheme } = useTheme();
   const router = useRouter();
   const pathname = usePathname();
   const [mounted, setMounted] = useState(false);
+  const navItems = isAdmin
+    ? [...baseNavItems, { name: "Admin Portal", href: "/admin", icon: ShieldCheck }]
+    : baseNavItems;
 
   useEffect(() => {
     setMounted(true);

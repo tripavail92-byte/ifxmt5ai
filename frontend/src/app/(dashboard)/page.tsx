@@ -1,7 +1,7 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { Activity, Network, Clock, CheckCircle } from "lucide-react";
+import { Activity, Network, Clock, CheckCircle, AlertTriangle } from "lucide-react";
 import { createClient } from "@/utils/supabase/server";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
@@ -10,10 +10,11 @@ export default async function Dashboard() {
   const supabase = await createClient();
 
   // Fetch summary counts
-  const [{ count: activeConnections }, { count: activeStrategies }, { count: completedTrades }] = await Promise.all([
+  const [{ count: activeConnections }, { count: activeStrategies }, { count: completedTrades }, { count: queuedTrades }] = await Promise.all([
     supabase.from("mt5_user_connections").select("*", { count: "exact", head: true }).eq("is_active", true),
     supabase.from("user_strategies").select("*", { count: "exact", head: true }).eq("is_active", true),
-    supabase.from("trade_jobs").select("*", { count: "exact", head: true }).eq("status", "success")
+    supabase.from("trade_jobs").select("*", { count: "exact", head: true }).eq("status", "success"),
+    supabase.from("trade_jobs").select("*", { count: "exact", head: true }).in("status", ["queued", "claimed", "executing", "retry"]),
   ]);
 
   // Fetch live worker heartbeats
@@ -31,6 +32,8 @@ export default async function Dashboard() {
     .select("*")
     .order("created_at", { ascending: false })
     .limit(10);
+
+  const staleWorkers = heartbeats?.filter((hb) => new Date().getTime() - new Date(hb.last_seen_at).getTime() > 30000).length || 0;
 
   return (
     <>
@@ -83,6 +86,16 @@ export default async function Dashboard() {
           <CardContent>
             <div className="text-2xl font-bold">{heartbeats?.filter(h => h.status === 'online').length || 0}</div>
             <p className="text-xs text-muted-foreground">Online right now</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">My Queue Health</CardTitle>
+            <AlertTriangle className="h-4 w-4 text-amber-500" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{queuedTrades || 0}</div>
+            <p className="text-xs text-muted-foreground">Queued/claiming jobs, {staleWorkers} stale workers</p>
           </CardContent>
         </Card>
       </div>

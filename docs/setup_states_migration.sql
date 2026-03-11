@@ -175,6 +175,9 @@ end $$;
 create table if not exists public.setup_structure_events (
   id           bigserial primary key,
   setup_id     uuid not null references public.trading_setups(id) on delete cascade,
+  connection_id uuid references public.mt5_user_connections(id) on delete set null,
+  symbol       text,
+  side         text check (side in ('buy','sell')),
 
   event_type   text not null check (event_type in ('CHOCH', 'BOS')),
   break_dir    text not null check (break_dir in ('bull', 'bear')),
@@ -184,6 +187,13 @@ create table if not exists public.setup_structure_events (
   level        numeric not null,
   -- Close price of the candle that triggered the break
   close_price  numeric not null,
+  -- Immutable setup snapshot for later analytics / audit
+  entry_price_snapshot numeric,
+  sl_snapshot  numeric,
+  tp_snapshot  numeric,
+  zone_low_snapshot numeric,
+  zone_high_snapshot numeric,
+  ai_sensitivity_snapshot int,
   -- Open-time (epoch_s) of the triggering candle on the event timeframe
   candle_time  bigint not null,
 

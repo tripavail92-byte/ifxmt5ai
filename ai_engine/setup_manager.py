@@ -68,6 +68,8 @@ def _ensure_path() -> None:
 
 REFRESH_INTERVAL_S  = 30    # re-fetch active setups from Supabase
 WRITE_QUEUE_MAXSIZE = 1000  # max pending state-change writes before drops
+WRITE_RETRY_MAX     = 3     # retry transient Supabase write failures
+WRITE_RETRY_DELAY_S = 1.0   # base backoff between retries
 H1_SECONDS          = 3600
 H1_LAST_MINUTE_MOD  = 3540  # 59 * 60 — the 1m bar that closes the H1 period
 
@@ -87,6 +89,31 @@ def _pivot_window_from_ai_sensitivity(ai_sensitivity: int) -> int:
     if ai > 10:
         ai = 10
     return ai
+
+
+def _is_retryable_persist_error(exc: Exception) -> bool:
+    """Best-effort classification of transient Supabase/network write errors."""
+    msg = f"{type(exc).__name__}: {exc}".lower()
+    transient_markers = (
+        "remoteprotocolerror",
+        "streamreset",
+        "readtimeout",
+        "connecttimeout",
+        "connectionerror",
+        "server disconnected",
+        "temporarily unavailable",
+        "unexpected eof",
+        "eof occurred",
+        "tls",
+        "ssl",
+        "timeout",
+    )
+    return any(marker in msg for marker in transient_markers)
+
+
+def _is_missing_column_error(exc: Exception) -> bool:
+    msg = f"{type(exc).__name__}: {exc}".lower()
+    return "42703" in msg or "column" in msg and "does not exist" in msg
 
 
 class SetupManager:
@@ -111,6 +138,7 @@ class SetupManager:
         self._last_structure_analysis_time: dict[str, int] = {}
         # (conn_id, symbol, tf) → last seen closed-candle time (avoid re-fetching on every 1m close)
         self._last_structure_eval_time_by_key: dict[tuple[str, str, str], int] = {}
+        self._structure_snapshot_schema_supported = True
 
         # H1 close dedupe (broker-native)
         # (conn_id, symbol) → last seen closed H1 candle open-time
@@ -314,12 +342,21 @@ class SetupManager:
 
                 self._queue_structure_event(
                     setup_id=setup_id,
+                    connection_id=setup_conn_id,
+                    symbol=getattr(setup, 'symbol', ''),
+                    side=getattr(setup, 'side', ''),
                     event_type=evt.event_type,
                     break_dir=evt.break_dir,
                     timeframe=tf,
                     level=evt.level,
                     close_price=evt.close_price,
                     candle_time=evt.candle_time,
+                    entry_price=getattr(setup, 'entry_price', None),
+                    sl_snapshot=getattr(setup, 'loss_edge', None),
+                    tp_snapshot=getattr(setup, 'target', None),
+                    zone_low_snapshot=getattr(setup, 'zone_low', None),
+                    zone_high_snapshot=getattr(setup, 'zone_high', None),
+                    ai_sensitivity_snapshot=getattr(setup, 'ai_sensitivity', None),
                 )
                 log.info(
                     "[structure] Signal=%s_%s BreakPrice=%.5f CandleTime=%d",
@@ -345,7 +382,7 @@ class SetupManager:
                         setup.trade_now_active = False
                         self._queue_trade_now(
                             setup_id=setup_id,
-                            connection_id=conn_id,
+                            connection_id=setup_conn_id,
                             symbol=getattr(setup, 'symbol', ''),
                             side=side_val,
                             sl=float(getattr(setup, 'loss_edge', 0.0)),
@@ -557,23 +594,41 @@ class SetupManager:
     def _queue_structure_event(
         self,
         setup_id: str,
+        connection_id: str,
+        symbol: str,
+        side: str,
         event_type: str,
         break_dir: str,
         timeframe: str,
         level: float,
         close_price: float,
         candle_time: int,
+        entry_price: float | None,
+        sl_snapshot: float | None,
+        tp_snapshot: float | None,
+        zone_low_snapshot: float | None,
+        zone_high_snapshot: float | None,
+        ai_sensitivity_snapshot: int | None,
     ) -> None:
         try:
             self._write_q.put_nowait({
                 "type":        "structure",
                 "setup_id":     setup_id,
+                "connection_id": connection_id,
+                "symbol":        symbol,
+                "side":          side,
                 "event_type":   event_type,
                 "break_dir":    break_dir,
                 "timeframe":    timeframe,
                 "level":        float(level),
                 "close_price":  float(close_price),
                 "candle_time":  int(candle_time),
+                "entry_price_snapshot": float(entry_price) if entry_price is not None else None,
+                "sl_snapshot": float(sl_snapshot) if sl_snapshot is not None else None,
+                "tp_snapshot": float(tp_snapshot) if tp_snapshot is not None else None,
+                "zone_low_snapshot": float(zone_low_snapshot) if zone_low_snapshot is not None else None,
+                "zone_high_snapshot": float(zone_high_snapshot) if zone_high_snapshot is not None else None,
+                "ai_sensitivity_snapshot": int(ai_sensitivity_snapshot) if ai_sensitivity_snapshot is not None else None,
             })
         except queue.Full:
             log.warning(
@@ -593,6 +648,7 @@ class SetupManager:
     ) -> None:
         """Queue a test trade (0.01 lot) triggered by Trade Now + structure break."""
         try:
+            now_ms = int(time.time() * 1000)
             self._write_q.put_nowait({
                 "type":         "trade_now",
                 "setup_id":     setup_id,
@@ -602,6 +658,8 @@ class SetupManager:
                 "sl":           sl,
                 "tp":           tp,
                 "close_price":  close_price,
+                "idempotency_key": f"trade_now:{setup_id}:{int(close_price * 1e5)}:{now_ms}",
+                "created_at":   __import__('datetime').datetime.utcnow().isoformat() + "Z",
             })
         except queue.Full:
             log.warning(
@@ -616,7 +674,22 @@ class SetupManager:
             try:
                 self._persist(item)
             except Exception as exc:
-                log.error("[setup_manager] persist error: %r", exc)
+                attempts = int(item.get("_persist_attempt", 0) or 0)
+                if attempts < WRITE_RETRY_MAX and _is_retryable_persist_error(exc):
+                    retry_item = dict(item)
+                    retry_item["_persist_attempt"] = attempts + 1
+                    delay_s = WRITE_RETRY_DELAY_S * retry_item["_persist_attempt"]
+                    log.warning(
+                        "[setup_manager] transient persist error (attempt %d/%d): %r — retrying in %.1fs",
+                        retry_item["_persist_attempt"], WRITE_RETRY_MAX, exc, delay_s,
+                    )
+                    time.sleep(delay_s)
+                    try:
+                        self._write_q.put_nowait(retry_item)
+                    except queue.Full:
+                        log.error("[setup_manager] persist retry queue full — dropped item: %r", retry_item)
+                else:
+                    log.error("[setup_manager] persist error: %r", exc)
             finally:
                 self._write_q.task_done()
 
@@ -661,7 +734,7 @@ class SetupManager:
             return
 
         if kind == "structure":
-            row = {
+            base_row = {
                 "setup_id":    item["setup_id"],
                 "event_type":  item["event_type"],
                 "break_dir":   item["break_dir"],
@@ -670,20 +743,41 @@ class SetupManager:
                 "close_price": item["close_price"],
                 "candle_time": item["candle_time"],
             }
-            db.table("setup_structure_events").insert(row).execute()
+            snapshot_row = {
+                **base_row,
+                "connection_id": item.get("connection_id"),
+                "symbol": item.get("symbol") or None,
+                "side": item.get("side") or None,
+                "entry_price_snapshot": item.get("entry_price_snapshot"),
+                "sl_snapshot": item.get("sl_snapshot"),
+                "tp_snapshot": item.get("tp_snapshot"),
+                "zone_low_snapshot": item.get("zone_low_snapshot"),
+                "zone_high_snapshot": item.get("zone_high_snapshot"),
+                "ai_sensitivity_snapshot": item.get("ai_sensitivity_snapshot"),
+            }
+            if self._structure_snapshot_schema_supported:
+                try:
+                    db.table("setup_structure_events").insert(snapshot_row).execute()
+                    return
+                except Exception as exc:
+                    if _is_missing_column_error(exc):
+                        self._structure_snapshot_schema_supported = False
+                        log.warning(
+                            "[setup_manager] setup_structure_events snapshot columns missing — falling back to legacy insert until migration is applied"
+                        )
+                    else:
+                        raise
+
+            db.table("setup_structure_events").insert(base_row).execute()
             return
 
         if kind == "trade_now":
-            import time as _time
             setup_id       = item["setup_id"]
             connection_id  = item["connection_id"]
             symbol         = item["symbol"]
             side           = item["side"]
             close_price    = float(item["close_price"])
-
-            idempotency_key = (
-                f"trade_now:{setup_id}:{int(close_price * 1e5)}:{int(_time.time())}"
-            )
+            idempotency_key = item["idempotency_key"]
 
             # Insert a queued market-order trade job (0.01 lot test)
             db.table("trade_jobs").insert({
@@ -695,7 +789,7 @@ class SetupManager:
                 "tp":              item["tp"] if item["tp"] else None,
                 "idempotency_key": idempotency_key,
                 "status":          "queued",
-                "created_at":      __import__('datetime').datetime.utcnow().isoformat() + "Z",
+                "created_at":      item["created_at"],
             }).execute()
 
             # Reset trade_now_active flag in DB so UI reflects one-shot completion

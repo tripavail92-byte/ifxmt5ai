@@ -3,10 +3,10 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { LayoutDashboard, Network, Settings, History, Activity } from "lucide-react";
+import { LayoutDashboard, Network, Settings, History, Activity, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const navItems = [
+const baseNavItems = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Connections", href: "/connections", icon: Network },
   { name: "Strategies", href: "/strategies", icon: Settings },
@@ -14,9 +14,13 @@ const navItems = [
   { name: "System Logs", href: "/logs", icon: Activity },
 ];
 
-export function Sidebar() {
+export function Sidebar({ isAdmin = false }: { isAdmin?: boolean }) {
   const pathname = usePathname();
   const [mounted, setMounted] = useState(false);
+
+  const navItems = isAdmin
+    ? [...baseNavItems, { name: "Admin Portal", href: "/admin", icon: ShieldCheck }]
+    : baseNavItems;
 
   useEffect(() => {
     setMounted(true);

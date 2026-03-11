@@ -255,6 +255,17 @@ stats = {
 
 # ─── Candle buffer disk persistence ──────────────────────────────────────────
 BUFFER_FILE = LOG_DIR / "candle_buffer.json"
+BUFFER_FILE_TMP = LOG_DIR / "candle_buffer.json.tmp"
+BUFFER_FILE_BAK = LOG_DIR / "candle_buffer.json.bak"
+
+
+def _iter_buffer_files() -> list[Path]:
+    files: list[Path] = []
+    if BUFFER_FILE.exists():
+        files.append(BUFFER_FILE)
+    if BUFFER_FILE_BAK.exists():
+        files.append(BUFFER_FILE_BAK)
+    return files
 
 def save_buffer() -> None:
     """Persist candle_buffer to disk (called every 60s + on shutdown)."""
@@ -262,28 +273,56 @@ def save_buffer() -> None:
         with _state_lock:
             data = {cid: {sym: list(buf) for sym, buf in syms.items()}
                     for cid, syms in candle_buffer.items() if syms}
-        with open(BUFFER_FILE, "w", encoding="utf-8") as f:
+        with open(BUFFER_FILE_TMP, "w", encoding="utf-8") as f:
             json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            if BUFFER_FILE.exists():
+                BUFFER_FILE.replace(BUFFER_FILE_BAK)
+        except Exception:
+            pass
+        BUFFER_FILE_TMP.replace(BUFFER_FILE)
     except Exception as exc:
         log.warning(f"save_buffer error: {exc!r}")
+        try:
+            if BUFFER_FILE_TMP.exists():
+                BUFFER_FILE_TMP.unlink()
+        except Exception:
+            pass
 
 def load_buffer() -> None:
     """Restore candle_buffer from disk on startup."""
-    if not BUFFER_FILE.exists():
+    files = _iter_buffer_files()
+    if not files:
         return
-    try:
-        with open(BUFFER_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        with _state_lock:
-            for cid, sym_map in data.items():
-                for sym, bars in sym_map.items():
-                    buf = candle_buffer[cid][sym]
-                    for b in bars:
-                        buf.append(b)
-        total = sum(len(s) for c in data.values() for s in c.values())
-        log.info(f"Loaded {total} bars from disk for {sum(len(v) for v in data.values())} symbols")
-    except Exception as exc:
-        log.warning(f"load_buffer error: {exc!r}")
+    last_exc: Exception | None = None
+    for path in files:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            with _state_lock:
+                for cid, sym_map in data.items():
+                    for sym, bars in sym_map.items():
+                        buf = candle_buffer[cid][sym]
+                        for b in bars:
+                            buf.append(b)
+            total = sum(len(s) for c in data.values() for s in c.values())
+            log.info(
+                f"Loaded {total} bars from disk for {sum(len(v) for v in data.values())} symbols"
+                f" ({path.name})"
+            )
+            if path != BUFFER_FILE:
+                try:
+                    BUFFER_FILE_BAK.replace(BUFFER_FILE)
+                except Exception:
+                    pass
+            return
+        except Exception as exc:
+            last_exc = exc
+            log.warning(f"load_buffer error from {path.name}: {exc!r}")
+    if last_exc is not None:
+        log.warning(f"load_buffer failed for all candidates; starting empty buffer: {last_exc!r}")
 
 def _buffer_autosave_loop() -> None:
     """Background thread: save buffer to disk every 60 seconds."""

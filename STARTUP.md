@@ -22,6 +22,8 @@ Components covered:
 - `RELAY_SECRET`
 - `RAILWAY_INGEST_URL` (production ingest URL when using Railway UI)
 - `RAILWAY_RELAY_TOKEN` (if your ingest endpoint requires auth)
+- Optional: `RUNTIME_ALERT_WEBHOOK_URL` (Slack/Teams/Discord compatible webhook for audit failures)
+- Optional: `RUNTIME_ALERT_COOLDOWN_SEC` (default `900`)
 
 3. Always run with venv Python:
 - `C:\mt5system\.venv\Scripts\python.exe`
@@ -91,12 +93,19 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
 
 # Confirm relay port bound once
 Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort 8082 -State Listen | Select-Object LocalAddress, LocalPort, OwningProcess
+
+# Production audit (recommended)
+C:/mt5system/.venv/Scripts/python.exe runtime/runtime_audit.py
 ```
 
 Expected:
 - `/health` responds with uptime JSON.
 - Exactly 1 relay process and 1 supervisor process.
 - Exactly 1 listener on `127.0.0.1:8082`.
+- `runtime_audit.py` returns exit code 0.
+
+For production use, schedule `runtime_audit.py` every 1 minute and alert on any non-zero exit code.
+If `RUNTIME_ALERT_WEBHOOK_URL` is set, the audit also sends deduplicated failure/recovery notifications automatically.
 
 ## MT5 EA Runtime Checks
 
@@ -149,6 +158,7 @@ Run full cleanup, then restart in order:
 - Never launch a second supervisor without stopping the first.
 - Never run EA directly to Railway; EA must post to local relay.
 - Always verify `/health` before debugging frontend symptoms.
+- Always keep relay and supervisor running under OS-managed restart policy (Task Scheduler, NSSM, or Windows Service wrapper), not manual terminals only.
 
 ## Log Paths
 
