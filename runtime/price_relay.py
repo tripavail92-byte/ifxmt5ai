@@ -278,9 +278,19 @@ stats = {
 
 
 def _accepts_connection(conn_id: str) -> bool:
-    if not RELAY_SOURCE_CONNECTION_ID:
-        return True
-    return (conn_id or "").strip() == RELAY_SOURCE_CONNECTION_ID
+    """When a source lock is set, only accept data that can be remapped.
+    When no lock is set, accept everything."""
+    return True  # always accept; conn_id is remapped via _effective_conn_id
+
+def _effective_conn_id(conn_id: str) -> str:
+    """Return the conn_id to use for storage and forwarding.
+    If RELAY_SOURCE_CONNECTION_ID is set, ALL incoming data is remapped to
+    that ID regardless of the original sender — this pins market data to a
+    single account without needing the EA to be reconfigured.
+    """
+    if RELAY_SOURCE_CONNECTION_ID:
+        return RELAY_SOURCE_CONNECTION_ID
+    return (conn_id or "default").strip()
 
 # ─── Candle buffer disk persistence ──────────────────────────────────────────
 BUFFER_FILE = LOG_DIR / "candle_buffer.json"
@@ -649,6 +659,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 "ws_dropped":     stats["ws_dropped"],
                 "railway_ingest": RAILWAY_INGEST_URL or "not configured",
                 "relay_source_connection_id": RELAY_SOURCE_CONNECTION_ID or None,
+                "active_conn_ids": list(latest_price.keys()),
                 "candle_buf_syms": sum(
                     len(syms) for syms in candle_buffer.values()
                 ),
@@ -816,12 +827,11 @@ class RelayHandler(BaseHTTPRequestHandler):
     def _handle_tick_batch(self, body: bytes):
         stats["tick_batches"] += 1
         try:
-            data    = json.loads(body)
-            conn_id = data.get("connection_id", "default")
-            if not _accepts_connection(conn_id):
-                return
-            ticks   = data.get("ticks", [])
-            candles = data.get("forming_candles", [])
+            data       = json.loads(body)
+            raw_id     = data.get("connection_id", "default")
+            conn_id    = _effective_conn_id(raw_id)   # remap if source lock active
+            ticks      = data.get("ticks", [])
+            candles    = data.get("forming_candles", [])
 
             stats["ticks_total"] += len(ticks)
 
@@ -852,7 +862,7 @@ class RelayHandler(BaseHTTPRequestHandler):
             # Evaluate setup state machine on tick data
             _sm_on_tick_batch(conn_id, ticks)
 
-            # Forward to Railway WS
+            # Forward to Railway — use remapped conn_id so Railway stores under the right account
             enqueue_ws({
                 "type":          "tick_batch",
                 "connection_id": conn_id,
@@ -877,9 +887,8 @@ class RelayHandler(BaseHTTPRequestHandler):
         stats["candle_closes"] += 1
         try:
             data    = json.loads(body)
-            conn_id = data.get("connection_id", "default")
-            if not _accepts_connection(conn_id):
-                return
+            raw_id  = data.get("connection_id", "default")
+            conn_id = _effective_conn_id(raw_id)   # remap if source lock active
             symbol  = data.get("symbol", "")
 
             bar = {
@@ -918,9 +927,8 @@ class RelayHandler(BaseHTTPRequestHandler):
         stats["historical_bulk"] += 1
         try:
             data    = json.loads(body)
-            conn_id = data.get("connection_id", "default")
-            if not _accepts_connection(conn_id):
-                return
+            raw_id  = data.get("connection_id", "default")
+            conn_id = _effective_conn_id(raw_id)   # remap if source lock active
             symbols = data.get("symbols", [])
 
             total_bars = 0
