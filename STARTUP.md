@@ -22,11 +22,25 @@ Components covered:
 - `RELAY_SECRET`
 - `RAILWAY_INGEST_URL` (production ingest URL when using Railway UI)
 - `RAILWAY_RELAY_TOKEN` (if your ingest endpoint requires auth)
+- Optional: `RELAY_SOURCE_CONNECTION_ID` (lock market data ingest to one connection UUID)
 - Optional: `RUNTIME_ALERT_WEBHOOK_URL` (Slack/Teams/Discord compatible webhook for audit failures)
 - Optional: `RUNTIME_ALERT_COOLDOWN_SEC` (default `900`)
 
 3. Always run with venv Python:
 - `C:\mt5system\.venv\Scripts\python.exe`
+
+### Optional: Lock Price Source While Keeping Multiple Accounts
+
+If you run multiple MT5 accounts but want charts/prices from one account only,
+set this in `.env`:
+
+```dotenv
+RELAY_SOURCE_CONNECTION_ID=200beae4-553b-4607-8653-8a15e5699865
+```
+
+Replace with the connection UUID you want as the single price source.
+Other accounts can stay active for runtime/trading, but relay market-data
+posts from other `connection_id` values are ignored.
 
 ## Create 3 Supabase Login Users
 

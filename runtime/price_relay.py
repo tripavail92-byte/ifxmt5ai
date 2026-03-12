@@ -196,6 +196,7 @@ PORT             = int(os.getenv("RELAY_PORT", "8082"))
 RELAY_SECRET     = os.getenv("RELAY_SECRET", "")              # blank = skip HMAC verify
 RAILWAY_INGEST_URL = os.getenv("RAILWAY_INGEST_URL", "")      # https://....railway.app/api/mt5/ingest
 RAILWAY_TOKEN    = os.getenv("RAILWAY_RELAY_TOKEN", "")       # Bearer token for Railway ingest
+RELAY_SOURCE_CONNECTION_ID = (os.getenv("RELAY_SOURCE_CONNECTION_ID", "") or "").strip()
 # Default to ~7 days of 1m data per symbol (override via RELAY_CANDLE_MAXBARS)
 CANDLE_MAXBARS   = int(os.getenv("RELAY_CANDLE_MAXBARS", "10000"))
 
@@ -274,6 +275,12 @@ stats = {
     "ws_dropped":      0,
     "t_start":         time.time(),
 }
+
+
+def _accepts_connection(conn_id: str) -> bool:
+    if not RELAY_SOURCE_CONNECTION_ID:
+        return True
+    return (conn_id or "").strip() == RELAY_SOURCE_CONNECTION_ID
 
 # ─── Candle buffer disk persistence ──────────────────────────────────────────
 BUFFER_FILE = LOG_DIR / "candle_buffer.json"
@@ -641,6 +648,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 "ws_sent":        stats["ws_sent"],
                 "ws_dropped":     stats["ws_dropped"],
                 "railway_ingest": RAILWAY_INGEST_URL or "not configured",
+                "relay_source_connection_id": RELAY_SOURCE_CONNECTION_ID or None,
                 "candle_buf_syms": sum(
                     len(syms) for syms in candle_buffer.values()
                 ),
@@ -810,6 +818,8 @@ class RelayHandler(BaseHTTPRequestHandler):
         try:
             data    = json.loads(body)
             conn_id = data.get("connection_id", "default")
+            if not _accepts_connection(conn_id):
+                return
             ticks   = data.get("ticks", [])
             candles = data.get("forming_candles", [])
 
@@ -868,6 +878,8 @@ class RelayHandler(BaseHTTPRequestHandler):
         try:
             data    = json.loads(body)
             conn_id = data.get("connection_id", "default")
+            if not _accepts_connection(conn_id):
+                return
             symbol  = data.get("symbol", "")
 
             bar = {
@@ -907,6 +919,8 @@ class RelayHandler(BaseHTTPRequestHandler):
         try:
             data    = json.loads(body)
             conn_id = data.get("connection_id", "default")
+            if not _accepts_connection(conn_id):
+                return
             symbols = data.get("symbols", [])
 
             total_bars = 0
@@ -1028,6 +1042,10 @@ def main():
     log.info(f"  Listening on http://127.0.0.1:{PORT}")
     log.info(f"  HMAC verification: {'ON' if RELAY_SECRET else 'OFF (RELAY_SECRET not set)'}")
     log.info(f"  Railway ingest: {RAILWAY_INGEST_URL or 'NOT CONFIGURED -- buffer only'}")
+    if RELAY_SOURCE_CONNECTION_ID:
+        log.info(f"  Relay source lock: {RELAY_SOURCE_CONNECTION_ID}")
+    else:
+        log.info("  Relay source lock: OFF (all connection IDs accepted)")
     log.info(f"  Candle buffer: {CANDLE_MAXBARS} bars/symbol (~{CANDLE_MAXBARS//60}h of 1m)")
     log.info("=" * 60)
 
