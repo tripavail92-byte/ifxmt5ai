@@ -189,18 +189,13 @@ def _ensure_terminal_copy(connection_id: str) -> Optional[str]:
 async def _fetch_next_request(client: httpx.AsyncClient) -> Optional[Dict[str, Any]]:
     url = _supabase_rest_url("mt5_user_connections")
     params = {
-        "select": "id,user_id,broker_server,account_login,password_nonce_b64,password_ciphertext_b64,test_request_id,test_requested_at",
-        "order": "test_requested_at.asc",
+        "select": "id,user_id,broker_server,account_login,password_nonce_b64,password_ciphertext_b64,test_request_id,created_at",
+        "order": "created_at.asc",
         "limit": "1",
         "test_request_id": "not.is.null",
     }
 
     resp = await client.get(url, headers=_supabase_headers(), params=params)
-    if resp.status_code == 400:
-        # Some PostgREST versions prefer is.not.null
-        params["test_request_id"] = "is.not.null"
-        resp = await client.get(url, headers=_supabase_headers(), params=params)
-
     if resp.status_code != 200:
         raise RuntimeError(f"Supabase fetch failed: HTTP {resp.status_code}: {resp.text}")
 
@@ -469,7 +464,6 @@ async def run_poller() -> None:
                 "last_test_result": result.get("details"),
                 # clear the request
                 "test_request_id": None,
-                "test_requested_at": None,
             }
 
             try:
@@ -491,7 +485,7 @@ async def run_poller() -> None:
                 await asyncio.sleep(sleep_s)
 
 
-if __name__ == "__main__":
+def main() -> None:
     try:
         asyncio.run(run_poller())
     except SystemExit as e:
@@ -500,3 +494,7 @@ if __name__ == "__main__":
             print(msg, flush=True)
             raise SystemExit(0)
         raise
+
+
+if __name__ == "__main__":
+    main()

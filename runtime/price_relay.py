@@ -184,18 +184,12 @@ except Exception as _sm_err:
 
 def _sm_on_tick_batch(conn_id: str, ticks: list) -> None:
     if _setup_manager is not None:
-        try:
-            _setup_manager.on_tick_batch(conn_id, ticks)
-        except Exception as _e:
-            log.debug("setup_manager.on_tick_batch error: %r", _e)
+        _enqueue_setup_event("tick_batch", conn_id, ticks=ticks)
 
 
 def _sm_on_candle_close(conn_id: str, symbol: str, bar: dict) -> None:
     if _setup_manager is not None:
-        try:
-            _setup_manager.on_candle_close(conn_id, symbol, bar)
-        except Exception as _e:
-            log.debug("setup_manager.on_candle_close error: %r", _e)
+        _enqueue_setup_event("candle_close", conn_id, symbol=symbol, bar=bar)
 
 
 PORT             = int(os.getenv("RELAY_PORT", "8082"))
@@ -216,6 +210,34 @@ TF_MINUTES = {
     "4h":  240,
     "1d":  1440,
 }
+
+_sm_event_queue: queue.Queue | None = queue.Queue(maxsize=2000) if _setup_manager is not None else None
+
+
+def _enqueue_setup_event(kind: str, conn_id: str, **payload) -> None:
+    if _setup_manager is None or _sm_event_queue is None:
+        return
+    try:
+        _sm_event_queue.put_nowait((kind, conn_id, payload))
+    except queue.Full:
+        log.warning("[relay] setup event queue full; dropping %s for %s", kind, conn_id[:8])
+
+
+def _setup_event_loop() -> None:
+    if _setup_manager is None or _sm_event_queue is None:
+        return
+
+    while True:
+        kind, conn_id, payload = _sm_event_queue.get()
+        try:
+            if kind == "tick_batch":
+                _setup_manager.on_tick_batch(conn_id, payload.get("ticks", []))
+            elif kind == "candle_close":
+                _setup_manager.on_candle_close(conn_id, payload.get("symbol", ""), payload.get("bar", {}))
+        except Exception as _e:
+            log.debug("setup_manager.%s error: %r", kind, _e)
+        finally:
+            _sm_event_queue.task_done()
 
 MOCK_SYMBOLS = [
     "EURUSDm", "GBPUSDm", "USDJPYm", "USDCADm", "AUDUSDm",
@@ -257,6 +279,7 @@ stats = {
 BUFFER_FILE = LOG_DIR / "candle_buffer.json"
 BUFFER_FILE_TMP = LOG_DIR / "candle_buffer.json.tmp"
 BUFFER_FILE_BAK = LOG_DIR / "candle_buffer.json.bak"
+BUFFER_AUTOSAVE_SECONDS = max(0, int(os.getenv("RELAY_BUFFER_AUTOSAVE_SECONDS", "0") or "0"))
 
 
 def _iter_buffer_files() -> list[Path]:
@@ -326,8 +349,11 @@ def load_buffer() -> None:
 
 def _buffer_autosave_loop() -> None:
     """Background thread: save buffer to disk every 60 seconds."""
+    if BUFFER_AUTOSAVE_SECONDS <= 0:
+        log.info("Buffer autosave disabled (set RELAY_BUFFER_AUTOSAVE_SECONDS>0 to enable)")
+        return
     while True:
-        time.sleep(60)
+        time.sleep(BUFFER_AUTOSAVE_SECONDS)
         save_buffer()
 
 # ─── HTTP forwarder ───────────────────────────────────────────────────────────
@@ -344,6 +370,8 @@ def enqueue_fwd(msg: dict) -> None:
     if not RAILWAY_INGEST_URL:
         return  # buffering only — no Railway endpoint configured
     try:
+        if "_retry" not in msg:
+            msg["_retry"] = 0
         _fwd_queue.put_nowait(msg)
     except queue.Full:
         stats["ws_dropped"] += 1
@@ -362,20 +390,22 @@ def _http_relay_loop() -> None:
             _fwd_queue.task_done()
         return  # unreachable but explicit
 
-    headers: dict = {"Content-Type": "application/json"}
+    headers: dict = {"Content-Type": "application/json", "Connection": "close"}
     if RAILWAY_TOKEN:
         headers["Authorization"] = f"Bearer {RAILWAY_TOKEN}"
 
     session = requests.Session()
     backoff = 1.0
+    max_retries = 5
     log.info(f"HTTP relay -> target: {RAILWAY_INGEST_URL}")
 
     while True:
         msg = _fwd_queue.get()
         try:
+            payload = {k: v for k, v in msg.items() if k != "_retry"}
             resp = session.post(
                 RAILWAY_INGEST_URL,
-                data=json.dumps(msg),
+                json=payload,
                 headers=headers,
                 timeout=5,
             )
@@ -386,15 +416,30 @@ def _http_relay_loop() -> None:
                 log.warning(f"Railway ingest HTTP {resp.status_code}: {resp.text[:80]}")
                 stats["ws_dropped"] += 1
         except Exception as exc:
-            log.warning(f"Railway ingest error: {exc!r} - retry in {backoff:.0f}s")
-            stats["ws_dropped"] += 1
-            time.sleep(backoff)
-            backoff = min(backoff * 2.0, 30.0)
-            # Re-enqueue the failed message (best-effort)
+            retry_count = int(msg.get("_retry", 0)) + 1
+            if retry_count <= max_retries:
+                msg["_retry"] = retry_count
+                log.warning(
+                    f"Railway ingest error: {exc!r} - retry {retry_count}/{max_retries} in {backoff:.0f}s"
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2.0, 30.0)
+                try:
+                    _fwd_queue.put_nowait(msg)
+                except queue.Full:
+                    stats["ws_dropped"] += 1
+            else:
+                log.warning(
+                    f"Railway ingest drop after {max_retries} retries: {exc!r}"
+                )
+                stats["ws_dropped"] += 1
+
+            # Reset broken keep-alive state after transport errors.
             try:
-                _fwd_queue.put_nowait(msg)
-            except queue.Full:
+                session.close()
+            except Exception:
                 pass
+            session = requests.Session()
         finally:
             _fwd_queue.task_done()
 
@@ -991,6 +1036,10 @@ def main():
 
     # Start WebSocket relay thread (handles both connected and disconnected states)
     _start_ws_thread()
+
+    if _setup_manager is not None and _sm_event_queue is not None:
+        threading.Thread(target=_setup_event_loop, name="setup-events", daemon=True).start()
+        log.info("Setup event worker started")
 
     # Start autosave thread
     threading.Thread(target=_buffer_autosave_loop, name="autosave", daemon=True).start()

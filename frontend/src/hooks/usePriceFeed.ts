@@ -56,6 +56,8 @@ export function usePriceFeed(connId?: string): PriceFeedState {
   const esRef      = useRef<EventSource | null>(null);
   const backoffRef = useRef<number>(1_000);
   const timerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastEventAtRef = useRef<number>(0);
   const mountedRef = useRef(true);
 
   const connect = useCallback(() => {
@@ -69,6 +71,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     es.onopen = () => {
       if (!mountedRef.current) return;
       backoffRef.current = 1_000;
+      lastEventAtRef.current = Date.now();
       setState(s => ({ ...s, isConnected: true }));
     };
 
@@ -87,6 +90,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     es.addEventListener("init", (e: MessageEvent) => {
       if (!mountedRef.current) return;
       try {
+        lastEventAtRef.current = Date.now();
         const d = JSON.parse(e.data) as {
           prices?: Record<string, PriceSnapshot>;
           forming?: Record<string, CandleBar>;
@@ -105,6 +109,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     es.addEventListener("prices", (e: MessageEvent) => {
       if (!mountedRef.current) return;
       try {
+        lastEventAtRef.current = Date.now();
         const d = JSON.parse(e.data) as { prices: Record<string, PriceSnapshot> };
         setState(s => ({
           ...s,
@@ -116,6 +121,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     es.addEventListener("candle_update", (e: MessageEvent) => {
       if (!mountedRef.current) return;
       try {
+        lastEventAtRef.current = Date.now();
         const d = JSON.parse(e.data) as { forming: Record<string, CandleBar> };
         setState(s => ({
           ...s,
@@ -127,6 +133,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     es.addEventListener("candle_close", (e: MessageEvent) => {
       if (!mountedRef.current) return;
       try {
+        lastEventAtRef.current = Date.now();
         const d = JSON.parse(e.data) as { symbol: string; bar: CandleBar };
         if (d.symbol && d.bar) {
           setState(s => ({ ...s, lastClose: { symbol: d.symbol, bar: d.bar } }));
@@ -137,6 +144,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     es.addEventListener("connected", (e: MessageEvent) => {
       if (!mountedRef.current) return;
       try {
+        lastEventAtRef.current = Date.now();
         const d = JSON.parse(e.data) as { symbols?: string[] };
         if (d.symbols?.length) {
           setState(s => ({ ...s, symbols: d.symbols! }));
@@ -144,21 +152,57 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       } catch { /* ignore */ }
     });
 
-    // heartbeat — no-op; keeps connection warm
-    es.addEventListener("heartbeat", () => { /* alive */ });
+    es.addEventListener("heartbeat", () => {
+      lastEventAtRef.current = Date.now();
+    });
 
   }, [connId]);
 
+  const pollPrices = useCallback(async () => {
+    try {
+      const qs = connId ? `?conn_id=${encodeURIComponent(connId)}` : "";
+      const resp = await fetch(`/api/prices${qs}`, { cache: "no-store" });
+      if (!resp.ok) return;
+      const data = await resp.json() as {
+        prices?: Record<string, PriceSnapshot>;
+        symbols?: string[];
+      };
+
+      if (!mountedRef.current) return;
+
+      if (data.prices && Object.keys(data.prices).length > 0) {
+        setState(s => ({
+          ...s,
+          prices: { ...s.prices, ...data.prices },
+          symbols: data.symbols?.length ? data.symbols : s.symbols,
+        }));
+      }
+
+      if (Date.now() - lastEventAtRef.current > 20_000) {
+        esRef.current?.close();
+        esRef.current = null;
+        connect();
+      }
+    } catch {
+    }
+  }, [connId, connect]);
+
   useEffect(() => {
     mountedRef.current = true;
+    lastEventAtRef.current = Date.now();
     connect();
+    pollRef.current = setInterval(() => {
+      void pollPrices();
+    }, 3000);
     return () => {
       mountedRef.current = false;
       esRef.current?.close();
       esRef.current = null;
       if (timerRef.current) clearTimeout(timerRef.current);
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = null;
     };
-  }, [connect]);
+  }, [connect, pollPrices]);
 
   return state;
 }

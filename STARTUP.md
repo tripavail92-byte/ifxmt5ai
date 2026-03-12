@@ -48,6 +48,12 @@ Or set the password non-interactively:
 C:/mt5system/.venv/Scripts/python.exe create_supabase_users.py --password "YourPassword"
 ```
 
+If users already exist and you need to reset their password (for `Invalid login credentials`):
+
+```powershell
+C:/mt5system/.venv/Scripts/python.exe create_supabase_users.py --password "YourPassword" --reset-existing
+```
+
 ## Standard Restart (Authoritative Procedure)
 
 Open **one PowerShell** at `C:\mt5system` and run:
