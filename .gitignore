@@ -26,3 +26,13 @@ code for choch nbos/
 
 # Separate UI workspace (not used by Next.js frontend)
 Forex Trading Terminal UI/
+
+cloudflared.exe
+*.lock
+_debug_state.py
+_hash_*.txt
+_mt5_*.py
+_mt5_*.out
+git_push_*.txt
+process_check*.txt
+logs/*.log

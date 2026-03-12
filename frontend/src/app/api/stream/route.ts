@@ -2,13 +2,17 @@
  * GET /api/stream
  *
  * Server-Sent Events stream for live MT5 price data.
- * Browsers EventSource-connect here and receive:
  *
+ * Two modes:
+ *  1. RELAY_STREAM_URL is set → proxy relay's SSE directly (Cloudflare Tunnel, ~80ms)
+ *  2. No RELAY_STREAM_URL    → stream from Railway in-memory mt5State (fallback)
+ *
+ * Events emitted:
  *   connected     — {type, connection_id, symbols[]}
- *   candle_update — {type, connection_id, forming: {symbol: CandleBar}}
- *   candle_close  — {type, connection_id, symbol, bar: CandleBar}
+ *   init          — initial snapshot {prices, symbols}
  *   prices        — {type, connection_id, prices: {symbol: {bid,ask,ts_ms}}}
- *   heartbeat     — {type, ts} (every 15s to keep connection alive)
+ *   candle_close  — {type, connection_id, symbol, bar: CandleBar}
+ *   heartbeat     — {type, ts} every 15s
  *
  * Query params:
  *   ?conn_id=<uuid>   filter events to a specific connection (optional)
@@ -18,19 +22,18 @@ import { NextRequest } from "next/server";
 import { mt5State, type SseSubscriber } from "@/lib/mt5-state";
 
 export const runtime = "nodejs";
-// Disable body size limit — SSE is a long-lived streaming response
 export const dynamic = "force-dynamic";
 
 const encoder = new TextEncoder();
+const RELAY_STREAM_URL = (process.env.RELAY_STREAM_URL ?? "").trim();
 
 function sseMessage(payload: object): Uint8Array {
   const type = (payload as { type?: string }).type ?? "message";
   return encoder.encode(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`);
 }
 
-export async function GET(req: NextRequest) {
-  const connFilter = req.nextUrl.searchParams.get("conn_id") ?? undefined;
-
+/** Fallback: stream from Railway in-memory mt5State */
+function streamFromState(req: NextRequest, connFilter?: string): Response {
   let sub: SseSubscriber | null = null;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -39,34 +42,21 @@ export async function GET(req: NextRequest) {
       sub = { controller, connFilter };
       mt5State.addSubscriber(sub);
 
-      // Send initial state snapshot immediately
       const symbols = mt5State.getSymbols(connFilter);
       const prices  = mt5State.getPrices(connFilter);
+      controller.enqueue(sseMessage({ type: "init", symbols, prices, subscribers: mt5State.subscriberCount }));
 
-      controller.enqueue(sseMessage({
-        type:          "init",
-        symbols,
-        prices,
-        subscribers:   mt5State.subscriberCount,
-      }));
-
-      // Heartbeat every 15s (prevents Railway/proxy from closing idle connections)
       heartbeatTimer = setInterval(() => {
-        try {
-          controller.enqueue(sseMessage({ type: "heartbeat", ts: Date.now() }));
-        } catch {
-          // controller closed — will be cleaned up on abort
-        }
+        try { controller.enqueue(sseMessage({ type: "heartbeat", ts: Date.now() })); }
+        catch { /* closed */ }
       }, 15_000);
     },
-
     cancel() {
       if (sub) mt5State.removeSubscriber(sub);
       if (heartbeatTimer) clearInterval(heartbeatTimer);
     },
   });
 
-  // Cleanup on client disconnect
   req.signal.addEventListener("abort", () => {
     if (sub) mt5State.removeSubscriber(sub);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -75,10 +65,53 @@ export async function GET(req: NextRequest) {
   return new Response(stream, {
     status: 200,
     headers: {
-      "Content-Type":  "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      "Connection":    "keep-alive",
-      "X-Accel-Buffering": "no",  // disable nginx proxy buffering
+      "Content-Type":      "text/event-stream; charset=utf-8",
+      "Cache-Control":     "no-cache, no-transform",
+      "Connection":        "keep-alive",
+      "X-Accel-Buffering": "no",
     },
   });
 }
+
+/** Primary: proxy relay SSE via Cloudflare Tunnel */
+async function proxyRelayStream(req: NextRequest, connFilter?: string): Promise<Response> {
+  const upstreamUrl = new URL(RELAY_STREAM_URL);
+  if (connFilter) upstreamUrl.searchParams.set("conn_id", connFilter);
+
+  const abortCtrl = new AbortController();
+  req.signal.addEventListener("abort", () => abortCtrl.abort());
+
+  try {
+    const upstream = await fetch(upstreamUrl.toString(), {
+      signal:  abortCtrl.signal,
+      cache:   "no-store",
+      headers: { Accept: "text/event-stream", "Cache-Control": "no-cache" },
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      return streamFromState(req, connFilter);
+    }
+
+    return new Response(upstream.body, {
+      status: 200,
+      headers: {
+        "Content-Type":      "text/event-stream; charset=utf-8",
+        "Cache-Control":     "no-cache, no-transform",
+        "Connection":        "keep-alive",
+        "X-Accel-Buffering": "no",
+      },
+    });
+  } catch {
+    return streamFromState(req, connFilter);
+  }
+}
+
+export async function GET(req: NextRequest) {
+  const connFilter = req.nextUrl.searchParams.get("conn_id") ?? undefined;
+
+  if (RELAY_STREAM_URL) {
+    return proxyRelayStream(req, connFilter);
+  }
+  return streamFromState(req, connFilter);
+}
+

@@ -265,6 +265,57 @@ forming        = collections.defaultdict(dict)   # conn_id -> {symbol -> bar}
 latest_price   = collections.defaultdict(dict)   # conn_id -> {symbol -> {bid,ask,ts}}
 config_symbols = collections.defaultdict(list)   # conn_id -> [symbol, ...]
 
+# ─── SSE client registry ──────────────────────────────────────────────────────
+# Each connected browser gets a Queue. The broadcaster pushes msgs every 200ms.
+_sse_clients: list = []                  # list[queue.Queue]
+_sse_lock    = threading.Lock()
+
+# Pending tick accumulator: filled by _handle_tick_batch, drained by broadcaster
+_pending_broadcast: dict = {}           # conn_id -> {symbol -> {bid,ask,ts_ms}}
+_pending_lock = threading.Lock()
+
+SSE_INTERVAL_S = float(os.getenv("SSE_INTERVAL_MS", "200")) / 1000  # default 200ms
+
+
+def _broadcast_sse_event(msg: dict) -> None:
+    """Push msg to every connected SSE client queue (non-blocking)."""
+    event_type = msg.get("type", "message")
+    payload = (f"event: {event_type}\ndata: {json.dumps(msg)}\n\n").encode()
+    dead = []
+    with _sse_lock:
+        clients = list(_sse_clients)
+    for q in clients:
+        try:
+            q.put_nowait(payload)
+        except queue.Full:
+            dead.append(q)
+    if dead:
+        with _sse_lock:
+            for q in dead:
+                try:
+                    _sse_clients.remove(q)
+                except ValueError:
+                    pass
+
+
+def _sse_broadcaster_loop() -> None:
+    """Background thread: every SSE_INTERVAL_S drain pending ticks → broadcast."""
+    while True:
+        time.sleep(SSE_INTERVAL_S)
+        with _pending_lock:
+            if not _pending_broadcast:
+                continue
+            snapshot = {k: dict(v) for k, v in _pending_broadcast.items()}
+            _pending_broadcast.clear()
+
+        for conn_id, sym_prices in snapshot.items():
+            msg = {
+                "type":          "prices",
+                "connection_id": conn_id,
+                "prices":        sym_prices,
+            }
+            _broadcast_sse_event(msg)
+
 stats = {
     "tick_batches":    0,
     "ticks_total":     0,
@@ -660,6 +711,7 @@ class RelayHandler(BaseHTTPRequestHandler):
                 "railway_ingest": RAILWAY_INGEST_URL or "not configured",
                 "relay_source_connection_id": RELAY_SOURCE_CONNECTION_ID or None,
                 "active_conn_ids": list(latest_price.keys()),
+                "sse_clients": len(_sse_clients),
                 "candle_buf_syms": sum(
                     len(syms) for syms in candle_buffer.values()
                 ),
@@ -672,6 +724,9 @@ class RelayHandler(BaseHTTPRequestHandler):
             threading.Thread(target=_push_history_to_railway, daemon=True).start()
             body = json.dumps({"ok": True, "msg": "push started"}).encode()
             self._send(200, body)
+
+        elif path == "/stream":
+            self._handle_sse_stream(qs)
 
         else:
             self._send(404, b'{"error":"not found"}')
@@ -798,6 +853,68 @@ class RelayHandler(BaseHTTPRequestHandler):
         body = json.dumps({"prices": prices}).encode()
         self._send(200, body)
 
+    def _handle_sse_stream(self, qs: dict) -> None:
+        """GET /stream  — Server-Sent Events price feed.
+
+        The client (frontend) connects here and receives throttled price
+        snapshots every SSE_INTERVAL_MS milliseconds without polling.
+        No authentication needed – data is read-only market prices.
+        """
+        conn_id = _effective_conn_id((qs.get("conn_id", [""])[0] or "").strip())
+
+        self.send_response(200)
+        origin = self.headers.get("Origin", "*")
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+        # Send initial snapshot so the UI fills instantly on connect
+        try:
+            with _state_lock:
+                snapshot = dict(latest_price.get(conn_id, {}))
+            if snapshot:
+                init_msg = json.dumps({
+                    "type": "prices",
+                    "connection_id": conn_id,
+                    "prices": snapshot,
+                })
+                self.wfile.write(f"event: init\ndata: {init_msg}\n\n".encode())
+            self.wfile.write(b"event: connected\ndata: {\"status\":\"ok\"}\n\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+        client_q: queue.Queue = queue.Queue(maxsize=30)
+        with _sse_lock:
+            _sse_clients.append(client_q)
+        stats["sse_active"] = stats.get("sse_active", 0) + 1
+        log.info(f"[SSE] client connected  conn_id={conn_id[:8]}  total={len(_sse_clients)}")
+
+        try:
+            while True:
+                try:
+                    payload = client_q.get(timeout=15)
+                    self.wfile.write(payload)
+                    self.wfile.flush()
+                except queue.Empty:
+                    # Keepalive comment — prevents proxy timeouts
+                    self.wfile.write(b":\n\n")
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            with _sse_lock:
+                try:
+                    _sse_clients.remove(client_q)
+                except ValueError:
+                    pass
+            stats["sse_active"] = max(0, stats.get("sse_active", 1) - 1)
+            log.info(f"[SSE] client disconnected  total={len(_sse_clients)}")
+
     # ── POST ──────────────────────────────────────────────────────────────────
 
     def do_POST(self):
@@ -859,6 +976,18 @@ class RelayHandler(BaseHTTPRequestHandler):
                             "v": c.get("tick_vol", 0),
                         }
 
+            # Accumulate for SSE broadcaster (200ms throttle)
+            with _pending_lock:
+                bucket = _pending_broadcast.setdefault(conn_id, {})
+                for t in ticks:
+                    sym = t.get("symbol")
+                    if sym:
+                        bucket[sym] = {
+                            "bid":   t.get("bid"),
+                            "ask":   t.get("ask"),
+                            "ts_ms": t.get("ts_ms"),
+                        }
+
             # Evaluate setup state machine on tick data
             _sm_on_tick_batch(conn_id, ticks)
 
@@ -910,6 +1039,15 @@ class RelayHandler(BaseHTTPRequestHandler):
 
             # Evaluate setup state machine (H1 boundary detection inside)
             _sm_on_candle_close(conn_id, symbol, bar)
+
+            # Broadcast to SSE clients (instant, no queue)
+            _broadcast_sse_event({
+                "type":          "candle_close",
+                "connection_id": conn_id,
+                "symbol":        symbol,
+                "timeframe":     data.get("timeframe", "1m"),
+                "bar":           bar,
+            })
 
             # Forward to Railway WS
             enqueue_ws({
@@ -1063,6 +1201,10 @@ def main():
     # Start WebSocket relay thread (handles both connected and disconnected states)
     _start_ws_thread()
 
+    # Start SSE broadcaster (throttled, pushes price snapshots to browser clients)
+    threading.Thread(target=_sse_broadcaster_loop, name="sse-broadcast", daemon=True).start()
+    log.info(f"SSE broadcaster started  interval={int(SSE_INTERVAL_S*1000)}ms")
+
     if _setup_manager is not None and _sm_event_queue is not None:
         threading.Thread(target=_setup_event_loop, name="setup-events", daemon=True).start()
         log.info("Setup event worker started")
@@ -1110,6 +1252,7 @@ def main():
     log.info("  POST /tick-batch                  — live ticks + forming candles")
     log.info("  POST /candle-close                — completed bar")
     log.info("  POST /historical-bulk             — init history dump")
+    log.info("  GET  /stream                      — SSE live price feed (Cloudflare Tunnel)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
