@@ -132,7 +132,6 @@ export function CandlestickChart({
     const stored = (raw as TF | null) ?? null;
     return stored && (TIMEFRAMES as readonly string[]).includes(stored) ? stored : "M5";
   });
-  const [fetchTick, setFetchTick] = useState(0);
   const [historyVersion, setHistoryVersion] = useState(0);
   const [isLive, setIsLive] = useState(false);
 
@@ -141,17 +140,33 @@ export function CandlestickChart({
     Math.max(300, Number.parseInt(process.env.NEXT_PUBLIC_CHART_HISTORY_COUNT ?? "1200", 10) || 1200)
   );
 
+  // Load a full set of bars into the chart (history fetch or TF switch).
+  // Preserves the current forming bar if newer than the last fetched bar.
   const drawSeries = (bars: CandlestickData[], fit = false) => {
     const series = seriesRef.current;
     if (!series) return;
-    series.setData(bars);
-    historyRef.current = bars;
-    hasHistoryRef.current = bars.length > 0;
+
+    // If we already have a live forming bar newer than the history, keep it.
+    const prevLast = historyRef.current[historyRef.current.length - 1];
+    const newLast  = bars[bars.length - 1];
+    let merged = bars;
+    if (prevLast && newLast && Number(prevLast.time) > Number(newLast.time)) {
+      merged = [...bars, prevLast];
+    }
+
+    series.setData(merged);
+    historyRef.current = merged;
+    hasHistoryRef.current = merged.length > 0;
     setHistoryVersion(v => v + 1);
     if (fit) chartRef.current?.timeScale().fitContent();
   };
 
+  // Incrementally update or append a single bar using series.update().
+  // This avoids replacing the entire dataset and prevents flicker.
   const upsertLiveBar = (raw: RawCandleBar) => {
+    const series = seriesRef.current;
+    if (!series) return;
+
     const slot = toTfSlot(raw.t, activeTf);
     const next: CandlestickData = {
       time: slot as Time,
@@ -165,28 +180,35 @@ export function CandlestickChart({
     const last = current[current.length - 1];
 
     if (!last) {
-      drawSeries([next], true);
+      // No history yet — seed from this bar
+      series.setData([next]);
+      historyRef.current = [next];
+      hasHistoryRef.current = true;
+      chartRef.current?.timeScale().fitContent();
       return;
     }
 
     const lastT = Number(last.time);
-    if (slot < lastT) return;
+    if (slot < lastT) return; // stale bar, ignore
 
     if (slot === lastT) {
-      const merged: CandlestickData = {
+      // Same candle — update in place (merge OHLC)
+      const updated: CandlestickData = {
         time: last.time,
         open: last.open,
         high: Math.max(last.high, next.high),
         low: Math.min(last.low, next.low),
         close: next.close,
       };
-      const updated = [...current.slice(0, -1), merged];
-      drawSeries(updated, false);
+      series.update(updated);                          // incremental — no full redraw
+      historyRef.current[current.length - 1] = updated;
       return;
     }
 
-    const updated = [...current, next];
-    drawSeries(updated, false);
+    // New candle — append
+    series.update(next);                               // lightweight-charts appends automatically
+    historyRef.current = [...current, next];
+    setHistoryVersion(v => v + 1);
   };
 
   useEffect(() => {
@@ -267,12 +289,8 @@ export function CandlestickChart({
     seriesRef.current?.applyOptions({ priceFormat: priceFormat(liveSymbol ?? symbol) });
   }, [liveSymbol, symbol]);
 
-  useEffect(() => {
-    if (!liveSymbol) return;
-    const id = setInterval(() => setFetchTick(n => n + 1), 4_000);
-    return () => clearInterval(id);
-  }, [liveSymbol]);
-
+  // Fetch history once on symbol/TF change. No periodic re-poll —
+  // SSE (candle_update + candle_close) drives all live updates.
   useEffect(() => {
     if (!liveSymbol || !connId) return;
     if (!seriesRef.current) return;
@@ -304,7 +322,9 @@ export function CandlestickChart({
 
     void load();
     return () => ac.abort();
-  }, [liveSymbol, connId, activeTf, fetchTick, HISTORY_COUNT]);
+  // fetchTick intentionally removed — no periodic re-poll needed with SSE
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveSymbol, connId, activeTf, HISTORY_COUNT]);
 
   useEffect(() => {
     if (!liveSymbol || !forming) return;
@@ -329,7 +349,6 @@ export function CandlestickChart({
     fitOnNextLoadRef.current = true;
     setActiveTf(tf);
     try { localStorage.setItem("ifx_chart_tf", tf); } catch {}
-    setFetchTick(n => n + 1);
   }
 
   useEffect(() => {
