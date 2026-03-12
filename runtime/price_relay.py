@@ -272,6 +272,7 @@ _sse_lock    = threading.Lock()
 
 # Pending tick accumulator: filled by _handle_tick_batch, drained by broadcaster
 _pending_broadcast: dict = {}           # conn_id -> {symbol -> {bid,ask,ts_ms}}
+_pending_forming: dict  = {}           # conn_id -> {symbol -> {t,o,h,l,c,v}}
 _pending_lock = threading.Lock()
 
 SSE_INTERVAL_S = float(os.getenv("SSE_INTERVAL_MS", "200")) / 1000  # default 200ms
@@ -303,18 +304,26 @@ def _sse_broadcaster_loop() -> None:
     while True:
         time.sleep(SSE_INTERVAL_S)
         with _pending_lock:
-            if not _pending_broadcast:
+            if not _pending_broadcast and not _pending_forming:
                 continue
-            snapshot = {k: dict(v) for k, v in _pending_broadcast.items()}
+            price_snap   = {k: dict(v) for k, v in _pending_broadcast.items()}
+            forming_snap = {k: dict(v) for k, v in _pending_forming.items()}
             _pending_broadcast.clear()
+            _pending_forming.clear()
 
-        for conn_id, sym_prices in snapshot.items():
-            msg = {
+        for conn_id, sym_prices in price_snap.items():
+            _broadcast_sse_event({
                 "type":          "prices",
                 "connection_id": conn_id,
                 "prices":        sym_prices,
-            }
-            _broadcast_sse_event(msg)
+            })
+
+        for conn_id, sym_forming in forming_snap.items():
+            _broadcast_sse_event({
+                "type":          "candle_update",
+                "connection_id": conn_id,
+                "forming":       sym_forming,
+            })
 
 stats = {
     "tick_batches":    0,
@@ -875,14 +884,22 @@ class RelayHandler(BaseHTTPRequestHandler):
         # Send initial snapshot so the UI fills instantly on connect
         try:
             with _state_lock:
-                snapshot = dict(latest_price.get(conn_id, {}))
-            if snapshot:
+                price_snapshot   = dict(latest_price.get(conn_id, {}))
+                forming_snapshot = dict(forming.get(conn_id, {}))
+            if price_snapshot:
                 init_msg = json.dumps({
                     "type": "prices",
                     "connection_id": conn_id,
-                    "prices": snapshot,
+                    "prices": price_snapshot,
                 })
-                self.wfile.write(f"event: init\ndata: {init_msg}\n\n".encode())
+                self.wfile.write(f"event: prices\ndata: {init_msg}\n\n".encode())
+            if forming_snapshot:
+                forming_msg = json.dumps({
+                    "type": "candle_update",
+                    "connection_id": conn_id,
+                    "forming": forming_snapshot,
+                })
+                self.wfile.write(f"event: candle_update\ndata: {forming_msg}\n\n".encode())
             self.wfile.write(b"event: connected\ndata: {\"status\":\"ok\"}\n\n")
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
@@ -986,6 +1003,19 @@ class RelayHandler(BaseHTTPRequestHandler):
                             "bid":   t.get("bid"),
                             "ask":   t.get("ask"),
                             "ts_ms": t.get("ts_ms"),
+                        }
+                # Accumulate forming candles for candle_update SSE events
+                fbucket = _pending_forming.setdefault(conn_id, {})
+                for c in candles:
+                    sym = c.get("symbol")
+                    if sym:
+                        fbucket[sym] = {
+                            "t": c.get("time"),
+                            "o": c.get("open"),
+                            "h": c.get("high"),
+                            "l": c.get("low"),
+                            "c": c.get("close"),
+                            "v": c.get("tick_vol", 0),
                         }
 
             # Evaluate setup state machine on tick data
