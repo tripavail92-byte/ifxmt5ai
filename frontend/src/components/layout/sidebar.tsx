@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { LayoutDashboard, Network, Settings, History, Activity, ShieldCheck } from "lucide-react";
+import { LayoutDashboard, Network, Settings, History, Activity, ShieldCheck, TrendingUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const baseNavItems = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
+  { name: "Terminal", href: "/terminal", icon: TrendingUp },
   { name: "Connections", href: "/connections", icon: Network },
   { name: "Strategies", href: "/strategies", icon: Settings },
   { name: "Trade History", href: "/trades", icon: History },

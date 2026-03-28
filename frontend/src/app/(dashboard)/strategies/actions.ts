@@ -4,6 +4,49 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/utils/supabase/server";
 import { createClient as createServiceClient } from "@supabase/supabase-js";
 
+const TERMINAL_TERMS_VERSION = "2026-03-28-v1";
+
+async function enforceTerminalExecutionGuards(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+  connectionId: string,
+) {
+  const { data: settings, error } = await supabase
+    .from("user_terminal_settings")
+    .select("preferences_json, terms_version")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    const message = error.message.toLowerCase();
+    if (!(message.includes("does not exist") || message.includes("relation") || message.includes("schema cache"))) {
+      throw new Error(`Failed to validate terminal settings: ${error.message}`);
+    }
+    return;
+  }
+
+  if (!settings || settings.terms_version !== TERMINAL_TERMS_VERSION) {
+    throw new Error("Accept the current terminal terms before queueing live MT5 execution.");
+  }
+
+  const prefs = (settings.preferences_json ?? {}) as { maxTradesPerDay?: number; sessions?: { london?: boolean; newYork?: boolean; asia?: boolean } };
+  const maxTradesPerDay = Number(prefs.maxTradesPerDay ?? 0);
+  if (maxTradesPerDay > 0) {
+    const { data: dailyTrades, error: dailyErr } = await supabase.rpc("count_daily_trades", { p_connection_id: connectionId });
+    if (dailyErr) {
+      throw new Error(`Failed to validate daily trade limit: ${dailyErr.message}`);
+    }
+    if (Number(dailyTrades ?? 0) >= maxTradesPerDay) {
+      throw new Error(`Daily trade limit reached: ${Number(dailyTrades ?? 0)}/${maxTradesPerDay}`);
+    }
+  }
+
+  const sessions = prefs.sessions;
+  if (sessions && !sessions.london && !sessions.newYork && !sessions.asia) {
+    throw new Error("Enable at least one trading session before queueing execution.");
+  }
+}
+
 export async function saveStrategy(formData: FormData) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -58,6 +101,8 @@ export async function placeManualTrade(formData: FormData) {
     .eq("id", connection_id)
     .single();
   if (!conn) throw new Error("Connection not found or not authorized.");
+
+  await enforceTerminalExecutionGuards(supabase, user.id, connection_id);
 
   // Use service role to bypass trade_jobs RLS for the insert
   const service = createServiceClient(
@@ -115,6 +160,15 @@ export async function activateTradeNow(params: {
 
   if (upsertErr) throw new Error(upsertErr.message);
   const setupId = newId as string;
+
+  const { data: conn } = await supabase
+    .from("mt5_user_connections")
+    .select("id")
+    .eq("id", params.connection_id)
+    .single();
+  if (!conn) throw new Error("Connection not found or not authorized.");
+
+  await enforceTerminalExecutionGuards(supabase, user.id, params.connection_id);
 
   // 2. Arm the Trade Now flag using service role (bypasses RLS on the update)
   const service = createServiceClient(
