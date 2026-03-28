@@ -330,6 +330,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const [riskUsd, setRiskUsd] = useState<number>(200);
   const [maxTradesPerDay, setMaxTradesPerDay] = useState<number>(3);
   const [riskRewardRatio, setRiskRewardRatio] = useState<number>(2.5);
+  const [dailyLossLimitUsd, setDailyLossLimitUsd] = useState<number>(0);
+  const [dailyProfitTargetUsd, setDailyProfitTargetUsd] = useState<number>(0);
+  const [maxPositionSizeLots, setMaxPositionSizeLots] = useState<number>(0);
+  const [maxDrawdownPercent, setMaxDrawdownPercent] = useState<number>(0);
   const [newsFilter, setNewsFilter] = useState(false);
   const [newsBeforeMin, setNewsBeforeMin] = useState<number>(30);
   const [newsAfterMin, setNewsAfterMin] = useState<number>(30);
@@ -405,8 +409,28 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     if (maxTradesPerDay > 0 && todaysTradeCount >= maxTradesPerDay) {
       return `Daily trade limit reached: ${todaysTradeCount}/${maxTradesPerDay}.`;
     }
+    // Max position size
+    if (maxPositionSizeLots > 0 && lotSuggestion > maxPositionSizeLots) {
+      return `Lot size ${lotSuggestion.toFixed(2)} exceeds your max position size of ${maxPositionSizeLots} lots.`;
+    }
+    // Daily loss limit — checked against floating P&L of all open positions
+    const floatingPnl = openPositions.reduce((sum, p) => sum + p.profit + p.swap, 0);
+    if (dailyLossLimitUsd > 0 && floatingPnl < -dailyLossLimitUsd) {
+      return `Daily loss limit of $${dailyLossLimitUsd} reached (floating: ${fmtCurrency(floatingPnl)}).`;
+    }
+    // Daily profit target — lock out new trades when hit
+    if (dailyProfitTargetUsd > 0 && floatingPnl >= dailyProfitTargetUsd) {
+      return `Daily profit target of $${dailyProfitTargetUsd} reached — trading locked for today.`;
+    }
+    // Max drawdown
+    if (maxDrawdownPercent > 0 && accountBalance > 0) {
+      const drawdown = ((accountBalance - accountEquity) / accountBalance) * 100;
+      if (drawdown >= maxDrawdownPercent) {
+        return `Max drawdown of ${maxDrawdownPercent}% reached (current: ${drawdown.toFixed(1)}%).`;
+      }
+    }
     return null;
-  }, [maxTradesPerDay, riskAmount, termsAccepted, todaysTradeCount]);
+  }, [accountBalance, accountEquity, dailyLossLimitUsd, dailyProfitTargetUsd, lotSuggestion, maxDrawdownPercent, maxPositionSizeLots, maxTradesPerDay, openPositions, riskAmount, termsAccepted, todaysTradeCount]);
 
   useEffect(() => {
     try {
@@ -439,6 +463,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     if (typeof mergedPrefs.riskUsd === "number") setRiskUsd(mergedPrefs.riskUsd);
     if (typeof mergedPrefs.maxTradesPerDay === "number") setMaxTradesPerDay(mergedPrefs.maxTradesPerDay);
     if (typeof mergedPrefs.riskRewardRatio === "number") setRiskRewardRatio(mergedPrefs.riskRewardRatio);
+    if (typeof mergedPrefs.dailyLossLimitUsd === "number") setDailyLossLimitUsd(mergedPrefs.dailyLossLimitUsd);
+    if (typeof mergedPrefs.dailyProfitTargetUsd === "number") setDailyProfitTargetUsd(mergedPrefs.dailyProfitTargetUsd);
+    if (typeof mergedPrefs.maxPositionSizeLots === "number") setMaxPositionSizeLots(mergedPrefs.maxPositionSizeLots);
+    if (typeof mergedPrefs.maxDrawdownPercent === "number") setMaxDrawdownPercent(mergedPrefs.maxDrawdownPercent);
     if (typeof mergedPrefs.newsFilter === "boolean") setNewsFilter(mergedPrefs.newsFilter);
     if (typeof mergedPrefs.newsBeforeMin === "number") setNewsBeforeMin(mergedPrefs.newsBeforeMin);
     if (typeof mergedPrefs.newsAfterMin === "number") setNewsAfterMin(mergedPrefs.newsAfterMin);
@@ -475,6 +503,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
       riskUsd,
       maxTradesPerDay,
       riskRewardRatio,
+      dailyLossLimitUsd,
+      dailyProfitTargetUsd,
+      maxPositionSizeLots,
+      maxDrawdownPercent,
       newsFilter,
       newsBeforeMin,
       newsAfterMin,
@@ -513,6 +545,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
           riskUsd,
           maxTradesPerDay,
           riskRewardRatio,
+          dailyLossLimitUsd,
+          dailyProfitTargetUsd,
+          maxPositionSizeLots,
+          maxDrawdownPercent,
           newsFilter,
           newsBeforeMin,
           newsAfterMin,
@@ -1224,8 +1260,52 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                   </div>
                   <input type="range" min={1} max={20} step={0.5} value={riskRewardRatio} onChange={(e) => setRiskRewardRatio(parseFloat(e.target.value))} className="w-full accent-emerald-500" />
                 </div>
-                <div className="rounded-lg border border-yellow-500/20 bg-yellow-500/10 p-3 text-xs text-yellow-200">
-                  Dynamic lot suggestion is live here. Stop mode now supports setup, manual, and AI Dynamic structure-based SL.
+
+                {/* Account-level guardrails */}
+                <div className="space-y-2 pt-1">
+                  <p className="text-[10px] uppercase tracking-[0.18em] text-gray-600">Account Guardrails <span className="text-gray-700">(0 = disabled)</span></p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <Label className="mb-1 block text-[10px] uppercase tracking-wide text-gray-500">Daily Loss Limit $</Label>
+                      <Input
+                        type="number" step="10" min="0"
+                        value={dailyLossLimitUsd}
+                        onChange={(e) => setDailyLossLimitUsd(parseFloat(e.target.value) || 0)}
+                        className="border-[#2b2b2b] bg-[#0f0f0f] text-xs text-white h-8"
+                        placeholder="0 = off"
+                      />
+                    </div>
+                    <div>
+                      <Label className="mb-1 block text-[10px] uppercase tracking-wide text-gray-500">Profit Target $</Label>
+                      <Input
+                        type="number" step="10" min="0"
+                        value={dailyProfitTargetUsd}
+                        onChange={(e) => setDailyProfitTargetUsd(parseFloat(e.target.value) || 0)}
+                        className="border-[#2b2b2b] bg-[#0f0f0f] text-xs text-white h-8"
+                        placeholder="0 = off"
+                      />
+                    </div>
+                    <div>
+                      <Label className="mb-1 block text-[10px] uppercase tracking-wide text-gray-500">Max Lot Size</Label>
+                      <Input
+                        type="number" step="0.01" min="0"
+                        value={maxPositionSizeLots}
+                        onChange={(e) => setMaxPositionSizeLots(parseFloat(e.target.value) || 0)}
+                        className="border-[#2b2b2b] bg-[#0f0f0f] text-xs text-white h-8"
+                        placeholder="0 = off"
+                      />
+                    </div>
+                    <div>
+                      <Label className="mb-1 block text-[10px] uppercase tracking-wide text-gray-500">Max Drawdown %</Label>
+                      <Input
+                        type="number" step="1" min="0" max="100"
+                        value={maxDrawdownPercent}
+                        onChange={(e) => setMaxDrawdownPercent(parseFloat(e.target.value) || 0)}
+                        className="border-[#2b2b2b] bg-[#0f0f0f] text-xs text-white h-8"
+                        placeholder="0 = off"
+                      />
+                    </div>
+                  </div>
                 </div>
                 {stopMode === "ai_dynamic" ? (
                   <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 p-3 text-xs text-blue-200">
@@ -1270,7 +1350,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                   <SessionToggle label="New York" checked={sessions.newYork} onChange={(checked) => setSessions((prev) => ({ ...prev, newYork: checked }))} />
                   <SessionToggle label="Asia" checked={sessions.asia} onChange={(checked) => setSessions((prev) => ({ ...prev, asia: checked }))} />
                 </div>
-                <p className="leading-relaxed text-gray-500">These controls now persist locally in the terminal route. Runtime-level session/news enforcement is still pending.</p>
+                <p className="leading-relaxed text-gray-500">Sessions are enforced server-side before every job insert. If none are enabled, execution is blocked. News window enforcement requires an economic calendar integration (planned).</p>
               </div>
             </section>
 

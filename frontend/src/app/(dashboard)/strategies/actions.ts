@@ -6,10 +6,28 @@ import { createClient as createServiceClient } from "@supabase/supabase-js";
 
 const TERMINAL_TERMS_VERSION = "2026-03-28-v1";
 
+// ─── Session UTC hour windows ────────────────────────────────────────────────
+// Returns true if the current UTC time falls inside any enabled session.
+// London 08:00–16:30, New York 13:00–21:00, Asia 23:00–08:00 (next day)
+function isWithinEnabledSession(sessions: { london?: boolean; newYork?: boolean; asia?: boolean } | undefined): boolean {
+  if (!sessions) return true; // no pref stored → allow
+  if (!sessions.london && !sessions.newYork && !sessions.asia) return false; // all off
+
+  const now = new Date();
+  const utcHour = now.getUTCHours() + now.getUTCMinutes() / 60;
+
+  if (sessions.london && utcHour >= 8 && utcHour < 16.5) return true;
+  if (sessions.newYork && utcHour >= 13 && utcHour < 21) return true;
+  if (sessions.asia && (utcHour >= 23 || utcHour < 8)) return true;
+
+  return false; // inside a disabled session window
+}
+
 async function enforceTerminalExecutionGuards(
   supabase: Awaited<ReturnType<typeof createClient>>,
   userId: string,
   connectionId: string,
+  tradeVolume?: number, // optional — checked against maxPositionSizeLots
 ) {
   const { data: settings, error } = await supabase
     .from("user_terminal_settings")
@@ -22,28 +40,76 @@ async function enforceTerminalExecutionGuards(
     if (!(message.includes("does not exist") || message.includes("relation") || message.includes("schema cache"))) {
       throw new Error(`Failed to validate terminal settings: ${error.message}`);
     }
-    return;
+    return; // table missing → skip enforcement gracefully
   }
 
   if (!settings || settings.terms_version !== TERMINAL_TERMS_VERSION) {
     throw new Error("Accept the current terminal terms before queueing live MT5 execution.");
   }
 
-  const prefs = (settings.preferences_json ?? {}) as { maxTradesPerDay?: number; sessions?: { london?: boolean; newYork?: boolean; asia?: boolean } };
+  const prefs = (settings.preferences_json ?? {}) as {
+    maxTradesPerDay?: number;
+    maxPositionSizeLots?: number;
+    dailyLossLimitUsd?: number;
+    dailyProfitTargetUsd?: number;
+    maxDrawdownPercent?: number;
+    sessions?: { london?: boolean; newYork?: boolean; asia?: boolean };
+  };
+
+  // --- 1. Max trades / day ---
   const maxTradesPerDay = Number(prefs.maxTradesPerDay ?? 0);
   if (maxTradesPerDay > 0) {
     const { data: dailyTrades, error: dailyErr } = await supabase.rpc("count_daily_trades", { p_connection_id: connectionId });
-    if (dailyErr) {
-      throw new Error(`Failed to validate daily trade limit: ${dailyErr.message}`);
-    }
+    if (dailyErr) throw new Error(`Failed to validate daily trade limit: ${dailyErr.message}`);
     if (Number(dailyTrades ?? 0) >= maxTradesPerDay) {
       throw new Error(`Daily trade limit reached: ${Number(dailyTrades ?? 0)}/${maxTradesPerDay}`);
     }
   }
 
-  const sessions = prefs.sessions;
-  if (sessions && !sessions.london && !sessions.newYork && !sessions.asia) {
-    throw new Error("Enable at least one trading session before queueing execution.");
+  // --- 2. Session window enforcement ---
+  if (!isWithinEnabledSession(prefs.sessions)) {
+    throw new Error("No enabled trading session is currently active. Enable a session or wait for your session window.");
+  }
+
+  // --- 3. Max position size ---
+  const maxPositionSizeLots = Number(prefs.maxPositionSizeLots ?? 0);
+  if (maxPositionSizeLots > 0 && tradeVolume && tradeVolume > maxPositionSizeLots) {
+    throw new Error(`Trade volume ${tradeVolume} lots exceeds your max position size of ${maxPositionSizeLots} lots.`);
+  }
+
+  // --- 4. Daily loss limit + daily profit target + max drawdown ---
+  // All three are checked against the live heartbeat metrics.
+  const dailyLossLimitUsd = Number(prefs.dailyLossLimitUsd ?? 0);
+  const dailyProfitTargetUsd = Number(prefs.dailyProfitTargetUsd ?? 0);
+  const maxDrawdownPercent = Number(prefs.maxDrawdownPercent ?? 0);
+
+  const needsHeartbeat = dailyLossLimitUsd > 0 || dailyProfitTargetUsd > 0 || maxDrawdownPercent > 0;
+  if (needsHeartbeat) {
+    const { data: hb } = await supabase
+      .from("mt5_worker_heartbeats")
+      .select("last_metrics")
+      .eq("connection_id", connectionId)
+      .maybeSingle();
+
+    if (hb?.last_metrics) {
+      const metrics = hb.last_metrics as { balance?: number; equity?: number; profit?: number };
+      const balance = Number(metrics.balance ?? 0);
+      const equity = Number(metrics.equity ?? 0);
+      const floatingProfit = Number(metrics.profit ?? 0);
+
+      if (dailyLossLimitUsd > 0 && floatingProfit < -dailyLossLimitUsd) {
+        throw new Error(`Daily loss limit of $${dailyLossLimitUsd} reached (floating P&L: $${floatingProfit.toFixed(2)}).`);
+      }
+      if (dailyProfitTargetUsd > 0 && floatingProfit >= dailyProfitTargetUsd) {
+        throw new Error(`Daily profit target of $${dailyProfitTargetUsd} reached — new trades are locked for today.`);
+      }
+      if (maxDrawdownPercent > 0 && balance > 0) {
+        const drawdown = ((balance - equity) / balance) * 100;
+        if (drawdown >= maxDrawdownPercent) {
+          throw new Error(`Max drawdown of ${maxDrawdownPercent}% reached (current: ${drawdown.toFixed(1)}%).`);
+        }
+      }
+    }
   }
 }
 
@@ -102,9 +168,7 @@ export async function placeManualTrade(formData: FormData) {
     .single();
   if (!conn) throw new Error("Connection not found or not authorized.");
 
-  await enforceTerminalExecutionGuards(supabase, user.id, connection_id);
-
-  // Use service role to bypass trade_jobs RLS for the insert
+  await enforceTerminalExecutionGuards(supabase, user.id, connection_id, volume);
   const service = createServiceClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!

@@ -21,6 +21,11 @@ export type TerminalPreferences = {
   riskUsd: number;
   maxTradesPerDay: number;
   riskRewardRatio: number;
+  // Account-level guardrails — 0 means disabled
+  dailyLossLimitUsd: number;
+  dailyProfitTargetUsd: number;
+  maxPositionSizeLots: number;
+  maxDrawdownPercent: number;
   newsFilter: boolean;
   newsBeforeMin: number;
   newsAfterMin: number;
