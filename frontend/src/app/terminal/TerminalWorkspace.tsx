@@ -350,6 +350,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   });
   const [dynamicStopLoading, setDynamicStopLoading] = useState(false);
   const [closingTickets, setClosingTickets] = useState<Set<number>>(new Set());
+  // Mirrors ManualTradeCard hydration guard — prevents chart SSR/client mismatch
+  const [hydrated, setHydrated] = useState(false);
 
   const {
     prices,
@@ -487,6 +489,9 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     setSettingsLoaded(true);
     setSettingsSyncState(initialSettings ? "saved" : "idle");
   }, [initialSettings]);
+
+  // Mark client hydration complete — same pattern as ManualTradeCard on strategies page
+  useEffect(() => { setHydrated(true); }, []);
 
   useEffect(() => {
     try {
@@ -944,6 +949,9 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const tradeNowArmed = selectedSymbol ? Boolean(tradeNowBySymbol[selectedSymbol]) : false;
   const stateCfg = activeSetupState ? SETUP_STATE_CFG[activeSetupState] : null;
   const availableSymbols = [...new Set([...(symbols.map((row) => row.symbol)), ...(liveSymbols ?? [])])];
+  // Fallback symbol list while SSE connects — same as ManualTradeCard SUBSCRIBED list
+  const SUBSCRIBED_DEFAULT = ["BTCUSDm","ETHUSDm","EURUSDm","GBPUSDm","USDJPYm","XAUUSDm","USDCADm","AUDUSDm","NZDUSDm","USDCHFm","EURGBPm","USOILm"];
+  const tabSymbols = liveSymbols.length > 0 ? liveSymbols : availableSymbols.length > 0 ? availableSymbols : SUBSCRIBED_DEFAULT;
 
   function renderAITrading() {
     return (
@@ -1131,9 +1139,9 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
         </aside>
 
         <section className="space-y-4 rounded-xl border border-[#1f1f1f] bg-[#0c0c0c] p-4 lg:rounded-none lg:border-y-0 lg:border-l-0 lg:border-r-0 lg:px-5 lg:py-4">
+          {/* ── Account / status strip ── */}
           <div className="grid gap-3 xl:grid-cols-[1fr_auto] xl:items-center">
             <div className="flex flex-wrap items-center gap-2">
-              <Badge className="bg-blue-500/15 text-blue-300">{selectedSymbol || "No symbol"}</Badge>
               <Badge className={side === "buy" ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}>{side.toUpperCase()}</Badge>
               <StatusBadge status={accountHeartbeat?.status ?? selectedConnection?.status} />
               <span className="text-xs text-gray-500">{selectedConnection ? `${selectedConnection.account_login} · ${selectedConnection.broker_server}` : "No active connection"}</span>
@@ -1147,22 +1155,63 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                 <div className="text-gray-500">Equity</div>
                 <div className="font-semibold text-emerald-300">{fmtCurrency(accountEquity)}</div>
               </div>
+              <div className="flex items-center gap-1.5">
+                <span className={`h-1.5 w-1.5 rounded-full ${isConnected ? "bg-emerald-400 animate-pulse" : "bg-yellow-500"}`} />
+                <span className="text-gray-500">{isConnected ? "LIVE" : "connecting…"}</span>
+              </div>
             </div>
           </div>
 
-          <CandlestickChart
-            symbol={displaySymbol}
-            liveSymbol={displaySymbol}
-            connId={selectedConnectionId || undefined}
-            entryPrice={showEntryZones && validEntry ? parsedEntry : undefined}
-            entryZoneLow={showEntryZones && zone ? zone.low : undefined}
-            entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
-            sl={showEntryZones ? slValue : undefined}
-            tp={showTPZones ? tpValue : undefined}
-            forming={forming}
-            lastClose={lastClose}
-            className="w-full"
-          />
+          {/* ── Symbol tab bar — identical pattern to strategies page ManualTradeCard ── */}
+          <div
+            className="flex overflow-x-auto rounded-lg border border-[#1a1a1a] bg-[#0d0d0d]"
+            style={{ scrollbarWidth: "none" }}
+          >
+            {tabSymbols.map((sym) => {
+              const live   = prices[sym];
+              const isAct  = displaySymbol === sym;
+              const digits = /JPY|XAU|BTC|ETH|OIL/i.test(sym) ? 2 : 5;
+              return (
+                <button
+                  key={sym}
+                  type="button"
+                  onClick={() => setSelectedSymbol(sym)}
+                  className={`flex-shrink-0 flex flex-col items-start px-3 py-2 border-b-2 transition-colors whitespace-nowrap
+                    ${isAct
+                      ? "border-orange-500 bg-[#141414]"
+                      : "border-transparent hover:bg-[#111] hover:border-gray-700"
+                    }`}
+                >
+                  <span className={`font-mono font-semibold text-[11px] ${isAct ? "text-white" : "text-gray-500"}`}>
+                    {sym}
+                  </span>
+                  {live ? (
+                    <span className={`text-[10px] font-mono mt-0.5 ${isAct ? "text-emerald-400" : "text-gray-600"}`}>
+                      {live.bid.toFixed(digits)}
+                    </span>
+                  ) : (
+                    <span className="text-[10px] text-gray-700 mt-0.5">—</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {hydrated && (
+            <CandlestickChart
+              symbol={displaySymbol}
+              liveSymbol={displaySymbol}
+              connId={selectedConnectionId || undefined}
+              entryPrice={showEntryZones && validEntry ? parsedEntry : undefined}
+              entryZoneLow={showEntryZones && zone ? zone.low : undefined}
+              entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
+              sl={showEntryZones ? slValue : undefined}
+              tp={showTPZones ? tpValue : undefined}
+              forming={forming}
+              lastClose={lastClose}
+              className="w-full"
+            />
+          )}
 
           <div className="grid gap-4 xl:grid-cols-[1.3fr_0.7fr]">
             <div className="rounded-xl border border-[#1f1f1f] bg-[#121212] p-4">
@@ -1567,19 +1616,21 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
           <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-200">
             <Edit3 className="size-4 text-orange-400" /> Manual Execution Workspace
           </div>
-          <CandlestickChart
-            symbol={displaySymbol}
-            liveSymbol={displaySymbol}
-            connId={selectedConnectionId || undefined}
-            entryPrice={showEntryZones && validEntry ? parsedEntry : undefined}
-            entryZoneLow={showEntryZones && zone ? zone.low : undefined}
-            entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
-            sl={showEntryZones ? slValue : undefined}
-            tp={showTPZones ? tpValue : undefined}
-            forming={forming}
-            lastClose={lastClose}
-            className="w-full"
-          />
+          {hydrated && (
+            <CandlestickChart
+              symbol={displaySymbol}
+              liveSymbol={displaySymbol}
+              connId={selectedConnectionId || undefined}
+              entryPrice={showEntryZones && validEntry ? parsedEntry : undefined}
+              entryZoneLow={showEntryZones && zone ? zone.low : undefined}
+              entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
+              sl={showEntryZones ? slValue : undefined}
+              tp={showTPZones ? tpValue : undefined}
+              forming={forming}
+              lastClose={lastClose}
+              className="w-full"
+            />
+          )}
         </div>
         <div className="rounded-xl border border-[#1f1f1f] bg-[#101010] p-5 space-y-4">
           <div>
