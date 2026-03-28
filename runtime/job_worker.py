@@ -1072,6 +1072,29 @@ def run_worker(connection_id: str):
             logger.info("Job %s symbol mapped %s -> %s", job_id, job["symbol"], selected_symbol)
             job = {**job, "symbol": selected_symbol}
 
+        # --- News filter check ---
+        # Lazily load prefs once per session (reset on connection re-init).
+        # news_filter / newsBeforeMin / newsAfterMin come from user_terminal_settings.
+        try:
+            import news_calendar as _nc  # type: ignore
+            _prefs = db.get_terminal_prefs_for_connection(connection_id)
+            if _prefs.get("newsFilter"):
+                _before = int(_prefs.get("newsBeforeMin", 30))
+                _after  = int(_prefs.get("newsAfterMin", 30))
+                _blocked, _reason = _nc.is_news_blocked(job["symbol"], _before, _after)
+                if _blocked:
+                    logger.warning("Job %s BLOCKED by news filter: %s", job_id, _reason)
+                    db.complete_trade_job(
+                        job_id, "failed",
+                        error=_reason or "News blackout window",
+                        error_code="news_blackout",
+                    )
+                    backoff.reset()
+                    continue
+        except Exception as _news_exc:
+            # Never block a trade because of a calendar error — fail-open
+            logger.debug("News filter check skipped (error): %s", _news_exc)
+
         # --- Mark executing ---
         db.mark_trade_job_executing(job_id)
 

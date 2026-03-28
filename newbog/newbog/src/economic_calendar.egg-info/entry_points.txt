@@ -1,0 +1,2 @@
+[console_scripts]
+economic-calendar = economic_calendar.cli.main:main

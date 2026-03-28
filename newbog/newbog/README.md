@@ -1,0 +1,92 @@
+# Economic Calendar
+
+Portable Python module for building a trading-oriented economic calendar from free official sources.
+
+This first version is FRED-first and includes:
+
+- A portable internal event schema
+- Deterministic impact classification rules
+- FRED release and release-date ingestion
+- Hooks for additional official-source adapters
+- Trade blackout evaluation helpers
+- CLI commands for fetching events and checking trade blocking
+
+## Why this exists
+
+Paid calendar providers are convenient, but a free long-term route is possible by combining FRED and official releases with your own normalization and impact logic.
+
+This package is designed so you can:
+
+- Use it as a library in any bot or app
+- Run it as a CLI tool
+- Extend it with new providers without changing the core schema
+- Compare its output manually with a reference calendar for validation
+
+## Current scope
+
+Included now:
+
+- FRED adapter for release metadata and scheduled release dates
+- Internal schema for normalized events
+- Rules for classifying impact as high, medium, or low
+- Trade blackout logic
+
+Not included yet:
+
+- Automated forecast/actual value enrichment across all sources
+- Full non-US official-source adapters
+- Persistent database storage
+
+## Install
+
+```bash
+pip install -e .
+```
+
+## CLI examples
+
+Fetch FRED events for a date range:
+
+```bash
+economic-calendar fetch --provider fred --from 2026-03-01 --to 2026-03-31
+```
+
+Check whether trading should be blocked:
+
+```bash
+economic-calendar should-block --symbol EURUSD --timestamp 2026-03-15T12:25:00+00:00
+```
+
+## Internal event model
+
+Each provider normalizes into a single event model with fields such as:
+
+- `source`
+- `country`
+- `currency`
+- `category`
+- `title`
+- `scheduled_at_utc`
+- `impact`
+- `status`
+
+## Validation workflow
+
+To validate against a reference calendar manually:
+
+1. Run the CLI for a day or week.
+2. Compare event names, times, and currencies to your manual reference.
+3. Log mismatches.
+4. Adjust impact rules or source mappings.
+
+## Project layout
+
+```text
+src/economic_calendar/
+  cli/
+  providers/
+  rules/
+  engine.py
+  models.py
+  schema.py
+```

@@ -356,3 +356,107 @@ def log_event(
     # Always also log locally
     log_fn = logger.warning if level == "warn" else logger.error
     log_fn("[%s][%s] %s | details=%s", component, connection_id or "-", message, details)
+
+
+# ---------------------------------------------------------------------------
+# Terminal settings — for news / session enforcement in job_worker
+# ---------------------------------------------------------------------------
+
+def get_terminal_prefs_for_connection(connection_id: str) -> dict:
+    """
+    Return the preferences_json dict from user_terminal_settings for the user
+    that owns the given connection_id.
+
+    Returns {} if the connection / settings row doesn't exist or on any error.
+    Used by job_worker to check newsFilter, newsBeforeMin, newsAfterMin.
+    """
+    try:
+        # Step 1: get user_id from connection row
+        conn_resp = (
+            get_client()
+            .table("mt5_user_connections")
+            .select("user_id")
+            .eq("id", connection_id)
+            .maybeSingle()
+            .execute()
+        )
+        user_id = (conn_resp.data or {}).get("user_id")
+        if not user_id:
+            return {}
+
+        # Step 2: get preferences from user_terminal_settings
+        prefs_resp = (
+            get_client()
+            .table("user_terminal_settings")
+            .select("preferences_json")
+            .eq("user_id", user_id)
+            .maybeSingle()
+            .execute()
+        )
+        return (prefs_resp.data or {}).get("preferences_json") or {}
+    except Exception as exc:
+        logger.debug("get_terminal_prefs_for_connection(%s) failed: %s", connection_id, exc)
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Economic events — Supabase sync for frontend calendar display
+# ---------------------------------------------------------------------------
+
+def upsert_economic_events(events: list[dict]) -> int:
+    """
+    Upsert economic calendar events to Supabase 'economic_events' table.
+    Requires the table from docs/economic_events_migration.sql to exist.
+
+    Returns number of rows upserted, or 0 on failure.
+    """
+    if not events:
+        return 0
+
+    try:
+        import json as _json
+
+        rows = []
+        for ev in events:
+            # Serialize event_json if it's a dict (Supabase client needs dict, not str)
+            event_json = ev.get("event_json", {})
+            if isinstance(event_json, str):
+                try:
+                    event_json = _json.loads(event_json)
+                except Exception:
+                    event_json = {}
+
+            rows.append({
+                "id":               ev["id"],
+                "provider":         ev["provider"],
+                "currency":         ev["currency"],
+                "country":          ev["country"],
+                "title":            ev["title"],
+                "impact":           ev["impact"],
+                "scheduled_at_utc": ev["scheduled_at_utc"],
+                "category":         ev.get("category", "macro"),
+                "event_json":       event_json,
+                "synced_at":        datetime.now(timezone.utc).isoformat(),
+            })
+
+        # Batch in chunks to stay well within PostgREST limits
+        chunk_size = 100
+        total = 0
+        for i in range(0, len(rows), chunk_size):
+            chunk = rows[i : i + chunk_size]
+            get_client().table("economic_events").upsert(
+                chunk, on_conflict="id"
+            ).execute()
+            total += len(chunk)
+
+        return total
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "does not exist" in msg or "relation" in msg or "schema cache" in msg:
+            logger.warning(
+                "upsert_economic_events: 'economic_events' table missing. "
+                "Run docs/economic_events_migration.sql in Supabase first."
+            )
+        else:
+            logger.warning("upsert_economic_events failed: %s", exc)
+        return 0

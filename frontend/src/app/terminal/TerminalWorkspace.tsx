@@ -6,12 +6,14 @@ import { useEffect, useMemo, useState, useTransition } from "react";
 import {
   AlertTriangle,
   Bot,
+  Calendar,
   CheckCircle2,
   Edit3,
   History,
   Info,
   Link2,
   Network,
+  RefreshCw,
   Shield,
   Target,
   TrendingUp,
@@ -86,6 +88,16 @@ type HeartbeatRow = {
     profit?: number;
     open_positions?: MT5Position[];
   } | null;
+};
+
+type NewsEvent = {
+  id: string;
+  currency: string;
+  title: string;
+  impact: "high" | "medium" | "low";
+  scheduled_at_utc: string;
+  category: string;
+  provider: string;
 };
 
 type TradeJobRow = {
@@ -337,6 +349,9 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const [newsFilter, setNewsFilter] = useState(false);
   const [newsBeforeMin, setNewsBeforeMin] = useState<number>(30);
   const [newsAfterMin, setNewsAfterMin] = useState<number>(30);
+  const [newsEvents, setNewsEvents] = useState<NewsEvent[]>([]);
+  const [newsEventsLoading, setNewsEventsLoading] = useState(false);
+  const [newsEventsStatus, setNewsEventsStatus] = useState<"ok" | "no_table" | "error" | "idle">("idle");
   const [sessions, setSessions] = useState({ london: true, newYork: true, asia: true });
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [termsOpen, setTermsOpen] = useState(false);
@@ -544,6 +559,27 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   useEffect(() => {
     saveAcceptedTermsVersion(termsAccepted ? TERMS_VERSION : null);
   }, [termsAccepted]);
+
+  // Fetch upcoming economic events once on mount; also callable via refresh button
+  async function fetchNewsEvents() {
+    setNewsEventsLoading(true);
+    try {
+      const res = await fetch("/api/news/upcoming?hours=48&impacts=high,medium");
+      if (!res.ok) { setNewsEventsStatus("error"); return; }
+      const json = await res.json() as { events: NewsEvent[]; status?: string };
+      setNewsEvents(json.events ?? []);
+      setNewsEventsStatus((json.status as "ok" | "no_table" | "error") ?? "ok");
+    } catch {
+      setNewsEventsStatus("error");
+    } finally {
+      setNewsEventsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void fetchNewsEvents();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!settingsLoaded) return;
@@ -1420,24 +1456,122 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
             </section>
 
             <section className="space-y-3">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-gray-500">
-                <AlertTriangle className="size-4" /> Session + News Controls
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-gray-500">
+                  <AlertTriangle className="size-4" /> Session + News Controls
+                </div>
               </div>
               <div className="rounded-xl border border-[#202020] bg-[#151515] p-3 space-y-3 text-xs">
                 <label className="flex items-center justify-between rounded-lg bg-[#0f0f0f] px-3 py-2 text-gray-300">
                   <span>News Filter</span>
                   <input type="checkbox" checked={newsFilter} onChange={(e) => setNewsFilter(e.target.checked)} className="accent-orange-500" />
                 </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <Input type="number" value={newsBeforeMin} onChange={(e) => setNewsBeforeMin(parseInt(e.target.value, 10) || 0)} className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
-                  <Input type="number" value={newsAfterMin} onChange={(e) => setNewsAfterMin(parseInt(e.target.value, 10) || 0)} className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
-                </div>
+                {newsFilter && (
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[11px] text-gray-500">
+                      <span>Block before (min)</span>
+                      <span>Block after (min)</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Input type="number" value={newsBeforeMin} onChange={(e) => setNewsBeforeMin(parseInt(e.target.value, 10) || 0)} className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+                      <Input type="number" value={newsAfterMin} onChange={(e) => setNewsAfterMin(parseInt(e.target.value, 10) || 0)} className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+                    </div>
+                    <p className="text-[11px] text-gray-500 leading-snug">The worker blocks MT5 order execution within this window around any HIGH-impact event for the traded symbol&apos;s currencies.</p>
+                  </div>
+                )}
+                {!newsFilter && (
+                  <div className="grid grid-cols-2 gap-2 opacity-50 pointer-events-none">
+                    <Input type="number" value={newsBeforeMin} onChange={() => {}} className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+                    <Input type="number" value={newsAfterMin} onChange={() => {}} className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+                  </div>
+                )}
                 <div className="grid grid-cols-3 gap-2">
                   <SessionToggle label="London" checked={sessions.london} onChange={(checked) => setSessions((prev) => ({ ...prev, london: checked }))} />
                   <SessionToggle label="New York" checked={sessions.newYork} onChange={(checked) => setSessions((prev) => ({ ...prev, newYork: checked }))} />
                   <SessionToggle label="Asia" checked={sessions.asia} onChange={(checked) => setSessions((prev) => ({ ...prev, asia: checked }))} />
                 </div>
-                <p className="leading-relaxed text-gray-500">Sessions are enforced server-side before every job insert. If none are enabled, execution is blocked. News window enforcement requires an economic calendar integration (planned).</p>
+                <p className="leading-relaxed text-gray-500">Sessions are enforced server-side before every job insert. If none are enabled, execution is blocked.</p>
+              </div>
+            </section>
+
+            {/* Economic calendar panel */}
+            <section className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-gray-500">
+                  <Calendar className="size-4" /> Economic Calendar
+                </div>
+                <button
+                  onClick={() => void fetchNewsEvents()}
+                  disabled={newsEventsLoading}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-gray-500 hover:text-white hover:bg-[#1a1a1a] transition-colors disabled:opacity-40"
+                >
+                  <RefreshCw className={`size-3 ${newsEventsLoading ? "animate-spin" : ""}`} />
+                  Refresh
+                </button>
+              </div>
+              <div className="rounded-xl border border-[#202020] bg-[#151515] p-3 space-y-2 text-xs">
+                {newsEventsStatus === "no_table" && (
+                  <p className="text-amber-400/80 leading-snug">
+                    Economic events table not found. Run <span className="font-mono text-white">docs/economic_events_migration.sql</span> in Supabase, then <span className="font-mono text-white">python runtime/news_refresh.py</span> to populate.
+                  </p>
+                )}
+                {newsEventsStatus === "error" && (
+                  <p className="text-red-400/80">Failed to load events. Check your connection.</p>
+                )}
+                {newsEventsStatus === "idle" && newsEventsLoading && (
+                  <p className="text-gray-500 animate-pulse">Loading events…</p>
+                )}
+                {(newsEventsStatus === "ok" || newsEventsStatus === "idle") && !newsEventsLoading && newsEvents.length === 0 && (
+                  <p className="text-gray-600">No HIGH/MEDIUM events in the next 48 hours.</p>
+                )}
+                {newsEvents.length > 0 && (
+                  <div className="space-y-1 max-h-64 overflow-y-auto pr-1">
+                    {newsEvents.map((ev) => {
+                      const dt = new Date(ev.scheduled_at_utc);
+                      const now = new Date();
+                      const minsTo = (dt.getTime() - now.getTime()) / 60000;
+                      const isHigh = ev.impact === "high";
+                      const isInWindow = newsFilter && isHigh && minsTo >= -newsAfterMin && minsTo <= newsBeforeMin;
+                      return (
+                        <div
+                          key={ev.id}
+                          className={`flex items-start gap-2 rounded-lg px-2 py-1.5 ${
+                            isInWindow
+                              ? "bg-red-500/10 border border-red-500/30"
+                              : isHigh
+                              ? "bg-[#0f0f0f] border border-[#1e1e1e]"
+                              : "bg-[#0a0a0a]"
+                          }`}
+                        >
+                          <div className="flex-shrink-0 mt-0.5">
+                            <span className={`inline-block size-2 rounded-full ${isHigh ? "bg-red-500" : "bg-amber-500"}`} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className={`font-semibold ${isHigh ? "text-red-300" : "text-amber-300"}`}>{ev.currency}</span>
+                              <span className="text-gray-300 truncate">{ev.title}</span>
+                              {isInWindow && (
+                                <span className="text-[10px] font-bold text-red-400 bg-red-400/10 px-1 rounded">BLOCKED</span>
+                              )}
+                            </div>
+                            <div className="text-gray-500 mt-0.5">
+                              {dt.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}{" "}
+                              {dt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+                              {minsTo > 0 && minsTo < 1440 && (
+                                <span className="ml-1.5 text-gray-600">
+                                  (in {minsTo < 60 ? `${Math.round(minsTo)}m` : `${(minsTo / 60).toFixed(1)}h`})
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                <p className="text-[11px] text-gray-600 leading-snug pt-1">
+                  Data from ECB · ONS · BOJ · SNB · RBA · BOC · RBNZ · BLS (+ FRED when key configured). Refresh weekly via <span className="font-mono">python runtime/news_refresh.py</span>.
+                </p>
               </div>
             </section>
 
