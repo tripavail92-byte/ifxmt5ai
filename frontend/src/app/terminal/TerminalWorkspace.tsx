@@ -516,6 +516,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
       stopMode,
     });
   }, [
+    dailyLossLimitUsd,
+    dailyProfitTargetUsd,
+    maxDrawdownPercent,
+    maxPositionSizeLots,
     maxTradesPerDay,
     newsAfterMin,
     newsBeforeMin,
@@ -574,6 +578,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
 
     return () => window.clearTimeout(timeout);
   }, [
+    dailyLossLimitUsd,
+    dailyProfitTargetUsd,
+    maxDrawdownPercent,
+    maxPositionSizeLots,
     maxTradesPerDay,
     newsAfterMin,
     newsBeforeMin,
@@ -1365,7 +1373,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                 </label>
                 <Button variant="outline" onClick={() => setTermsOpen(true)} className="w-full border-[#2b2b2b] bg-[#111] text-gray-200 hover:bg-[#181818]">Review Terms</Button>
                 <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 p-3 leading-relaxed text-blue-200">
-                  This route is now wired to the live runtime. Terms acceptance persists locally with version <span className="font-semibold text-white">{TERMS_VERSION}</span> and will sync server-side after the terminal settings migration is applied.
+                  Terms acceptance is persisted locally and synced to the server under version <span className="font-semibold text-white">{TERMS_VERSION}</span>. Acceptance is required before any MT5 order can be queued.
                 </div>
               </div>
             </section>
