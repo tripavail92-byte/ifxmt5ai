@@ -10,7 +10,8 @@ alter table public.setup_structure_events
   add column if not exists tp_snapshot numeric,
   add column if not exists zone_low_snapshot numeric,
   add column if not exists zone_high_snapshot numeric,
-  add column if not exists ai_sensitivity_snapshot int;
+  add column if not exists ai_sensitivity_snapshot int,
+  add column if not exists timeframe text check (timeframe in ('M1','M5','M15','M30','H1','H4','D1','W1'));
 
 create index if not exists idx_structure_events_conn_created
   on public.setup_structure_events(connection_id, created_at desc);
