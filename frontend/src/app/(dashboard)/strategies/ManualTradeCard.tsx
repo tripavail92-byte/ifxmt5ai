@@ -195,6 +195,8 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   const [tpValue, setTpValue] = useState<number | undefined>();
   const [formSymbol, setFormSymbol] = useState("");
   const [side, setSide] = useState<"buy" | "sell">("buy");
+  const [orderType, setOrderType] = useState<"market" | "limit" | "stop">("market");
+  const [pendingPrice, setPendingPrice] = useState<string>("");
 
   // Zone state
   const [entryPrice, setEntryPrice] = useState<string>("");
@@ -379,6 +381,10 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
     if (autoConn) fd.set("connection_id", autoConn.id);
+    // Pass order type as comment prefix so job_worker can route to TRADE_ACTION_PENDING
+    const pp = parseFloat(pendingPrice);
+    if (orderType === "limit" && !isNaN(pp) && pp > 0) fd.set("comment", `__limit__:${pp}`);
+    else if (orderType === "stop"  && !isNaN(pp) && pp > 0) fd.set("comment", `__stop__:${pp}`);
     setResult(null);
     startTransition(async () => {
       try {
@@ -962,6 +968,21 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
             </div>
           </div>
 
+          {/* Order type */}
+          <div className="space-y-1 col-span-2 sm:col-span-1">
+            <Label className="text-[11px] text-gray-500 uppercase tracking-wide">Order Type</Label>
+            <div className="flex h-8 rounded border border-[#2a2a2a] overflow-hidden text-[11px] font-semibold">
+              {(["market", "limit", "stop"] as const).map((t) => (
+                <button key={t} type="button" onClick={() => setOrderType(t)}
+                  className={`flex-1 transition-colors ${
+                    orderType === t ? "bg-orange-600 text-white" : "bg-[#0a0a0a] text-gray-500 hover:text-white"
+                  }`}>
+                  {t.charAt(0).toUpperCase() + t.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Side */}
           <div className="space-y-1">
             <Label className="text-[11px] text-gray-500 uppercase tracking-wide">Side</Label>
@@ -1000,6 +1021,21 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
               onChange={(e) => setTpValue(e.target.value ? parseFloat(e.target.value) : undefined)}
               className="h-8 text-xs bg-[#0a0a0a] border-[#2a2a2a] text-white placeholder:text-gray-700" />
           </div>
+
+          {/* Pending price — shown for Limit and Stop orders */}
+          {orderType !== "market" && (
+            <div className="space-y-1 col-span-2 sm:col-span-1">
+              <Label className="text-[11px] text-gray-500 uppercase tracking-wide">
+                {orderType === "limit" ? "Limit Price" : "Stop Price"}
+              </Label>
+              <Input
+                type="number" step="0.00001" placeholder="required"
+                value={pendingPrice}
+                onChange={(e) => setPendingPrice(e.target.value)}
+                className="h-8 text-xs bg-[#0a0a0a] border-[#2a2a2a] text-white placeholder:text-red-800"
+              />
+            </div>
+          )}
 
           {/* Submit */}
           <div className="space-y-1 lg:col-span-1">

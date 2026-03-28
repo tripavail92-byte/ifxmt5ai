@@ -43,6 +43,8 @@ export const TF_MINUTES: Record<string, number> = {
   "1h":  60,
   "4h":  240,
   "1d":  1440,
+  "1w":  10080,
+  "1mo": 43200,
 };
 
 function parseMaxBars(raw: string | undefined, fallback: number): number {

@@ -5,12 +5,14 @@ import {
   createChart,
   CandlestickSeries,
   BaselineSeries,
+  LineSeries,
   ColorType,
   LineStyle,
   CrosshairMode,
   type IChartApi,
   type ISeriesApi,
   type CandlestickData,
+  type LineData,
   type Time,
   type IPriceLine,
 } from "lightweight-charts";
@@ -33,16 +35,27 @@ export interface CandlestickChartProps {
   lastClose?: { symbol: string; bar: RawCandleBar } | null;
 }
 
-const TIMEFRAMES = ["M1", "M3", "M5", "M15", "M30", "H1", "H4", "D1"] as const;
+const TIMEFRAMES = ["M1", "M3", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN"] as const;
 type TF = (typeof TIMEFRAMES)[number];
 
 const TF_API: Record<TF, string> = {
-  M1: "1m", M3: "3m", M5: "5m", M15: "15m", M30: "30m", H1: "1h", H4: "4h", D1: "1d",
+  M1: "1m", M3: "3m", M5: "5m", M15: "15m", M30: "30m",
+  H1: "1h", H4: "4h", D1: "1d", W1: "1w", MN: "1mo",
 };
 
 const TF_MINUTES: Record<TF, number> = {
-  M1: 1, M3: 3, M5: 5, M15: 15, M30: 30, H1: 60, H4: 240, D1: 1440,
+  M1: 1, M3: 3, M5: 5, M15: 15, M30: 30, H1: 60,
+  H4: 240, D1: 1440, W1: 10080, MN: 43200,
 };
+
+// ── Indicator config ─────────────────────────────────────────────────────────
+export interface IndicatorConfig {
+  ema9: boolean;
+  ema21: boolean;
+  bb: boolean;
+}
+const DEFAULT_INDICATORS: IndicatorConfig = { ema9: false, ema21: false, bb: false };
+const STORAGE_KEY_INDICATORS = "ifx_chart_indicators";
 
 const COLORS = {
   bg: "#0c0c0c",
@@ -80,8 +93,56 @@ function hexToRgba(hex: string, alpha: number): string {
 }
 
 function toTfSlot(epochSec: number, tf: TF): number {
+  // Weekly: round down to Monday 00:00 UTC
+  if (tf === "W1") {
+    const d = new Date(epochSec * 1000);
+    const day = d.getUTCDay(); // 0=Sun
+    const daysToMon = day === 0 ? -6 : 1 - day;
+    const mon = new Date(d);
+    mon.setUTCDate(d.getUTCDate() + daysToMon);
+    mon.setUTCHours(0, 0, 0, 0);
+    return Math.floor(mon.getTime() / 1000);
+  }
+  // Monthly: round down to 1st of month 00:00 UTC
+  if (tf === "MN") {
+    const d = new Date(epochSec * 1000);
+    return Math.floor(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / 1000);
+  }
   const slot = TF_MINUTES[tf] * 60;
   return Math.floor(epochSec / slot) * slot;
+}
+
+// ── Indicator maths ──────────────────────────────────────────────────────────
+function computeEma(closes: number[], period: number): (number | null)[] {
+  const k = 2 / (period + 1);
+  const result: (number | null)[] = new Array(closes.length).fill(null);
+  let ema: number | null = null;
+  for (let i = 0; i < closes.length; i++) {
+    if (ema === null) {
+      if (i >= period - 1) {
+        ema = closes.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0) / period;
+      }
+    } else {
+      ema = closes[i] * k + ema * (1 - k);
+    }
+    result[i] = ema;
+  }
+  return result;
+}
+
+function computeBollinger(closes: number[], period = 20, mult = 2) {
+  const upper: (number | null)[] = new Array(closes.length).fill(null);
+  const mid:   (number | null)[] = new Array(closes.length).fill(null);
+  const lower: (number | null)[] = new Array(closes.length).fill(null);
+  for (let i = period - 1; i < closes.length; i++) {
+    const slice = closes.slice(i - period + 1, i + 1);
+    const mean = slice.reduce((a, b) => a + b, 0) / period;
+    const std  = Math.sqrt(slice.reduce((a, b) => a + (b - mean) ** 2, 0) / period);
+    mid[i]   = mean;
+    upper[i] = mean + mult * std;
+    lower[i] = mean - mult * std;
+  }
+  return { upper, mid, lower };
 }
 
 function normalizeBars(bars: RawCandleBar[]): CandlestickData[] {
@@ -120,6 +181,12 @@ export function CandlestickChart({
   const tpLineRef = useRef<IPriceLine | null>(null);
   const entryLineRef = useRef<IPriceLine | null>(null);
   const entryBandRef = useRef<ISeriesApi<"Baseline"> | null>(null);
+  // ── Indicator series refs ────────────────────────────────────────────────
+  const ema9SeriesRef   = useRef<ISeriesApi<"Line"> | null>(null);
+  const ema21SeriesRef  = useRef<ISeriesApi<"Line"> | null>(null);
+  const bbUpperSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const bbMidSeriesRef   = useRef<ISeriesApi<"Line"> | null>(null);
+  const bbLowerSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
 
   const historyRef = useRef<CandlestickData[]>([]);
   const hasHistoryRef = useRef(false);
@@ -134,6 +201,20 @@ export function CandlestickChart({
   });
   const [historyVersion, setHistoryVersion] = useState(0);
   const [isLive, setIsLive] = useState(false);
+  const [indicators, setIndicators] = useState<IndicatorConfig>(() => {
+    if (typeof window === "undefined") return DEFAULT_INDICATORS;
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY_INDICATORS);
+      if (!raw) return DEFAULT_INDICATORS;
+      return { ...DEFAULT_INDICATORS, ...(JSON.parse(raw) as Partial<IndicatorConfig>) };
+    } catch { return DEFAULT_INDICATORS; }
+  });
+
+  function toggleIndicator(key: keyof IndicatorConfig) {
+    const next = { ...indicators, [key]: !indicators[key] };
+    setIndicators(next);
+    try { localStorage.setItem(STORAGE_KEY_INDICATORS, JSON.stringify(next)); } catch {}
+  }
 
   const HISTORY_COUNT = Math.min(
     1500,
@@ -268,6 +349,28 @@ export function CandlestickChart({
     chartRef.current = chart;
     seriesRef.current = series;
 
+    // ── Indicator series (all hidden by default; visibility toggled via applyOptions) ──
+    ema9SeriesRef.current = chart.addSeries(LineSeries, {
+      color: "#f97316", lineWidth: 1, lineStyle: LineStyle.Solid,
+      visible: false, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+    });
+    ema21SeriesRef.current = chart.addSeries(LineSeries, {
+      color: "#a855f7", lineWidth: 1, lineStyle: LineStyle.Solid,
+      visible: false, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+    });
+    bbUpperSeriesRef.current = chart.addSeries(LineSeries, {
+      color: "rgba(59,130,246,0.50)", lineWidth: 1, lineStyle: LineStyle.Dashed,
+      visible: false, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+    });
+    bbMidSeriesRef.current = chart.addSeries(LineSeries, {
+      color: "rgba(59,130,246,0.75)", lineWidth: 1, lineStyle: LineStyle.Solid,
+      visible: false, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+    });
+    bbLowerSeriesRef.current = chart.addSeries(LineSeries, {
+      color: "rgba(59,130,246,0.50)", lineWidth: 1, lineStyle: LineStyle.Dashed,
+      visible: false, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+    });
+
     const ro = new ResizeObserver(() => {
       if (hasHistoryRef.current) chart.timeScale().fitContent();
     });
@@ -282,6 +385,11 @@ export function CandlestickChart({
       tpLineRef.current = null;
       entryLineRef.current = null;
       entryBandRef.current = null;
+      ema9SeriesRef.current = null;
+      ema21SeriesRef.current = null;
+      bbUpperSeriesRef.current = null;
+      bbMidSeriesRef.current = null;
+      bbLowerSeriesRef.current = null;
     };
   }, []);
 
@@ -340,6 +448,47 @@ export function CandlestickChart({
     upsertLiveBar(lastClose.bar);
     setIsLive(true);
   }, [lastClose, liveSymbol, activeTf]);
+
+  // ── Draw / refresh indicators whenever candles or toggle state changes ──
+  useEffect(() => {
+    const candles = historyRef.current;
+    const toLD = (vals: (number | null)[], times: Time[]): LineData[] =>
+      vals.reduce<LineData[]>((arr, v, i) => {
+        if (v !== null) arr.push({ time: times[i], value: v });
+        return arr;
+      }, []);
+
+    const show = (ref: React.MutableRefObject<ISeriesApi<"Line"> | null>, data: LineData[]) => {
+      ref.current?.setData(data);
+      ref.current?.applyOptions({ visible: data.length > 0 });
+    };
+    const hide = (ref: React.MutableRefObject<ISeriesApi<"Line"> | null>) => {
+      ref.current?.setData([]);
+      ref.current?.applyOptions({ visible: false });
+    };
+
+    if (!candles.length) {
+      hide(ema9SeriesRef); hide(ema21SeriesRef);
+      hide(bbUpperSeriesRef); hide(bbMidSeriesRef); hide(bbLowerSeriesRef);
+      return;
+    }
+
+    const closes = candles.map(c => c.close);
+    const times  = candles.map(c => c.time);
+
+    indicators.ema9  ? show(ema9SeriesRef,  toLD(computeEma(closes, 9),  times)) : hide(ema9SeriesRef);
+    indicators.ema21 ? show(ema21SeriesRef, toLD(computeEma(closes, 21), times)) : hide(ema21SeriesRef);
+
+    if (indicators.bb) {
+      const { upper, mid, lower } = computeBollinger(closes, 20, 2);
+      show(bbUpperSeriesRef, toLD(upper, times));
+      show(bbMidSeriesRef,   toLD(mid,   times));
+      show(bbLowerSeriesRef, toLD(lower, times));
+    } else {
+      hide(bbUpperSeriesRef); hide(bbMidSeriesRef); hide(bbLowerSeriesRef);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyVersion, indicators]);
 
   function switchTf(tf: TF) {
     seriesRef.current?.setData([]);
@@ -446,30 +595,58 @@ export function CandlestickChart({
     band.setData(candles.map((c) => ({ time: c.time as Time, value: zoneHigh })));
   }, [entryZoneLow, entryZoneHigh, historyVersion]);
 
+  const IND_CFG: Array<{ key: keyof IndicatorConfig; label: string; activeClass: string }> = [
+    { key: "ema9",  label: "EMA9",  activeClass: "bg-orange-500/20 text-orange-300" },
+    { key: "ema21", label: "EMA21", activeClass: "bg-purple-500/20 text-purple-300" },
+    { key: "bb",    label: "BB20",  activeClass: "bg-blue-500/20 text-blue-300" },
+  ];
+
   return (
     <div className={`flex flex-col ${className}`}>
-      <div className="flex items-center justify-between px-3 py-1.5 bg-[#0c0c0c] border border-[#2a2a2a] rounded-t-lg">
-        <span className="font-mono font-semibold text-sm text-white tracking-wide">
-          {liveSymbol ?? symbol}
-          {isLive ? (
-            <span className="ml-2 text-xs font-normal text-emerald-500 animate-pulse">● LIVE</span>
-          ) : liveSymbol ? (
-            <span className="ml-2 text-xs font-normal text-yellow-500">⟳ loading…</span>
-          ) : null}
-        </span>
-        <div className="flex gap-0.5">
-          {TIMEFRAMES.map((tf) => (
+      {/* ── Chart toolbar ── */}
+      <div className="rounded-t-lg border border-[#2a2a2a] bg-[#0c0c0c]">
+        {/* Row 1: symbol + timeframes */}
+        <div className="flex items-center justify-between px-3 py-1.5">
+          <span className="font-mono font-semibold text-sm text-white tracking-wide">
+            {liveSymbol ?? symbol}
+            {isLive ? (
+              <span className="ml-2 text-xs font-normal text-emerald-500 animate-pulse">● LIVE</span>
+            ) : liveSymbol ? (
+              <span className="ml-2 text-xs font-normal text-yellow-500">⟳ loading…</span>
+            ) : null}
+          </span>
+          <div className="flex flex-wrap gap-0.5 justify-end">
+            {TIMEFRAMES.map((tf) => (
+              <button
+                key={tf}
+                type="button"
+                onClick={() => switchTf(tf)}
+                className={`px-2 py-0.5 text-xs font-medium rounded transition-colors ${
+                  activeTf === tf
+                    ? "bg-orange-500 text-white"
+                    : "text-gray-500 hover:text-white hover:bg-[#1e1e1e]"
+                }`}
+              >
+                {tf}
+              </button>
+            ))}
+          </div>
+        </div>
+        {/* Row 2: indicator toggles */}
+        <div className="flex items-center gap-1.5 border-t border-[#1e1e1e] px-3 py-1">
+          <span className="text-[9px] uppercase tracking-widest text-gray-600 mr-0.5">Ind</span>
+          {IND_CFG.map(({ key, label, activeClass }) => (
             <button
-              key={tf}
+              key={key}
               type="button"
-              onClick={() => switchTf(tf)}
-              className={`px-2 py-0.5 text-xs font-medium rounded transition-colors ${
-                activeTf === tf
-                  ? "bg-orange-500 text-white"
-                  : "text-gray-500 hover:text-white hover:bg-[#1e1e1e]"
+              onClick={() => toggleIndicator(key)}
+              className={`px-2 py-0.5 text-[10px] font-medium rounded transition-colors ${
+                indicators[key]
+                  ? activeClass
+                  : "text-gray-600 hover:text-gray-300 hover:bg-[#1e1e1e]"
               }`}
             >
-              {tf}
+              {label}
             </button>
           ))}
         </div>

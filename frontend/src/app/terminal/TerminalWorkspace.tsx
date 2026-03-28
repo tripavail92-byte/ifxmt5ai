@@ -350,6 +350,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   });
   const [dynamicStopLoading, setDynamicStopLoading] = useState(false);
   const [closingTickets, setClosingTickets] = useState<Set<number>>(new Set());
+  const [orderType, setOrderType] = useState<"market" | "limit" | "stop">("market");
+  const [pendingPrice, setPendingPrice] = useState<string>("");
   // Mirrors ManualTradeCard hydration guard — prevents chart SSR/client mismatch
   const [hydrated, setHydrated] = useState(false);
 
@@ -933,6 +935,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
         fd.set("volume", String(Number(lotSuggestion.toFixed(2))));
         fd.set("sl", slValue ? String(slValue) : "");
         fd.set("tp", tpValue ? String(tpValue) : "");
+        // Pending order signalling via comment prefix
+        const pp = parseFloat(pendingPrice);
+        if (orderType === "limit" && !isNaN(pp) && pp > 0) fd.set("comment", `__limit__:${pp}`);
+        else if (orderType === "stop"  && !isNaN(pp) && pp > 0) fd.set("comment", `__stop__:${pp}`);
         await placeManualTrade(fd);
         const msg = `Trade queued for ${selectedSymbol}. Check runtime/execution status below.`;
         setManualResult({ ok: true, msg });
@@ -1231,9 +1237,33 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                   <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">TP</Label>
                   <Input type="number" step="any" value={tpValue ?? ""} onChange={(e) => setTpValue(e.target.value ? parseFloat(e.target.value) : undefined)} className="border-[#2b2b2b] bg-[#0c0c0c] text-white" />
                 </div>
+                <div className="xl:col-span-1">
+                  <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">Order Type</Label>
+                  <div className="flex h-10 overflow-hidden rounded-lg border border-[#2b2b2b] text-xs font-semibold">
+                    {(["market", "limit", "stop"] as const).map((t) => (
+                      <button key={t} type="button" onClick={() => setOrderType(t)}
+                        className={`flex-1 transition-colors ${orderType === t ? "bg-orange-600 text-white" : "bg-[#0c0c0c] text-gray-500 hover:text-white"}`}>
+                        {t.charAt(0).toUpperCase() + t.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {orderType !== "market" && (
+                  <div className="xl:col-span-1">
+                    <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">
+                      {orderType === "limit" ? "Limit Price" : "Stop Price"}
+                    </Label>
+                    <Input
+                      type="number" step="any" placeholder="required"
+                      value={pendingPrice}
+                      onChange={(e) => setPendingPrice(e.target.value)}
+                      className="border-[#2b2b2b] bg-[#0c0c0c] text-white placeholder:text-red-900"
+                    />
+                  </div>
+                )}
                 <div className="xl:col-span-2 flex items-end">
                   <Button onClick={handlePlaceTrade} disabled={isPending || !selectedConnectionId || !selectedSymbol} className="h-10 w-full bg-orange-600 text-white hover:bg-orange-500">
-                    {isPending ? "Queueing…" : `Queue ${side.toUpperCase()} Trade`}
+                    {isPending ? "Queueing…" : orderType === "market" ? `Queue ${side.toUpperCase()} Trade` : `Place ${orderType.charAt(0).toUpperCase() + orderType.slice(1)} Order`}
                   </Button>
                 </div>
               </div>

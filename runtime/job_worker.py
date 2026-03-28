@@ -478,7 +478,67 @@ def execute_order(job: dict, logger: logging.Logger) -> dict:
     volume = float(job["volume"])
     sl = float(job["sl"]) if job.get("sl") else 0.0
     tp = float(job["tp"]) if job.get("tp") else 0.0
+    comment_field = (job.get("comment") or "").strip()
 
+    # ------------------------------------------------------------------ #
+    # Detect pending order type from comment prefix                        #
+    # __limit__:<price>  → BUY_LIMIT / SELL_LIMIT                         #
+    # __stop__:<price>   → BUY_STOP  / SELL_STOP                          #
+    # ------------------------------------------------------------------ #
+    pending_price: float | None = None
+    is_limit_type = False  # True=limit, False=stop (only used when pending)
+
+    if comment_field.startswith("__limit__:"):
+        try:
+            pending_price = float(comment_field.split(":", 1)[1])
+            is_limit_type = True
+        except (ValueError, IndexError):
+            logger.warning("Malformed __limit__ comment '%s'; falling back to market", comment_field)
+    elif comment_field.startswith("__stop__:"):
+        try:
+            pending_price = float(comment_field.split(":", 1)[1])
+            is_limit_type = False
+        except (ValueError, IndexError):
+            logger.warning("Malformed __stop__ comment '%s'; falling back to market", comment_field)
+
+    # ------------------------------------------------------------------ #
+    # Pending order branch                                                 #
+    # ------------------------------------------------------------------ #
+    if pending_price is not None:
+        if side == "buy":
+            pend_type = mt5.ORDER_TYPE_BUY_LIMIT if is_limit_type else mt5.ORDER_TYPE_BUY_STOP
+        else:
+            pend_type = mt5.ORDER_TYPE_SELL_LIMIT if is_limit_type else mt5.ORDER_TYPE_SELL_STOP
+
+        request = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": symbol,
+            "volume": volume,
+            "type": pend_type,
+            "price": pending_price,
+            "sl": sl,
+            "tp": tp,
+            "comment": build_job_comment_marker(job_id),
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_RETURN,
+        }
+        result = mt5.order_send(request)
+        if result is None:
+            raise RuntimeError(f"order_send returned None (pending): {mt5.last_error()}")
+        if result.retcode not in (10008, 10009):  # ORDER_PLACED or DONE
+            raise RuntimeError(
+                f"Pending order failed: retcode={result.retcode} comment='{result.comment}'"
+            )
+        return {
+            "order_id": result.order,
+            "retcode": result.retcode,
+            "message": result.comment,
+            "request_id": result.request_id,
+        }
+
+    # ------------------------------------------------------------------ #
+    # Market order branch (original path)                                 #
+    # ------------------------------------------------------------------ #
     order_type = mt5.ORDER_TYPE_BUY if side == "buy" else mt5.ORDER_TYPE_SELL
 
     tick = mt5.symbol_info_tick(symbol)

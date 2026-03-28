@@ -155,6 +155,7 @@ export async function placeManualTrade(formData: FormData) {
   const volume = parseFloat(formData.get("volume") as string);
   const sl_raw = parseFloat(formData.get("sl") as string);
   const tp_raw = parseFloat(formData.get("tp") as string);
+  const comment = ((formData.get("comment") as string | null) ?? "").trim();
 
   if (!connection_id || !symbol || !side || !volume) {
     throw new Error("Missing required fields.");
@@ -181,6 +182,7 @@ export async function placeManualTrade(formData: FormData) {
     volume,
     sl: isNaN(sl_raw) ? null : sl_raw,
     tp: isNaN(tp_raw) ? null : tp_raw,
+    ...(comment ? { comment } : {}),
     idempotency_key: `${connection_id}:${Date.now()}:${crypto.randomUUID()}`,
     status: "queued",
     created_at: new Date().toISOString(),
