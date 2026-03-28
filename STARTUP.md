@@ -9,6 +9,7 @@ Components covered:
 - MT5 EA (`IFX_PriceBridge_v3.mq5`)
 - Local relay (`runtime/price_relay.py`) on `127.0.0.1:8082`
 - Runtime supervisor (`main.py supervisor`)
+- AI eval scheduler (`main.py scheduler`)
 
 ## Required Preconditions
 
@@ -93,9 +94,17 @@ Open **second PowerShell** at `C:\mt5system` and run:
 C:/mt5system/.venv/Scripts/python.exe main.py supervisor
 ```
 
+Open **third PowerShell** at `C:\mt5system` and run:
+
+```powershell
+# 5) Start AI eval scheduler (Terminal C)
+C:/mt5system/.venv/Scripts/python.exe main.py scheduler
+```
+
 Notes:
-- Keep relay and supervisor in separate terminals.
+- Keep relay, supervisor, and scheduler in separate terminals.
 - Do not start multiple supervisor instances.
+- Do not start multiple scheduler instances.
 - Do not mix system Python and venv Python.
 
 ## Health Verification (After Startup)
@@ -106,9 +115,9 @@ Run these checks from a third PowerShell:
 # Relay health should return JSON
 Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:8082/health | Select-Object -ExpandProperty Content
 
-# Confirm single relay and supervisor process
+# Confirm single relay, supervisor, and scheduler process
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-  Where-Object { $_.CommandLine -match 'runtime\\price_relay\.py|main\.py supervisor' } |
+  Where-Object { $_.CommandLine -match 'runtime\\price_relay\.py|main\.py supervisor|main\.py scheduler' } |
   Select-Object ProcessId, CommandLine
 
 # Confirm relay port bound once
@@ -120,7 +129,7 @@ C:/mt5system/.venv/Scripts/python.exe runtime/runtime_audit.py
 
 Expected:
 - `/health` responds with uptime JSON.
-- Exactly 1 relay process and 1 supervisor process.
+- Exactly 1 relay process, 1 supervisor process, and 1 scheduler process.
 - Exactly 1 listener on `127.0.0.1:8082`.
 - `runtime_audit.py` returns exit code 0.
 
@@ -170,18 +179,21 @@ Run full cleanup, then restart in order:
 2. Ensure port 8082 is free.
 3. Start relay.
 4. Start supervisor.
-5. Re-attach/confirm EA on MT5 chart.
+5. Start scheduler.
+6. Re-attach/confirm EA on MT5 chart.
 
 ## Operational Rules (Do Not Break)
 
 - Never run `python` from system install for runtime services.
 - Never launch a second supervisor without stopping the first.
+- Never launch a second scheduler without stopping the first.
 - Never run EA directly to Railway; EA must post to local relay.
 - Always verify `/health` before debugging frontend symptoms.
-- Always keep relay and supervisor running under OS-managed restart policy (Task Scheduler, NSSM, or Windows Service wrapper), not manual terminals only.
+- Always keep relay, supervisor, and scheduler running under OS-managed restart policy (Task Scheduler, NSSM, or Windows Service wrapper), not manual terminals only.
 
 ## Log Paths
 
 - Relay: `runtime/logs/price_relay.log`
 - Supervisor: `runtime/logs/supervisor.log`
+- Scheduler: `ai_engine/logs/eval_scheduler.log`
 - Worker logs: `runtime/logs/worker_*.log`

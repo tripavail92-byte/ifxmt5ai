@@ -11,10 +11,10 @@ if (-not (Test-Path $VenvPython)) {
     throw "Venv python not found: $VenvPython"
 }
 
-Write-Host "[1/5] Stopping stale runtime Python processes..." -ForegroundColor Cyan
+Write-Host "[1/6] Stopping stale runtime Python processes..." -ForegroundColor Cyan
 $pythonTargets = Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
     Where-Object {
-        $_.CommandLine -match 'main\.py supervisor|runtime\\price_relay\.py|runtime\\job_worker\.py'
+        $_.CommandLine -match 'main\.py supervisor|main\.py scheduler|runtime\\price_relay\.py|runtime\\job_worker\.py'
     }
 foreach ($proc in $pythonTargets) {
     try {
@@ -25,10 +25,10 @@ foreach ($proc in $pythonTargets) {
     }
 }
 
-Write-Host "[2/5] Stopping stale launcher PowerShell windows..." -ForegroundColor Cyan
+Write-Host "[2/6] Stopping stale launcher PowerShell windows..." -ForegroundColor Cyan
 $psTargets = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
     Where-Object {
-        $_.CommandLine -match 'main\.py supervisor|runtime\\price_relay\.py|runtime\\job_worker\.py'
+        $_.CommandLine -match 'main\.py supervisor|main\.py scheduler|runtime\\price_relay\.py|runtime\\job_worker\.py'
     }
 foreach ($proc in $psTargets) {
     try {
@@ -39,7 +39,7 @@ foreach ($proc in $psTargets) {
     }
 }
 
-Write-Host "[3/5] Releasing relay port $RelayPort..." -ForegroundColor Cyan
+Write-Host "[3/6] Releasing relay port $RelayPort..." -ForegroundColor Cyan
 $portOwners = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $RelayPort -State Listen -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty OwningProcess -Unique
 foreach ($pid in $portOwners) {
@@ -53,7 +53,7 @@ foreach ($pid in $portOwners) {
 
 Start-Sleep -Seconds 2
 
-Write-Host "[4/5] Starting relay in a dedicated window..." -ForegroundColor Cyan
+Write-Host "[4/6] Starting relay in a dedicated window..." -ForegroundColor Cyan
 $relay = Start-Process powershell -PassThru -ArgumentList @(
     '-NoExit',
     '-Command',
@@ -80,13 +80,21 @@ if (-not $healthy) {
     exit 1
 }
 
-Write-Host "[5/5] Starting supervisor in a dedicated window..." -ForegroundColor Cyan
+Write-Host "[5/6] Starting supervisor in a dedicated window..." -ForegroundColor Cyan
 $supervisor = Start-Process powershell -PassThru -ArgumentList @(
     '-NoExit',
     '-Command',
     "Set-Location -Path '$Root'; & '$VenvPython' .\main.py supervisor"
 )
 Write-Host ("  supervisor launcher pid={0}" -f $supervisor.Id) -ForegroundColor Green
+
+Write-Host "[6/6] Starting scheduler in a dedicated window..." -ForegroundColor Cyan
+$scheduler = Start-Process powershell -PassThru -ArgumentList @(
+    '-NoExit',
+    '-Command',
+    "Set-Location -Path '$Root'; & '$VenvPython' .\main.py scheduler"
+)
+Write-Host ("  scheduler launcher pid={0}" -f $scheduler.Id) -ForegroundColor Green
 
 Write-Host ''
 Write-Host 'Runtime restart complete.' -ForegroundColor Green

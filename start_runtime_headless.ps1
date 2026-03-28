@@ -10,6 +10,8 @@ $RelayOut = Join-Path $LogDir 'relay_start_stdout.log'
 $RelayErr = Join-Path $LogDir 'relay_start_stderr.log'
 $SupervisorOut = Join-Path $LogDir 'supervisor_start_stdout.log'
 $SupervisorErr = Join-Path $LogDir 'supervisor_start_stderr.log'
+$SchedulerOut = Join-Path $LogDir 'scheduler_start_stdout.log'
+$SchedulerErr = Join-Path $LogDir 'scheduler_start_stderr.log'
 
 if (-not (Test-Path $VenvPython)) {
     throw "Venv python not found: $VenvPython"
@@ -40,6 +42,7 @@ if (-not $healthy) {
 }
 
 $supervisor = Start-Process -FilePath $VenvPython -WorkingDirectory $Root -ArgumentList 'main.py','supervisor' -RedirectStandardOutput $SupervisorOut -RedirectStandardError $SupervisorErr -PassThru
+$scheduler = Start-Process -FilePath $VenvPython -WorkingDirectory $Root -ArgumentList 'main.py','scheduler' -RedirectStandardOutput $SchedulerOut -RedirectStandardError $SchedulerErr -PassThru
 
-"relay_pid=$($relay.Id) supervisor_pid=$($supervisor.Id) started_at=$(Get-Date -Format o)" | Set-Content -Path (Join-Path $LogDir 'runtime_autostart.state')
+"relay_pid=$($relay.Id) supervisor_pid=$($supervisor.Id) scheduler_pid=$($scheduler.Id) started_at=$(Get-Date -Format o)" | Set-Content -Path (Join-Path $LogDir 'runtime_autostart.state')
 Write-Host 'Runtime started successfully.' -ForegroundColor Green

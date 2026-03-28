@@ -32,7 +32,11 @@ from pathlib import Path
 
 import MetaTrader5 as mt5
 
-import db_client as db
+try:
+    from runtime import db_client as db
+except ImportError:
+    import db_client as db
+
 from ai_engine import (
     StrategyContext,
     generate_decision,
@@ -68,7 +72,8 @@ logger = logging.getLogger("eval_scheduler")
 # Config
 # ---------------------------------------------------------------------------
 
-cfg_path = Path(__file__).parent / "config" / "settings.json"
+ROOT = Path(__file__).resolve().parent.parent
+cfg_path = ROOT / "config" / "settings.json"
 with open(cfg_path) as f:
     CFG = json.load(f)
 

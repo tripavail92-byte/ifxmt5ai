@@ -7,7 +7,7 @@ Set-Location -Path $Root
 Write-Host '[1/4] Stopping runtime Python processes...' -ForegroundColor Cyan
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
     Where-Object {
-        $_.CommandLine -match 'main\.py supervisor|runtime\\price_relay\.py|runtime\\job_worker\.py'
+        $_.CommandLine -match 'main\.py supervisor|main\.py scheduler|runtime\\price_relay\.py|runtime\\job_worker\.py'
     } |
     ForEach-Object {
         try {
@@ -23,7 +23,7 @@ $currentPid = $PID
 Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
     Where-Object {
         $_.ProcessId -ne $currentPid -and
-        $_.CommandLine -match 'main\.py supervisor|runtime\\price_relay\.py|runtime\\job_worker\.py|restart_runtime\.ps1|start_runtime_headless\.ps1|start_exness_mt5\.ps1'
+        $_.CommandLine -match 'main\.py supervisor|main\.py scheduler|runtime\\price_relay\.py|runtime\\job_worker\.py|restart_runtime\.ps1|start_runtime_headless\.ps1|start_exness_mt5\.ps1'
     } |
     ForEach-Object {
         try {
