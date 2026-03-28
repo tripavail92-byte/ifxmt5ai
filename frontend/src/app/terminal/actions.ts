@@ -74,3 +74,51 @@ export async function getTerminalSettings(): Promise<PersistedTerminalSettings |
     termsAcceptedAt: data.terms_accepted_at ?? null,
   };
 }
+
+export async function closeTradeJob(input: {
+  connectionId: string;
+  ticket: number;
+  symbol: string;
+  volume: number;
+  side: "buy" | "sell";
+}) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) throw new Error("Unauthorized");
+
+  // Verify the connection belongs to this user
+  const { data: conn } = await supabase
+    .from("mt5_user_connections")
+    .select("id")
+    .eq("id", input.connectionId)
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (!conn) {
+    return { ok: false as const, reason: "unauthorized_connection" as const };
+  }
+
+  // The worker handles close via comment = "__close__:<ticket>"
+  // Side is set to the opposite direction (how MT5 executes a close)
+  const closeSide = input.side === "buy" ? "sell" : "buy";
+  const idempotencyKey = `close_${input.ticket}_${Date.now()}`;
+
+  const { error } = await supabase.from("trade_jobs").insert({
+    connection_id: input.connectionId,
+    symbol: input.symbol,
+    side: closeSide,
+    volume: input.volume,
+    comment: `__close__:${input.ticket}`,
+    idempotency_key: idempotencyKey,
+    status: "queued",
+  });
+
+  if (error) {
+    return { ok: false as const, reason: error.message };
+  }
+
+  return { ok: true as const };
+}

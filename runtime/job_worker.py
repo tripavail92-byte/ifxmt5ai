@@ -399,6 +399,72 @@ def find_existing_order_by_job_id(job_id: str) -> dict | None:
 # Order execution
 # ---------------------------------------------------------------------------
 
+def close_position_by_ticket(ticket: int, logger: logging.Logger) -> dict:
+    """
+    Close an open MT5 position identified by its ticket number.
+    Returns result dict with order_id, retcode, message.
+    Raises RuntimeError on failure.
+    """
+    positions = mt5.positions_get(ticket=ticket)
+    if not positions:
+        raise RuntimeError(f"Position ticket {ticket} not found in MT5")
+
+    pos = positions[0]
+    symbol = pos.symbol
+    volume = pos.volume
+    # Opposite order type to close
+    close_type = mt5.ORDER_TYPE_SELL if pos.type == 0 else mt5.ORDER_TYPE_BUY
+
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        raise RuntimeError(f"Cannot get tick for {symbol}: {mt5.last_error()}")
+
+    close_price = tick.bid if pos.type == 0 else tick.ask
+
+    symbol_info = mt5.symbol_info(symbol)
+    filling_modes = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+    if symbol_info:
+        filling_modes = [symbol_info.filling_mode] + filling_modes
+
+    last_result = None
+    for mode in dict.fromkeys(filling_modes):  # deduplicate preserving order
+        request = {
+            "action":       mt5.TRADE_ACTION_DEAL,
+            "position":     ticket,
+            "symbol":       symbol,
+            "volume":       volume,
+            "type":         close_type,
+            "price":        close_price,
+            "comment":      "ifx_close",
+            "type_time":    mt5.ORDER_TIME_GTC,
+            "type_filling": mode,
+        }
+        result = mt5.order_send(request)
+        if result is None:
+            raise RuntimeError(f"order_send returned None: {mt5.last_error()}")
+        last_result = result
+        if result.retcode == 10030:
+            logger.warning("close_position ticket=%s unsupported filling mode=%s; trying next", ticket, mode)
+            continue
+        return {
+            "order_id":   result.order,
+            "retcode":    result.retcode,
+            "message":    result.comment,
+            "request_id": result.request_id,
+            "ticket":     ticket,
+        }
+
+    return {
+        "order_id":   last_result.order if last_result else 0,
+        "retcode":    last_result.retcode if last_result else 10030,
+        "message":    last_result.comment if last_result else "Unsupported filling mode",
+        "request_id": last_result.request_id if last_result else 0,
+        "ticket":     ticket,
+    }
+
+
+# ---------------------------------------------------------------------------
+
 def execute_order(job: dict, logger: logging.Logger) -> dict:
     """
     Place an MT5 market order for the given job.
@@ -766,8 +832,31 @@ def run_worker(connection_id: str):
                 metrics = {
                     "balance": acc.balance,
                     "equity": acc.equity,
-                    "margin_free": acc.margin_free,
+                    "margin": acc.margin,
+                    "free_margin": acc.margin_free,
+                    "margin_level": acc.margin_level if acc.margin > 0 else 0,
+                    "profit": acc.profit,
                 }
+            # Attach live open positions so the frontend can render them
+            # directly from the heartbeat row without a separate table.
+            raw_positions = mt5.positions_get() or []
+            metrics["open_positions"] = [
+                {
+                    "ticket":      int(p.ticket),
+                    "symbol":      p.symbol,
+                    "type":        "buy" if p.type == 0 else "sell",
+                    "volume":      float(p.volume),
+                    "open_price":  float(p.price_open),
+                    "current_price": float(p.price_current),
+                    "sl":          float(p.sl) if p.sl else None,
+                    "tp":          float(p.tp) if p.tp else None,
+                    "profit":      float(p.profit),
+                    "swap":        float(p.swap),
+                    "open_time":   p.time,
+                    "comment":     p.comment,
+                }
+                for p in raw_positions
+            ]
             db.upsert_heartbeat(
                 connection_id, pid, "online",
                 terminal_path=str(terminal_path),
@@ -872,6 +961,35 @@ def run_worker(connection_id: str):
                 result=existing,
                 error=None,
             )
+            backoff.reset()
+            continue
+
+        # --- Close-position shortcut ---
+        # Frontend encodes close requests as comment = "__close__:<ticket>"
+        job_comment = job.get("comment") or ""
+        if job_comment.startswith("__close__:"):
+            try:
+                ticket = int(job_comment.split(":", 1)[1].strip())
+            except (ValueError, IndexError):
+                db.complete_trade_job(job_id, "failed", error="Invalid close comment format", error_code="invalid_close")
+                backoff.reset()
+                continue
+
+            db.mark_trade_job_executing(job_id)
+            try:
+                result = close_position_by_ticket(ticket, logger)
+                logger.info("Close job %s ticket=%s retcode=%s", job_id, ticket, result.get("retcode"))
+                if result["retcode"] == mt5.TRADE_RETCODE_DONE:
+                    db.complete_trade_job(job_id, "success", result=result)
+                    logger.info("Job %s → CLOSE SUCCESS (ticket %s)", job_id, ticket)
+                else:
+                    err_msg = f"retcode={result['retcode']} msg={result['message']}"
+                    db.complete_trade_job(job_id, "failed", result=result, error=err_msg, error_code=f"retcode_{result['retcode']}")
+                    logger.warning("Job %s → CLOSE FAILED: %s", job_id, err_msg)
+            except Exception as exc:
+                logger.error("Close job %s ticket=%s error: %s", job_id, ticket, exc, exc_info=True)
+                db.complete_trade_job(job_id, "failed", error=str(exc), error_code="close_exception")
+                backoff.sleep()
             backoff.reset()
             continue
 

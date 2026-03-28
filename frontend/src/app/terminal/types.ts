@@ -1,5 +1,20 @@
 export type StopMode = "setup" | "manual" | "ai_dynamic";
 
+export type MT5Position = {
+  ticket: number;
+  symbol: string;
+  type: "buy" | "sell";
+  volume: number;
+  open_price: number;
+  current_price: number;
+  sl: number | null;
+  tp: number | null;
+  profit: number;
+  swap: number;
+  open_time: number; // unix timestamp
+  comment: string;
+};
+
 export type TerminalPreferences = {
   riskMode: "percent" | "usd";
   riskPercent: number;

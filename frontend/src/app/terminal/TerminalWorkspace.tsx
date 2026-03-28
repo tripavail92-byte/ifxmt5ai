@@ -20,7 +20,7 @@ import {
 import { toast } from "sonner";
 
 import { activateTradeNow, placeManualTrade } from "@/app/(dashboard)/strategies/actions";
-import { saveTerminalSettings } from "@/app/terminal/actions";
+import { closeTradeJob, saveTerminalSettings } from "@/app/terminal/actions";
 import { CandlestickChart as CandlestickChartType } from "@/components/chart/CandlestickChart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,7 +37,7 @@ import { Label } from "@/components/ui/label";
 import { usePriceFeed } from "@/hooks/usePriceFeed";
 import { deriveDynamicStop, pivotWindowFromAiSensitivity, type StructureAnalysis, type StructureBar } from "@/lib/structure";
 import { createClient } from "@/utils/supabase/client";
-import type { PersistedTerminalSettings, StopMode, TerminalPreferences } from "@/app/terminal/types";
+import type { MT5Position, PersistedTerminalSettings, StopMode, TerminalPreferences } from "@/app/terminal/types";
 
 const CandlestickChart = dynamic(
   () => import("@/components/chart/CandlestickChart").then((m) => ({ default: m.CandlestickChart })),
@@ -84,6 +84,7 @@ type HeartbeatRow = {
     free_margin?: number;
     margin_level?: number;
     profit?: number;
+    open_positions?: MT5Position[];
   } | null;
 };
 
@@ -344,6 +345,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     message: null,
   });
   const [dynamicStopLoading, setDynamicStopLoading] = useState(false);
+  const [closingTickets, setClosingTickets] = useState<Set<number>>(new Set());
 
   const {
     prices,
@@ -375,6 +377,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const accountEquity = Number(accountHeartbeat?.last_metrics?.equity ?? accountBalance);
   const margin = Number(accountHeartbeat?.last_metrics?.margin ?? 0);
   const freeMargin = Number(accountHeartbeat?.last_metrics?.free_margin ?? Math.max(0, accountEquity - margin));
+  const openPositions: MT5Position[] = accountHeartbeat?.last_metrics?.open_positions ?? [];
   const riskAmount = riskMode === "percent" ? (accountEquity * riskPercent) / 100 : riskUsd;
   const stopDistance = validEntry && effectiveStop > 0 ? Math.abs(parsedEntry - effectiveStop) : 0;
   const pipFactor = /JPY/i.test(displaySymbol) ? 100 : /XAU|BTC|ETH|OIL/i.test(displaySymbol) ? 10 : 10000;
@@ -1292,24 +1295,130 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     );
   }
 
+  async function handleClosePosition(pos: MT5Position) {
+    if (!selectedConnectionId) return;
+    setClosingTickets((prev) => new Set(prev).add(pos.ticket));
+    try {
+      const result = await closeTradeJob({
+        connectionId: selectedConnectionId,
+        ticket: pos.ticket,
+        symbol: pos.symbol,
+        volume: pos.volume,
+        side: pos.type,
+      });
+      if (result.ok) {
+        toast.success(`Close order queued for ${pos.symbol} #${pos.ticket}`);
+      } else {
+        toast.error(`Failed to queue close: ${result.reason}`);
+      }
+    } catch (err) {
+      toast.error(`Close error: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setClosingTickets((prev) => { const s = new Set(prev); s.delete(pos.ticket); return s; });
+    }
+  }
+
   function renderPositions() {
+    const totalProfit = openPositions.reduce((sum, p) => sum + p.profit + p.swap, 0);
+    const profitColor = totalProfit >= 0 ? "text-emerald-300" : "text-red-300";
+
     return (
-      <div className="grid gap-4 lg:grid-cols-[0.95fr_1.05fr]">
-        <div className="rounded-xl border border-[#1f1f1f] bg-[#101010] p-5">
-          <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-200">
-            <TrendingUp className="size-4 text-emerald-400" /> Runtime Account Snapshot
+      <div className="space-y-4">
+        {/* Account snapshot strip */}
+        <div className="rounded-xl border border-[#1f1f1f] bg-[#101010] p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm font-semibold text-gray-200">
+              <TrendingUp className="size-4 text-emerald-400" /> Runtime Account Snapshot
+            </div>
+            <span className="text-xs text-gray-500">Auto-refreshes every heartbeat cycle (~5 s)</span>
           </div>
-          <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3 md:grid-cols-6">
             <MetricCard label="Balance" value={fmtCurrency(accountBalance)} />
             <MetricCard label="Equity" value={fmtCurrency(accountEquity)} accent="text-emerald-300" />
             <MetricCard label="Margin" value={fmtCurrency(margin)} />
             <MetricCard label="Free Margin" value={fmtCurrency(freeMargin)} accent="text-blue-300" />
-          </div>
-          <div className="mt-4 rounded-lg border border-[#202020] bg-[#151515] p-4 text-sm text-gray-400">
-            Open-position sync UI is still a next step. Right now this terminal route shows the live account snapshot plus the execution stream already coming from the MT5 runtime.
+            <MetricCard
+              label="Floating P&L"
+              value={fmtCurrency(totalProfit)}
+              accent={profitColor}
+            />
+            <MetricCard label="Open Trades" value={String(openPositions.length)} />
           </div>
         </div>
 
+        {/* Open positions workstation */}
+        <div className="rounded-xl border border-[#1f1f1f] bg-[#101010] p-5">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-gray-200">
+              <Target className="size-4 text-blue-400" /> Open Positions
+            </div>
+            <span className="text-xs text-gray-500">
+              {openPositions.length} position{openPositions.length !== 1 ? "s" : ""}
+            </span>
+          </div>
+
+          {openPositions.length === 0 ? (
+            <EmptyState
+              title="No open positions"
+              description="Positions are pushed live from the MT5 runtime. They appear here as soon as a trade is executed."
+              icon={TrendingUp}
+            />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-[#202020] text-left text-gray-500">
+                    <th className="pb-2 pr-4 font-medium">Ticket</th>
+                    <th className="pb-2 pr-4 font-medium">Symbol</th>
+                    <th className="pb-2 pr-4 font-medium">Side</th>
+                    <th className="pb-2 pr-4 font-medium">Volume</th>
+                    <th className="pb-2 pr-4 font-medium">Open</th>
+                    <th className="pb-2 pr-4 font-medium">Current</th>
+                    <th className="pb-2 pr-4 font-medium">SL</th>
+                    <th className="pb-2 pr-4 font-medium">TP</th>
+                    <th className="pb-2 pr-4 font-medium">P&L</th>
+                    <th className="pb-2 font-medium">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#1a1a1a]">
+                  {openPositions.map((pos) => {
+                    const pnl = pos.profit + pos.swap;
+                    const pnlColor = pnl >= 0 ? "text-emerald-300" : "text-red-300";
+                    const sideColor = pos.type === "buy" ? "text-emerald-400" : "text-red-400";
+                    const isClosing = closingTickets.has(pos.ticket);
+                    const decimals = getDecimals(pos.symbol);
+                    return (
+                      <tr key={pos.ticket} className="group hover:bg-[#141414]">
+                        <td className="py-2.5 pr-4 font-mono text-gray-400">#{pos.ticket}</td>
+                        <td className="py-2.5 pr-4 font-mono font-semibold text-white">{pos.symbol}</td>
+                        <td className={`py-2.5 pr-4 font-semibold uppercase tracking-wide ${sideColor}`}>{pos.type}</td>
+                        <td className="py-2.5 pr-4 text-gray-300">{pos.volume}</td>
+                        <td className="py-2.5 pr-4 font-mono text-gray-300">{pos.open_price.toFixed(decimals)}</td>
+                        <td className="py-2.5 pr-4 font-mono text-white">{pos.current_price.toFixed(decimals)}</td>
+                        <td className="py-2.5 pr-4 font-mono text-amber-400">{pos.sl ? pos.sl.toFixed(decimals) : "—"}</td>
+                        <td className="py-2.5 pr-4 font-mono text-blue-400">{pos.tp ? pos.tp.toFixed(decimals) : "—"}</td>
+                        <td className={`py-2.5 pr-4 font-mono font-semibold ${pnlColor}`}>
+                          {pnl >= 0 ? "+" : ""}{fmtCurrency(pnl)}
+                        </td>
+                        <td className="py-2.5">
+                          <button
+                            onClick={() => void handleClosePosition(pos)}
+                            disabled={isClosing || !termsAccepted}
+                            className="rounded-md border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-[11px] font-semibold text-red-300 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {isClosing ? "Closing…" : "Close"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Execution stream */}
         <div className="rounded-xl border border-[#1f1f1f] bg-[#101010] p-5">
           <div className="mb-4 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2 text-sm font-semibold text-gray-200">
