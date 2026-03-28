@@ -10,7 +10,7 @@
 # ============================================================
 
 param(
-    [int]$Days = 14,
+    [int]$Days = 30,
     [switch]$DryRun
 )
 
@@ -25,6 +25,12 @@ if (-not (Test-Path $Python)) {
 
 $Args = @("--days", $Days)
 if ($DryRun) { $Args += "--dry-run" }
+
+# Load FRED key from machine env if not already in session
+if (-not $env:FRED_API_KEY) {
+    $key = [System.Environment]::GetEnvironmentVariable("FRED_API_KEY", "Machine")
+    if ($key) { $env:FRED_API_KEY = $key }
+}
 
 Write-Host "==> IFX Economic Calendar Refresh  ($(Get-Date -Format 'yyyy-MM-dd HH:mm'))" -ForegroundColor Cyan
 Write-Host "    Python : $Python" -ForegroundColor DarkGray
