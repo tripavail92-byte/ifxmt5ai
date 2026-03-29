@@ -712,11 +712,22 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
 
     const draft = loadDraft(selectedSymbol);
     setSide(draft.side ?? "buy");
-    setEntryPrice(draft.entryPrice ?? (livePrice ? String(livePrice.bid) : ""));
+    setEntryPrice(draft.entryPrice ?? "");
     setZonePercent(typeof draft.zonePercent === "number" ? draft.zonePercent : getZoneDefault(selectedSymbol));
     setAiSensitivity(typeof draft.aiSensitivity === "number" ? draft.aiSensitivity : 5);
     setActiveSetupState(null);
-  }, [selectedSymbol, setupsBySymbol, livePrice]);
+  }, [selectedSymbol, setupsBySymbol]);
+
+  useEffect(() => {
+    if (!selectedSymbol) return;
+    if (entryPrice) return;
+    if (!livePrice) return;
+    const setup = setupsBySymbol[selectedSymbol];
+    if (setup) return;
+    const draft = loadDraft(selectedSymbol);
+    if (draft.entryPrice) return;
+    setEntryPrice(String(livePrice.bid));
+  }, [selectedSymbol, entryPrice, livePrice, setupsBySymbol]);
 
   useEffect(() => {
     if (!selectedSymbol) return;
