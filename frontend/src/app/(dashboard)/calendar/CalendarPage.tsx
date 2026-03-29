@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -69,6 +69,7 @@ const PROVIDER_LABEL: Record<string, string> = {
 };
 
 const REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const CLOCK_TICK_MS = 30 * 1000; // 30 seconds to avoid constant full-table rerenders
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -220,8 +221,7 @@ function StatsBar({ events }: { events: NewsEvent[] }) {
 // ---------------------------------------------------------------------------
 
 export function CalendarPage() {
-  const nowRef = useRef(new Date());
-  const [tick, setTick] = useState(0); // for countdown updates
+  const [now, setNow] = useState(() => new Date());
   const [weekRef, setWeekRef] = useState(new Date());
   const [events, setEvents] = useState<NewsEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -233,24 +233,25 @@ export function CalendarPage() {
   const [impactFilter, setImpactFilter] = useState<Set<string>>(new Set(["high", "medium", "low"]));
   const [currencyFilter, setCurrencyFilter] = useState<Set<string>>(new Set());
 
-  const { start: weekStart, end: weekEnd } = getWeekBounds(weekRef);
+  const { start: weekStart, end: weekEnd } = useMemo(() => getWeekBounds(weekRef), [weekRef]);
+  const weekStartIso = useMemo(() => weekStart.toISOString(), [weekStart]);
+  const weekEndIso = useMemo(() => weekEnd.toISOString(), [weekEnd]);
 
-  // Countdown ticker — every second
+  // Countdown ticker — throttled to avoid UI flicker
   useEffect(() => {
     const t = setInterval(() => {
-      nowRef.current = new Date();
-      setTick((n) => n + 1);
-    }, 1000);
+      setNow(new Date());
+    }, CLOCK_TICK_MS);
     return () => clearInterval(t);
   }, []);
 
   const fetchEvents = useCallback(async (showRefreshIndicator = false) => {
     if (showRefreshIndicator) setIsRefreshing(true);
-    else setLoading(true);
+    else if (events.length === 0) setLoading(true);
     try {
       const params = new URLSearchParams({
-        from: weekStart.toISOString(),
-        to: weekEnd.toISOString(),
+        from: weekStartIso,
+        to: weekEndIso,
         impacts: "all",
       });
       const res = await fetch(`/api/news/upcoming?${params}`);
@@ -265,7 +266,7 @@ export function CalendarPage() {
       setLoading(false);
       setIsRefreshing(false);
     }
-  }, [weekStart, weekEnd]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [events.length, weekEndIso, weekStartIso]);
 
   // Fetch on week change
   useEffect(() => {
@@ -279,14 +280,15 @@ export function CalendarPage() {
   }, [fetchEvents]);
 
   // Filtered view
-  const filteredEvents = events.filter((ev) => {
-    if (!impactFilter.has(ev.impact)) return false;
-    if (currencyFilter.size > 0 && !currencyFilter.has(ev.currency)) return false;
-    return true;
-  });
+  const filteredEvents = useMemo(() => {
+    return events.filter((ev) => {
+      if (!impactFilter.has(ev.impact)) return false;
+      if (currencyFilter.size > 0 && !currencyFilter.has(ev.currency)) return false;
+      return true;
+    });
+  }, [currencyFilter, events, impactFilter]);
 
-  const grouped = groupByDate(filteredEvents);
-  const now = nowRef.current;
+  const grouped = useMemo(() => groupByDate(filteredEvents), [filteredEvents]);
 
   function toggleImpact(val: string) {
     setImpactFilter((prev) => {
@@ -444,11 +446,21 @@ export function CalendarPage() {
       )}
 
       {/* ── Loading skeleton ── */}
-      {loading && (
+      {loading && events.length === 0 && (
         <div className="space-y-2 p-6">
           {Array.from({ length: 5 }).map((_, i) => (
             <div key={i} className="h-12 rounded-lg bg-[#111] animate-pulse" />
           ))}
+        </div>
+      )}
+
+      {/* ── Error state ── */}
+      {!loading && status === "error" && events.length === 0 && (
+        <div className="mx-4 mt-4 rounded-xl border border-red-500/20 bg-red-500/5 p-4 text-[13px] lg:mx-6">
+          <p className="font-semibold text-red-400">Calendar failed to load</p>
+          <p className="mt-1 text-gray-400">
+            The news feed endpoint returned an error. Try refresh again. Existing data will stay visible on future refreshes.
+          </p>
         </div>
       )}
 
@@ -615,7 +627,7 @@ export function CalendarPage() {
           <span>Auto-refreshes every 5 min · Populate with <code className="text-gray-500">python runtime/news_refresh.py</code></span>
           <span className="flex items-center gap-1">
             <Clock className="size-3" />
-            {tick > -1 && now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+            {now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
           </span>
         </div>
       </div>
