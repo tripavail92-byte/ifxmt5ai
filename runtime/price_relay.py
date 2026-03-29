@@ -622,14 +622,40 @@ def _get_candles(conn_id: str, symbol: str, tf: str, count: int) -> list:
     broker-provided OHLCV data; we only aggregate 1m→higher-TF here.
     """
     tf_min = TF_MINUTES.get(tf, 1)
+    broker_conn_id = _effective_conn_id(conn_id)
+
+    def _fetch_broker() -> list:
+        try:
+            from runtime.mt5_candles import get_broker_candles
+            return get_broker_candles(
+                connection_id=broker_conn_id,
+                symbol=symbol,
+                timeframe=tf,
+                count=count,
+                include_current=True,
+            )
+        except Exception as exc:
+            log.debug("_get_candles MT5 IPC fallback failed for %s/%s: %r", symbol, tf, exc)
+            return []
 
     # ── Step 1: Buffer for exact conn_id ─────────────────────────────────────
     with _state_lock:
         exact = list(candle_buffer.get(conn_id, {}).get(symbol, []))
 
+    best_agg: list = []
     if exact:
-        agg = _aggregate_tf(exact, tf_min)
-        return agg[-count:] if len(agg) > count else agg
+        best_agg = _aggregate_tf(exact, tf_min)
+
+    # For higher timeframes, prefer the broker/terminal's own candles instead of
+    # aggregating whatever 1m bars happen to be buffered after a relay restart.
+    # This prevents cases where D1/H4 collapse to only a couple of visible bars
+    # until enough fresh 1m data accumulates again.
+    if tf_min > 1:
+        broker = _fetch_broker()
+        if len(broker) >= len(best_agg):
+            return broker[-count:] if len(broker) > count else broker
+        if best_agg:
+            return best_agg[-count:] if len(best_agg) > count else best_agg
 
     # ── Step 2: Cross-conn buffer lookup ─────────────────────────────────────
     with _state_lock:
@@ -641,21 +667,17 @@ def _get_candles(conn_id: str, symbol: str, tf: str, count: int) -> list:
 
     if best_bars:
         agg = _aggregate_tf(best_bars, tf_min)
-        return agg[-count:] if len(agg) > count else agg
+        if len(agg) > len(best_agg):
+            best_agg = agg
+
+    if best_agg and len(best_agg) >= count:
+        return best_agg[-count:] if len(best_agg) > count else best_agg
 
     # ── Step 3: MT5 IPC broker fetch (terminal must be running) ──────────────
-    try:
-        from runtime.mt5_candles import get_broker_candles
-        return get_broker_candles(
-            connection_id=conn_id,
-            symbol=symbol,
-            timeframe=tf,
-            count=count,
-            include_current=True,
-        )
-    except Exception as exc:
-        log.debug("_get_candles MT5 IPC fallback failed for %s/%s: %r", symbol, tf, exc)
-        return []
+    broker = _fetch_broker()
+    if len(broker) >= len(best_agg):
+        return broker[-count:] if len(broker) > count else broker
+    return best_agg[-count:] if len(best_agg) > count else best_agg
 
 
 # ─── HMAC verification ────────────────────────────────────────────────────────
