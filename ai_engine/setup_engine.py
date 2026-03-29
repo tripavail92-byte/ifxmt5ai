@@ -98,6 +98,7 @@ class Setup:
     # Optional metadata (not used by engine logic)
     user_id:          Optional[str]  = None
     notes:            Optional[str]  = None
+    db_updated_at:    Optional[str]  = None
 
 
 # ---------------------------------------------------------------------------
@@ -226,4 +227,5 @@ def build_setup_from_row(row: dict) -> Setup:
         dead_trigger_candle_time = row.get("dead_trigger_candle_time"),
         trade_now_active         = bool(row.get("trade_now_active", False)),
         notes                    = row.get("notes"),
+        db_updated_at            = row.get("updated_at"),
     )

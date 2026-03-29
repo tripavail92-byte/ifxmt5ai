@@ -534,13 +534,23 @@ class SetupManager:
                 if sid in self._setups:
                     # Already tracking — update zone/config fields but keep current state
                     existing = self._setups[sid]
+                    row_updated_at = row.get("updated_at")
+                    row_state = str(row.get("state") or getattr(existing, "state", "IDLE"))
                     existing.zone_low    = float(row["zone_low"])
                     existing.zone_high   = float(row["zone_high"])
                     existing.loss_edge   = float(row["loss_edge"])
                     existing.target      = float(row["target"])
                     existing.entry_price = float(row["entry_price"])
+                    existing.side        = str(row.get("side") or existing.side)
+                    existing.connection_id = str(row.get("connection_id") or existing.connection_id)
                     existing.timeframe   = (row.get("timeframe") or "5m")
                     existing.ai_sensitivity = int(row.get("ai_sensitivity") or getattr(existing, "ai_sensitivity", 5) or 5)
+                    if row_updated_at and row_updated_at != getattr(existing, "db_updated_at", None):
+                        # A user just updated the setup (or the DB row changed outside the in-memory
+                        # engine). Honor the DB state instead of preserving a stale in-memory DEAD/IDLE.
+                        existing.state = row_state
+                        existing.dead_trigger_candle_time = row.get("dead_trigger_candle_time")
+                        existing.db_updated_at = row_updated_at
                     # Refresh trade_now_active from DB so new arming is picked up.
                     # Do NOT overwrite if currently True in memory (fire hasn't persisted yet).
                     db_trade_now = bool(row.get("trade_now_active", False))

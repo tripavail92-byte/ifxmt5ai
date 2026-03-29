@@ -1156,21 +1156,13 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                   </label>
                 </div>
 
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-2">
                   <Button onClick={handleMonitorSetup} disabled={setupSaving || !validEntry || !selectedConnectionId} className="h-10 bg-blue-600 text-white hover:bg-blue-500">
                     {setupSaving ? "Saving…" : currentSetupId ? "Update Monitor" : "Monitor Zone"}
-                  </Button>
-                  <Button
-                    onClick={handleTradeNow}
-                    disabled={tradeNowSaving || tradeNowArmed || !validEntry || !selectedConnectionId}
-                    className={`h-10 ${tradeNowArmed ? "bg-orange-500/20 text-orange-300 hover:bg-orange-500/20" : "bg-orange-600 text-white hover:bg-orange-500"}`}
-                  >
-                    {tradeNowSaving ? "Arming…" : tradeNowArmed ? "ARMED" : "TRADE NOW"}
                   </Button>
                 </div>
 
                 {setupResult && <InlineMessage ok={setupResult.ok} message={setupResult.msg} />}
-                {tradeNowResult && <InlineMessage ok={tradeNowResult.ok} message={tradeNowResult.msg} accent="orange" />}
               </div>
             </section>
 
@@ -1192,6 +1184,20 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                   })}
                 </div>
                 <p className="text-xs leading-relaxed text-gray-500">{stateCfg?.desc ?? "Monitor a setup to start receiving runtime state updates."}</p>
+                <div className="space-y-2 rounded-lg border border-[#232323] bg-[#111] p-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500">Trade Automation</div>
+                  <p className="text-xs leading-relaxed text-gray-500">
+                    `Trade Now` is separate from zone monitoring. It arms a one-shot execution after the setup is already being tracked.
+                  </p>
+                  <Button
+                    onClick={handleTradeNow}
+                    disabled={tradeNowSaving || tradeNowArmed || !validEntry || !selectedConnectionId}
+                    className={`h-10 w-full ${tradeNowArmed ? "bg-orange-500/20 text-orange-300 hover:bg-orange-500/20" : "bg-orange-600 text-white hover:bg-orange-500"}`}
+                  >
+                    {tradeNowSaving ? "Arming…" : tradeNowArmed ? "ARMED" : "TRADE NOW"}
+                  </Button>
+                  {tradeNowResult && <InlineMessage ok={tradeNowResult.ok} message={tradeNowResult.msg} accent="orange" />}
+                </div>
                 {tradeNowArmed ? (
                   <div className="rounded-lg border border-orange-500/20 bg-orange-500/10 px-3 py-2 text-xs text-orange-300">
                     Armed one-shot execution: the runtime will queue a 0.01-lot MT5 order on a matching structure break.
