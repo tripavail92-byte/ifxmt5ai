@@ -192,6 +192,14 @@ function getPriceIncrement(symbol: string): number {
   return 1 / 10 ** getDecimals(symbol);
 }
 
+function normalizeStopMode(value: unknown): StopMode {
+  return value === "ai_dynamic" ? "ai_dynamic" : "manual";
+}
+
+function formatStopModeLabel(stopMode: StopMode) {
+  return stopMode === "ai_dynamic" ? "AI Dynamic" : "Manual";
+}
+
 function getSelectedSetupTimeframe(): string {
   if (typeof window === "undefined") return "5m";
   const raw = (localStorage.getItem("ifx_chart_tf") ?? "M5").trim();
@@ -321,7 +329,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const [zonePercent, setZonePercent] = useState<number>(ZONE_DEFAULT_FALLBACK);
   const [showEntryZones, setShowEntryZones] = useState(true);
   const [showTPZones, setShowTPZones] = useState(true);
-  const [stopMode, setStopMode] = useState<StopMode>("setup");
+  const [stopMode, setStopMode] = useState<StopMode>("manual");
   const [aiSensitivity, setAiSensitivity] = useState<number>(5);
   const [slValue, setSlValue] = useState<number | undefined>();
   const [tpValue, setTpValue] = useState<number | undefined>();
@@ -491,7 +499,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     if (typeof mergedPrefs.newsAfterMin === "number") setNewsAfterMin(mergedPrefs.newsAfterMin);
     if (typeof mergedPrefs.showEntryZones === "boolean") setShowEntryZones(mergedPrefs.showEntryZones);
     if (typeof mergedPrefs.showTPZones === "boolean") setShowTPZones(mergedPrefs.showTPZones);
-    if (mergedPrefs.stopMode === "setup" || mergedPrefs.stopMode === "manual" || mergedPrefs.stopMode === "ai_dynamic") setStopMode(mergedPrefs.stopMode);
+    setStopMode(normalizeStopMode(mergedPrefs.stopMode));
     if (mergedPrefs.sessions) {
       setSessions({
         london: Boolean(mergedPrefs.sessions.london),
@@ -740,19 +748,6 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   }, [selectedSymbol, entryPrice, zonePercent, side, aiSensitivity]);
 
   useEffect(() => {
-    if (stopMode !== "setup") return;
-    if (!zone || !selectedSymbol) return;
-    const dec = getDecimals(selectedSymbol);
-    if (side === "buy") {
-      setSlValue(Number(zone.low.toFixed(dec)));
-      setTpValue(targetSuggestion ?? Number(zone.high.toFixed(dec)));
-    } else {
-      setSlValue(Number(zone.high.toFixed(dec)));
-      setTpValue(targetSuggestion ?? Number(zone.low.toFixed(dec)));
-    }
-  }, [stopMode, targetSuggestion, zone, side, selectedSymbol]);
-
-  useEffect(() => {
     if (stopMode !== "ai_dynamic") return;
     if (!selectedConnectionId || !selectedSymbol) return;
 
@@ -794,7 +789,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
           analysis: derived.analysis,
           stop: nextStop,
           referenceLevel: derived.referenceLevel,
-          message: `AI Dynamic SL is anchored ${side === "buy" ? "below" : "above"} the ${side === "buy" ? "latest confirmed swing low" : "latest confirmed swing high"} using AI sensitivity ${aiSensitivity} (pivot window ${pivotWindow}).`,
+          message: `AI Dynamic SL is anchored ${side === "buy" ? "just below" : "just above"} the ${side === "buy" ? "confirmed swing low" : "confirmed swing high"} from the active structure read using AI sensitivity ${aiSensitivity} (pivot window ${pivotWindow}).`,
         });
         setSlValue(nextStop);
 
@@ -1338,7 +1333,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               <div className="mt-3 grid gap-2 text-xs text-gray-500 sm:grid-cols-3">
                 <div className="rounded-lg bg-[#0c0c0c] p-3">Risk amount <span className="block pt-1 text-sm font-semibold text-white">{fmtCurrency(riskAmount)}</span></div>
                 <div className="rounded-lg bg-[#0c0c0c] p-3">Suggested lots <span className="block pt-1 text-sm font-semibold text-white">{lotSuggestion.toFixed(2)}</span></div>
-                <div className="rounded-lg bg-[#0c0c0c] p-3">Stop mode <span className="block pt-1 text-sm font-semibold text-white">{stopMode === "ai_dynamic" ? "AI Dynamic" : stopMode === "manual" ? "Manual" : "Setup"}</span></div>
+                <div className="rounded-lg bg-[#0c0c0c] p-3">Stop mode <span className="block pt-1 text-sm font-semibold text-white">{formatStopModeLabel(stopMode)}</span></div>
               </div>
               <div className="mt-2 text-[11px] text-gray-500">Feed status: <span className="font-semibold text-gray-200">{isConnected ? "LIVE" : "Connecting"}</span></div>
               {manualResult && <div className="mt-3"><InlineMessage ok={manualResult.ok} message={manualResult.msg} /></div>}
@@ -1370,16 +1365,15 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               <div className="rounded-xl border border-[#202020] bg-[#151515] p-3 space-y-3">
                 <div className="space-y-2 rounded-lg bg-[#0f0f0f] p-3">
                   <div className="flex items-center justify-between text-xs">
-                    <span className="text-gray-400">Stop Model</span>
-                    <span className="font-semibold text-white">{stopMode === "ai_dynamic" ? "AI Dynamic" : stopMode === "manual" ? "Manual" : "Setup"}</span>
+                    <span className="text-gray-400">Stop Mode</span>
+                    <span className="font-semibold text-white">{formatStopModeLabel(stopMode)}</span>
                   </div>
-                  <div className="grid grid-cols-3 gap-2">
-                    <button type="button" onClick={() => setStopMode("setup")} className={`h-10 rounded-lg text-[11px] font-semibold ${stopMode === "setup" ? "bg-blue-600 text-white" : "bg-[#111] text-gray-400"}`}>Setup</button>
+                  <div className="grid grid-cols-2 gap-2">
                     <button type="button" onClick={() => setStopMode("manual")} className={`h-10 rounded-lg text-[11px] font-semibold ${stopMode === "manual" ? "bg-blue-600 text-white" : "bg-[#111] text-gray-400"}`}>Manual</button>
                     <button type="button" onClick={() => setStopMode("ai_dynamic")} className={`h-10 rounded-lg text-[11px] font-semibold ${stopMode === "ai_dynamic" ? "bg-blue-600 text-white" : "bg-[#111] text-gray-400"}`}>AI Dynamic</button>
                   </div>
                   <p className="text-[11px] leading-relaxed text-gray-500">
-                    Manual SL uses the user-entered stop. AI Dynamic SL anchors below/above the latest confirmed structure swing using the current AI sensitivity window.
+                    Manual means the user enters the stop loss directly. AI Dynamic reads the active structure and places the stop just below the confirmed swing low for buys or just above the confirmed swing high for sells.
                   </p>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
@@ -1471,7 +1465,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                     <div className="mt-2 space-y-1 text-[11px] text-blue-100/90">
                       <div>Pivot window: {pivotWindow}</div>
                       <div>Reference structure: {dynamicStopState.referenceLevel != null ? fmtPrice(dynamicStopState.referenceLevel, selectedSymbol || displaySymbol) : "Not found"}</div>
-                      <div>{dynamicStopState.message ?? "AI Dynamic SL uses the latest confirmed swing structure."}</div>
+                      <div>{dynamicStopState.message ?? "AI Dynamic SL uses the confirmed swing from the active structure read."}</div>
                     </div>
                   </div>
                 ) : null}
