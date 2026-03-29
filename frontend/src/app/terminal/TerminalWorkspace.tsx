@@ -642,7 +642,17 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   ]);
 
   useEffect(() => {
-    if (!selectedConnectionId) return;
+    if (!selectedConnectionId) {
+      setSymbols([]);
+      setSelectedSymbol("");
+      setAccountHeartbeat(null);
+      setRecentJobs([]);
+      setSetupsBySymbol({});
+      setSetupIdsBySymbol({});
+      setTradeNowBySymbol({});
+      setActiveSetupState(null);
+      return;
+    }
     let cancelled = false;
 
     const load = async () => {
@@ -680,12 +690,13 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   }, [selectedConnectionId, supabase]);
 
   useEffect(() => {
+    if (!selectedConnectionId) return;
     const available = [...new Set([...(liveSymbols ?? []), ...symbols.map((row) => row.symbol)])].filter(Boolean);
     if (!available.length) return;
     if (!selectedSymbol || !available.includes(selectedSymbol)) {
       setSelectedSymbol(available[0]);
     }
-  }, [symbols, liveSymbols, selectedSymbol]);
+  }, [selectedConnectionId, symbols, liveSymbols, selectedSymbol]);
 
   useEffect(() => {
     if (!selectedSymbol) return;
@@ -1239,7 +1250,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
             })}
           </div>
 
-          {hydrated && (
+          {hydrated && selectedConnectionId ? (
             <CandlestickChart
               symbol={displaySymbol}
               liveSymbol={displaySymbol}
@@ -1253,7 +1264,11 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               lastClose={lastClose}
               className="w-full"
             />
-          )}
+          ) : hydrated ? (
+            <div className="flex min-h-[320px] items-center justify-center rounded-lg border border-[#2a2a2a] bg-[#0c0c0c] px-6 py-10 text-center text-sm text-gray-500">
+              Select an active MT5 connection to load live prices and historical candles.
+            </div>
+          ) : null}
 
           <div className="grid gap-4 xl:grid-cols-[1.3fr_0.7fr]">
             <div className="rounded-xl border border-[#1f1f1f] bg-[#121212] p-4">
