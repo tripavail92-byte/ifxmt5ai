@@ -161,6 +161,31 @@ function normalizeBars(bars: RawCandleBar[]): CandlestickData[] {
     .map(([, v]) => v);
 }
 
+function resetViewport(chart: IChartApi | null, barCount = 0) {
+  if (!chart) return;
+  const visibleBars = Math.max(30, Math.min(barCount || 0, 180));
+  if (barCount > 0) {
+    chart.timeScale().setVisibleLogicalRange({
+      from: Math.max(-2, barCount - visibleBars),
+      to: barCount + 2,
+    });
+  } else {
+    chart.timeScale().fitContent();
+  }
+  if (typeof window !== "undefined") {
+    window.requestAnimationFrame(() => {
+      if (barCount > 0) {
+        chart.timeScale().setVisibleLogicalRange({
+          from: Math.max(-2, barCount - visibleBars),
+          to: barCount + 2,
+        });
+      } else {
+        chart.timeScale().fitContent();
+      }
+    });
+  }
+}
+
 export function CandlestickChart({
   sl,
   tp,
@@ -240,7 +265,7 @@ export function CandlestickChart({
     historyRef.current = merged;
     hasHistoryRef.current = merged.length > 0;
     setHistoryVersion(v => v + 1);
-    if (fit) chartRef.current?.timeScale().fitContent();
+    if (fit) resetViewport(chartRef.current, merged.length);
   };
 
   // Incrementally update or append a single bar using series.update().
@@ -266,7 +291,7 @@ export function CandlestickChart({
       series.setData([next]);
       historyRef.current = [next];
       hasHistoryRef.current = true;
-      chartRef.current?.timeScale().fitContent();
+      resetViewport(chartRef.current, 1);
       return;
     }
 
@@ -373,7 +398,7 @@ export function CandlestickChart({
     });
 
     const ro = new ResizeObserver(() => {
-      if (hasHistoryRef.current) chart.timeScale().fitContent();
+      if (hasHistoryRef.current) resetViewport(chart, historyRef.current.length);
     });
     ro.observe(el);
 
