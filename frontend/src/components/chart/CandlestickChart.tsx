@@ -192,6 +192,7 @@ export function CandlestickChart({
   const hasHistoryRef = useRef(false);
   const fetchSeqRef = useRef(0);
   const fitOnNextLoadRef = useRef(true);
+  const lastFeedKeyRef = useRef("");
 
   const [activeTf, setActiveTf] = useState<TF>(() => {
     if (typeof window === "undefined") return "M5";
@@ -396,6 +397,18 @@ export function CandlestickChart({
   useEffect(() => {
     seriesRef.current?.applyOptions({ priceFormat: priceFormat(liveSymbol ?? symbol) });
   }, [liveSymbol, symbol]);
+
+  useEffect(() => {
+    const feedKey = `${connId ?? ""}::${liveSymbol ?? symbol}`;
+    if (feedKey === lastFeedKeyRef.current) return;
+
+    lastFeedKeyRef.current = feedKey;
+    seriesRef.current?.setData([]);
+    historyRef.current = [];
+    hasHistoryRef.current = false;
+    fitOnNextLoadRef.current = true;
+    setHistoryVersion((v) => v + 1);
+  }, [connId, liveSymbol, symbol]);
 
   // Fetch history once on symbol/TF change. No periodic re-poll —
   // SSE (candle_update + candle_close) drives all live updates.

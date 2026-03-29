@@ -29,6 +29,11 @@ type RelayFetchResult = {
   error?: string;
 };
 
+type RelayHealth = {
+  relay_source_connection_id?: string;
+  active_conn_ids?: string[];
+};
+
 async function fetchRelayCandles(opts: {
   symbol: string;
   tf: string;
@@ -65,6 +70,28 @@ async function fetchRelayCandles(opts: {
       return { bars: null, error: `relay timeout after ${PRICE_RELAY_TIMEOUT_MS}ms` };
     }
     return { bars: null, error: `relay fetch failed: ${msg}` };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchRelayHealth(): Promise<RelayHealth | null> {
+  if (!PRICE_RELAY_URL) return null;
+
+  const url = new URL("/health", PRICE_RELAY_URL);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PRICE_RELAY_TIMEOUT_MS);
+  try {
+    const resp = await fetch(url.toString(), {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (!resp.ok) return null;
+    return (await resp.json()) as RelayHealth;
+  } catch {
+    return null;
   } finally {
     clearTimeout(timeout);
   }
@@ -137,7 +164,22 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const relay = await fetchRelayCandles({ symbol, tf, count, connId });
+  let relay = await fetchRelayCandles({ symbol, tf, count, connId });
+
+  // If the selected terminal connection is not the VPS relay source connection,
+  // retry once using the relay's active/source connection so history is still
+  // available in the terminal chart.
+  if (connId && (relay.bars === null || relay.bars.length < MIN_STATE_BARS)) {
+    const health = await fetchRelayHealth();
+    const fallbackConnId = health?.relay_source_connection_id || health?.active_conn_ids?.[0];
+    if (fallbackConnId && fallbackConnId !== connId) {
+      const fallbackRelay = await fetchRelayCandles({ symbol, tf, count, connId: fallbackConnId });
+      if (fallbackRelay.bars && fallbackRelay.bars.length > (relay.bars?.length ?? 0)) {
+        relay = fallbackRelay;
+      }
+    }
+  }
+
   if (relay.bars === null) {
     // Relay unavailable; return current state bars (possibly empty) so UI keeps
     // running and can fill via SSE/state later.
