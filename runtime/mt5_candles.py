@@ -250,6 +250,55 @@ def get_broker_candles(
     return bars
 
 
+def get_symbol_trade_specs(connection_id: str, symbol: str) -> dict:
+    """Return broker-native sizing metadata for one symbol.
+
+    Used by the frontend to calculate risk-based lot sizes from the terminal's
+    live contract/tick specification instead of hard-coded pip assumptions.
+    """
+    symbol = (symbol or "").strip()
+    if not symbol:
+        raise Mt5CandlesError("symbol required")
+
+    with _session_lock:
+        with _Mt5IpcLock():
+            import MetaTrader5 as mt5  # type: ignore
+
+            if not _ensure_session_for_connection(connection_id):
+                raise Mt5CandlesError("mt5.initialize failed")
+
+            try:
+                mt5.symbol_select(symbol, True)
+            except Exception:
+                pass
+
+            info = mt5.symbol_info(symbol)
+            if info is None:
+                raise Mt5CandlesError(f"symbol_info unavailable for {symbol}")
+
+            tick = None
+            try:
+                tick = mt5.symbol_info_tick(symbol)
+            except Exception:
+                tick = None
+
+            return {
+                "symbol": symbol,
+                "digits": int(getattr(info, "digits", 0) or 0),
+                "point": float(getattr(info, "point", 0.0) or 0.0),
+                "trade_tick_size": float(getattr(info, "trade_tick_size", 0.0) or 0.0),
+                "trade_tick_value": float(getattr(info, "trade_tick_value", 0.0) or 0.0),
+                "trade_contract_size": float(getattr(info, "trade_contract_size", 0.0) or 0.0),
+                "volume_min": float(getattr(info, "volume_min", 0.0) or 0.0),
+                "volume_max": float(getattr(info, "volume_max", 0.0) or 0.0),
+                "volume_step": float(getattr(info, "volume_step", 0.0) or 0.0),
+                "currency_base": str(getattr(info, "currency_base", "") or ""),
+                "currency_profit": str(getattr(info, "currency_profit", "") or ""),
+                "bid": float(getattr(tick, "bid", 0.0) or 0.0) if tick else None,
+                "ask": float(getattr(tick, "ask", 0.0) or 0.0) if tick else None,
+            }
+
+
 def get_mt5_status(connection_id: str, symbol: str, timeframe: str) -> dict:
     """Return a small diagnostic snapshot for alignment debugging.
 

@@ -17,6 +17,7 @@ from supabase import Client, create_client
 from supabase.lib.client_options import SyncClientOptions
 
 logger = logging.getLogger(__name__)
+TERMINAL_TERMS_VERSION = "2026-03-28-v1"
 
 # ---------------------------------------------------------------------------
 # Client singleton
@@ -356,6 +357,125 @@ def log_event(
     # Always also log locally
     log_fn = logger.warning if level == "warn" else logger.error
     log_fn("[%s][%s] %s | details=%s", component, connection_id or "-", message, details)
+
+
+def _is_within_enabled_session(sessions: dict | None) -> bool:
+    """Mirror frontend/server session windows for runtime-side guard checks."""
+    if not sessions:
+        return True
+    if not sessions.get("london") and not sessions.get("newYork") and not sessions.get("asia"):
+        return False
+
+    now = datetime.now(timezone.utc)
+    utc_hour = now.hour + (now.minute / 60.0)
+
+    if sessions.get("london") and 8 <= utc_hour < 16.5:
+        return True
+    if sessions.get("newYork") and 13 <= utc_hour < 21:
+        return True
+    if sessions.get("asia") and (utc_hour >= 23 or utc_hour < 8):
+        return True
+
+    return False
+
+
+def _is_missing_relation_error(exc: Exception) -> bool:
+    msg = _format_supabase_exc(exc).lower()
+    return (
+        "does not exist" in msg
+        or "relation" in msg
+        or "schema cache" in msg
+    )
+
+
+def get_terminal_execution_blocker(
+    user_id: str | None,
+    connection_id: str,
+    trade_volume: float | None = None,
+) -> Optional[str]:
+    """
+    Mirror terminal execution guardrails so runtime-triggered Trade Now orders
+    can be rejected cleanly when account rules no longer allow execution.
+    """
+    if not user_id:
+        return None
+
+    client = get_client()
+    try:
+        settings_resp = (
+            client
+            .table("user_terminal_settings")
+            .select("preferences_json, terms_version")
+            .eq("user_id", user_id)
+            .maybeSingle()
+            .execute()
+        )
+    except Exception as exc:
+        if _is_missing_relation_error(exc):
+            return None
+        return f"Failed to validate terminal settings: {getattr(exc, 'message', str(exc))}"
+
+    settings = settings_resp.data or {}
+    if not settings or settings.get("terms_version") != TERMINAL_TERMS_VERSION:
+        return "Accept the current terminal terms before queueing live MT5 execution."
+
+    prefs = settings.get("preferences_json") or {}
+
+    max_trades_per_day = int(prefs.get("maxTradesPerDay") or 0)
+    if max_trades_per_day > 0:
+        try:
+            daily_resp = client.rpc(
+                "count_daily_trades",
+                {"p_connection_id": connection_id},
+            ).execute()
+            daily_trades = int(daily_resp.data or 0)
+        except Exception as exc:
+            return f"Failed to validate daily trade limit: {getattr(exc, 'message', str(exc))}"
+        if daily_trades >= max_trades_per_day:
+            return f"Daily trade limit reached: {daily_trades}/{max_trades_per_day}."
+
+    if not _is_within_enabled_session(prefs.get("sessions")):
+        return "No enabled trading session is currently active. Enable a session or wait for your session window."
+
+    max_position_size_lots = float(prefs.get("maxPositionSizeLots") or 0)
+    if max_position_size_lots > 0 and trade_volume and trade_volume > max_position_size_lots:
+        return f"Trade volume {trade_volume} lots exceeds your max position size of {max_position_size_lots} lots."
+
+    daily_loss_limit_usd = float(prefs.get("dailyLossLimitUsd") or 0)
+    daily_profit_target_usd = float(prefs.get("dailyProfitTargetUsd") or 0)
+    max_drawdown_percent = float(prefs.get("maxDrawdownPercent") or 0)
+    needs_heartbeat = any(v > 0 for v in (daily_loss_limit_usd, daily_profit_target_usd, max_drawdown_percent))
+
+    if needs_heartbeat:
+        try:
+            hb_resp = (
+                client
+                .table("mt5_worker_heartbeats")
+                .select("last_metrics")
+                .eq("connection_id", connection_id)
+                .maybeSingle()
+                .execute()
+            )
+            hb = hb_resp.data or {}
+        except Exception:
+            hb = {}
+
+        metrics = hb.get("last_metrics") or {}
+        if metrics:
+            balance = float(metrics.get("balance") or 0)
+            equity = float(metrics.get("equity") or 0)
+            floating_profit = float(metrics.get("profit") or 0)
+
+            if daily_loss_limit_usd > 0 and floating_profit < -daily_loss_limit_usd:
+                return f"Daily loss limit of ${daily_loss_limit_usd:g} reached (floating P&L: ${floating_profit:.2f})."
+            if daily_profit_target_usd > 0 and floating_profit >= daily_profit_target_usd:
+                return f"Daily profit target of ${daily_profit_target_usd:g} reached — new trades are locked for today."
+            if max_drawdown_percent > 0 and balance > 0:
+                drawdown = ((balance - equity) / balance) * 100.0
+                if drawdown >= max_drawdown_percent:
+                    return f"Max drawdown of {max_drawdown_percent:g}% reached (current: {drawdown:.1f}%)."
+
+    return None
 
 
 # ---------------------------------------------------------------------------

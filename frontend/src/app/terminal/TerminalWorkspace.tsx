@@ -110,8 +110,26 @@ type TradeJobRow = {
   tp: number | null;
   status: string;
   created_at: string;
+  idempotency_key?: string | null;
   error?: string | null;
   result?: Record<string, unknown> | null;
+};
+
+type RuntimeEventRow = {
+  id: string;
+  connection_id: string | null;
+  level: string;
+  component: string;
+  message: string;
+  created_at: string;
+  details?: {
+    event_kind?: string;
+    setup_id?: string;
+    symbol?: string;
+    side?: string;
+    reason?: string;
+    close_price?: number;
+  } | null;
 };
 
 type SetupDraft = {
@@ -126,6 +144,37 @@ type DynamicStopState = {
   stop: number | null;
   referenceLevel: number | null;
   message: string | null;
+};
+
+type SymbolTradeSpec = {
+  symbol: string;
+  digits?: number | null;
+  point?: number | null;
+  trade_tick_size?: number | null;
+  trade_tick_value?: number | null;
+  trade_contract_size?: number | null;
+  volume_min?: number | null;
+  volume_max?: number | null;
+  volume_step?: number | null;
+  currency_base?: string | null;
+  currency_profit?: string | null;
+  bid?: number | null;
+  ask?: number | null;
+  error?: string | null;
+};
+
+type LotSizingDetails = {
+  lotSize: number;
+  rawLot: number;
+  riskPerLot: number;
+  actualRisk: number;
+  stopDistancePips: number;
+  pipValuePerLot: number;
+  volumeMin: number;
+  volumeMax: number;
+  volumeStep: number;
+  method: "broker" | "fallback";
+  minLotExceedsRisk: boolean;
 };
 
 const navItems: Array<{ id: TerminalTab; label: string; icon: typeof Bot }> = [
@@ -198,6 +247,46 @@ function normalizeStopMode(value: unknown): StopMode {
 
 function formatStopModeLabel(stopMode: StopMode) {
   return stopMode === "ai_dynamic" ? "AI Dynamic" : "Manual";
+}
+
+function getStepDecimals(step: number) {
+  if (!Number.isFinite(step) || step <= 0) return 2;
+  const normalized = step.toString().toLowerCase();
+  if (normalized.includes("e-")) {
+    const [, exp] = normalized.split("e-");
+    return Number.parseInt(exp ?? "2", 10) || 2;
+  }
+  const [, fraction = ""] = normalized.split(".");
+  return fraction.length;
+}
+
+function roundVolumeDown(value: number, step: number) {
+  if (!(value > 0)) return 0;
+  if (!(step > 0)) return value;
+  const decimals = Math.min(8, Math.max(0, getStepDecimals(step)));
+  const floored = Math.floor((value + 1e-12) / step) * step;
+  return Number(floored.toFixed(decimals));
+}
+
+function getLegacyRiskPerLot(symbol: string, stopDistance: number) {
+  const pipSize = getPipSize(symbol);
+  const stopDistancePips = pipSize > 0 ? stopDistance / pipSize : 0;
+  const symbolUpper = symbol.toUpperCase();
+  const pipValuePerLot = symbolUpper.includes("JPY") ? 9.0 : symbolUpper.includes("XAU") ? 10.0 : 10.0;
+  return {
+    stopDistancePips,
+    pipValuePerLot,
+    riskPerLot: stopDistancePips * pipValuePerLot,
+  };
+}
+
+function getPipSize(symbol: string) {
+  const normalized = symbol.toUpperCase();
+  if (normalized.includes("JPY")) return 0.01;
+  if (normalized.includes("XAU") || normalized.includes("GOLD")) return 0.1;
+  if (normalized.includes("XAG") || normalized.includes("SILVER")) return 0.001;
+  if (normalized.includes("BTC") || normalized.includes("ETH")) return 1.0;
+  return 0.0001;
 }
 
 function getSelectedSetupTimeframe(): string {
@@ -371,6 +460,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     referenceLevel: null,
     message: null,
   });
+  const [symbolTradeSpec, setSymbolTradeSpec] = useState<SymbolTradeSpec | null>(null);
   const [dynamicStopLoading, setDynamicStopLoading] = useState(false);
   const [closingTickets, setClosingTickets] = useState<Set<number>>(new Set());
   const [orderType, setOrderType] = useState<"market" | "limit" | "stop">("market");
@@ -411,8 +501,58 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const openPositions: MT5Position[] = accountHeartbeat?.last_metrics?.open_positions ?? [];
   const riskAmount = riskMode === "percent" ? (accountEquity * riskPercent) / 100 : riskUsd;
   const stopDistance = validEntry && effectiveStop > 0 ? Math.abs(parsedEntry - effectiveStop) : 0;
-  const pipFactor = /JPY/i.test(displaySymbol) ? 100 : /XAU|BTC|ETH|OIL/i.test(displaySymbol) ? 10 : 10000;
-  const lotSuggestion = stopDistance > 0 ? Math.max(0.01, riskAmount / (stopDistance * pipFactor * 10)) : 0.01;
+  const lotSizing = useMemo<LotSizingDetails>(() => {
+    const volumeMin = Number(symbolTradeSpec?.volume_min ?? 0.01) > 0 ? Number(symbolTradeSpec?.volume_min) : 0.01;
+    const volumeMax = Number(symbolTradeSpec?.volume_max ?? 100) > 0 ? Number(symbolTradeSpec?.volume_max) : 100;
+    const volumeStep = Number(symbolTradeSpec?.volume_step ?? 0.01) > 0 ? Number(symbolTradeSpec?.volume_step) : 0.01;
+
+    const tickSize = Number(symbolTradeSpec?.trade_tick_size ?? 0);
+    const tickValue = Number(symbolTradeSpec?.trade_tick_value ?? 0);
+    const pipSize = getPipSize(displaySymbol);
+
+    let method: "broker" | "fallback" = "fallback";
+    let riskPerLot = 0;
+    let stopDistancePips = 0;
+    let pipValuePerLot = 0;
+
+    if (stopDistance > 0) {
+      stopDistancePips = pipSize > 0 ? stopDistance / pipSize : 0;
+      if (tickSize > 0 && tickValue > 0) {
+        pipValuePerLot = tickValue * (pipSize / tickSize);
+        riskPerLot = stopDistancePips * pipValuePerLot;
+        method = "broker";
+      } else {
+        const legacy = getLegacyRiskPerLot(displaySymbol, stopDistance);
+        stopDistancePips = legacy.stopDistancePips;
+        pipValuePerLot = legacy.pipValuePerLot;
+        riskPerLot = legacy.riskPerLot;
+      }
+    }
+
+    const rawLot = riskPerLot > 0 && riskAmount > 0 ? riskAmount / riskPerLot : volumeMin;
+    const roundedLot = rawLot > 0 ? roundVolumeDown(rawLot, volumeStep) : 0;
+    const lotSize = Number(
+      Math.min(volumeMax, Math.max(volumeMin, roundedLot > 0 ? roundedLot : volumeMin)).toFixed(
+        Math.min(8, Math.max(2, getStepDecimals(volumeStep)))
+      )
+    );
+    const actualRisk = riskPerLot > 0 ? riskPerLot * lotSize : 0;
+
+    return {
+      lotSize,
+      rawLot,
+      riskPerLot,
+      actualRisk,
+      stopDistancePips,
+      pipValuePerLot,
+      volumeMin,
+      volumeMax,
+      volumeStep,
+      method,
+      minLotExceedsRisk: riskPerLot > 0 && riskAmount > 0 && rawLot < volumeMin && actualRisk > riskAmount,
+    };
+  }, [displaySymbol, riskAmount, stopDistance, symbolTradeSpec]);
+  const lotSuggestion = lotSizing.lotSize;
   const pivotWindow = pivotWindowFromAiSensitivity(aiSensitivity);
   const targetSuggestion = useMemo(() => {
     if (!validEntry || stopDistance <= 0) return undefined;
@@ -421,6 +561,9 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
       : parsedEntry - stopDistance * riskRewardRatio;
     return Number(raw.toFixed(getDecimals(displaySymbol)));
   }, [displaySymbol, parsedEntry, riskRewardRatio, side, stopDistance, validEntry]);
+  const effectiveTakeProfit = typeof tpValue === "number" && Number.isFinite(tpValue) && tpValue > 0
+    ? tpValue
+    : targetSuggestion;
   const todaysTradeCount = useMemo(() => {
     const today = new Date();
     return recentJobs.filter((job) => {
@@ -433,6 +576,9 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const executionBlocker = useMemo(() => {
     if (!termsAccepted) return "Accept the current terminal terms before queueing live MT5 execution.";
     if (!(riskAmount > 0)) return "Risk amount must be greater than zero.";
+    if (lotSizing.minLotExceedsRisk) {
+      return `Minimum broker lot ${lotSizing.volumeMin.toFixed(2)} risks ${fmtCurrency(lotSizing.actualRisk)}, above your selected risk ${fmtCurrency(riskAmount)}.`;
+    }
     if (maxTradesPerDay > 0 && todaysTradeCount >= maxTradesPerDay) {
       return `Daily trade limit reached: ${todaysTradeCount}/${maxTradesPerDay}.`;
     }
@@ -457,7 +603,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
       }
     }
     return null;
-  }, [accountBalance, accountEquity, dailyLossLimitUsd, dailyProfitTargetUsd, lotSuggestion, maxDrawdownPercent, maxPositionSizeLots, maxTradesPerDay, openPositions, riskAmount, termsAccepted, todaysTradeCount]);
+  }, [accountBalance, accountEquity, dailyLossLimitUsd, dailyProfitTargetUsd, lotSizing.actualRisk, lotSizing.minLotExceedsRisk, lotSizing.volumeMin, lotSuggestion, maxDrawdownPercent, maxPositionSizeLots, maxTradesPerDay, openPositions, riskAmount, termsAccepted, todaysTradeCount]);
 
   useEffect(() => {
     try {
@@ -668,7 +814,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
         supabase.from("mt5_symbols").select("symbol, description, category").eq("connection_id", selectedConnectionId).order("symbol"),
         supabase.rpc("get_setups_for_connection", { p_connection_id: selectedConnectionId }),
         supabase.from("mt5_worker_heartbeats").select("connection_id, status, last_seen_at, last_metrics").eq("connection_id", selectedConnectionId).maybeSingle(),
-        supabase.from("trade_jobs").select("id, connection_id, symbol, side, volume, sl, tp, status, created_at, error, result").eq("connection_id", selectedConnectionId).order("created_at", { ascending: false }).limit(30),
+        supabase.from("trade_jobs").select("id, connection_id, symbol, side, volume, sl, tp, status, created_at, idempotency_key, error, result").eq("connection_id", selectedConnectionId).order("created_at", { ascending: false }).limit(30),
       ]);
 
       if (cancelled) return;
@@ -746,6 +892,49 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
       aiSensitivity,
     });
   }, [selectedSymbol, entryPrice, zonePercent, side, aiSensitivity]);
+
+  useEffect(() => {
+    if (!selectedConnectionId || !selectedSymbol) {
+      setSymbolTradeSpec(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const run = async () => {
+      try {
+        const url = `/api/symbol-spec?symbol=${encodeURIComponent(selectedSymbol)}&conn_id=${encodeURIComponent(selectedConnectionId)}`;
+        const resp = await fetch(url, { cache: "no-store" });
+        const data = (await resp.json()) as SymbolTradeSpec;
+        if (cancelled) return;
+        if (!resp.ok || data.error) {
+          setSymbolTradeSpec(null);
+          return;
+        }
+        setSymbolTradeSpec(data);
+      } catch {
+        if (!cancelled) {
+          setSymbolTradeSpec(null);
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedConnectionId, selectedSymbol]);
+
+  useEffect(() => {
+    if (targetSuggestion == null || !Number.isFinite(targetSuggestion) || targetSuggestion <= 0) return;
+    setTpValue((prev) => {
+      if (typeof prev === "number" && Math.abs(prev - targetSuggestion) < 1e-9) {
+        return prev;
+      }
+      return targetSuggestion;
+    });
+  }, [targetSuggestion]);
 
   useEffect(() => {
     if (stopMode !== "ai_dynamic") return;
@@ -833,7 +1022,13 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
         { event: "*", schema: "public", table: "trade_jobs", filter: `connection_id=eq.${selectedConnectionId}` },
         (payload) => {
           if (payload.eventType === "INSERT") {
-            setRecentJobs((prev) => [payload.new as TradeJobRow, ...prev].slice(0, 30));
+            const inserted = payload.new as TradeJobRow;
+            setRecentJobs((prev) => [inserted, ...prev].slice(0, 30));
+            if (typeof inserted.idempotency_key === "string" && inserted.idempotency_key.startsWith("trade_now:")) {
+              const msg = `AI system triggered ${inserted.symbol} — the MT5 order was queued.`;
+              setTradeNowResult({ ok: true, msg });
+              toast.success(msg);
+            }
           }
           if (payload.eventType === "UPDATE") {
             setRecentJobs((prev) => prev.map((row) => (row.id === payload.new.id ? { ...row, ...(payload.new as TradeJobRow) } : row)));
@@ -849,17 +1044,26 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
           setSetupsBySymbol((prev) => ({ ...prev, [row.symbol!]: { ...(prev[row.symbol!] ?? { symbol: row.symbol!, id: row.id } as SetupRow), ...(row as SetupRow) } }));
           setSetupIdsBySymbol((prev) => ({ ...prev, [row.symbol!]: row.id! }));
           if (typeof row.trade_now_active === "boolean") {
-            setTradeNowBySymbol((prev) => {
-              const wasArmed = prev[row.symbol!];
-              if (wasArmed && !row.trade_now_active) {
-                setTradeNowResult({ ok: true, msg: "TRADE FIRED — the runtime queued the MT5 order." });
-              }
-              return { ...prev, [row.symbol!]: row.trade_now_active! };
-            });
+            setTradeNowBySymbol((prev) => ({ ...prev, [row.symbol!]: row.trade_now_active! }));
           }
           if (row.symbol === selectedSymbol && row.state) {
             setActiveSetupState(row.state as SetupState);
           }
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "mt5_runtime_events", filter: `connection_id=eq.${selectedConnectionId}` },
+        (payload) => {
+          const event = payload.new as RuntimeEventRow;
+          const details = event.details ?? null;
+          if (details?.event_kind !== "trade_now_rejected" || !details.symbol) return;
+          const reason = typeof details.reason === "string" && details.reason.trim()
+            ? details.reason.trim()
+            : "AI system conditions were no longer valid for execution.";
+          const msg = `AI system trigger skipped for ${details.symbol} — ${reason}`;
+          setTradeNowResult({ ok: false, msg });
+          toast.error(msg);
         }
       )
       .on(
@@ -956,7 +1160,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
       });
       setSetupIdsBySymbol((prev) => ({ ...prev, [selectedSymbol]: setupId }));
       setTradeNowBySymbol((prev) => ({ ...prev, [selectedSymbol]: true }));
-      setTradeNowResult({ ok: true, msg: "ARMED — waiting for STALKING + matching structure break." });
+      setTradeNowResult({ ok: true, msg: "ARMED — waiting for STALKING + matching AI system trigger." });
       toast.success(`Trade Now armed for ${selectedSymbol}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to arm Trade Now";
@@ -987,7 +1191,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
         fd.set("side", side);
         fd.set("volume", String(Number(lotSuggestion.toFixed(2))));
         fd.set("sl", slValue ? String(slValue) : "");
-        fd.set("tp", tpValue ? String(tpValue) : "");
+        fd.set("tp", effectiveTakeProfit ? String(effectiveTakeProfit) : "");
         // Pending order signalling via comment prefix
         const pp = parseFloat(pendingPrice);
         if (orderType === "limit" && !isNaN(pp) && pp > 0) fd.set("comment", `__limit__:${pp}`);
@@ -1007,6 +1211,28 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const currentSetupId = selectedSymbol ? setupIdsBySymbol[selectedSymbol] : undefined;
   const tradeNowArmed = selectedSymbol ? Boolean(tradeNowBySymbol[selectedSymbol]) : false;
   const stateCfg = activeSetupState ? SETUP_STATE_CFG[activeSetupState] : null;
+  const validStopLoss = typeof slValue === "number" && Number.isFinite(slValue) && slValue > 0 && stopDistance > 0;
+  const validTakeProfit = typeof effectiveTakeProfit === "number" && Number.isFinite(effectiveTakeProfit) && effectiveTakeProfit > 0;
+  const tradeNowPrereqMsg = !currentSetupId
+    ? "Press Monitor Zone first so the runtime starts tracking state."
+    : !validStopLoss
+      ? "Set a valid stop loss before arming Trade Now."
+      : !validTakeProfit
+        ? "Risk-reward target is not ready yet. TP is derived automatically from your RR setting once entry and SL are valid."
+        : executionBlocker
+          ? executionBlocker
+          : "Trade Now is ready to arm.";
+  const tradeNowCanArm = Boolean(
+    currentSetupId
+    && selectedConnectionId
+    && validEntry
+    && validStopLoss
+    && validTakeProfit
+    && !tradeNowArmed
+    && !tradeNowSaving
+    && !setupSaving
+    && !executionBlocker
+  );
   const availableSymbols = [...new Set([...(symbols.map((row) => row.symbol)), ...(liveSymbols ?? [])])];
   // Fallback symbol list while SSE connects — same as ManualTradeCard SUBSCRIBED list
   const SUBSCRIBED_DEFAULT = ["BTCUSDm","ETHUSDm","EURUSDm","GBPUSDm","USDJPYm","XAUUSDm","USDCADm","AUDUSDm","NZDUSDm","USDCHFm","EURGBPm","USOILm"];
@@ -1178,24 +1404,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                     );
                   })}
                 </div>
-                <p className="text-xs leading-relaxed text-gray-500">{stateCfg?.desc ?? "Monitor a setup to start receiving runtime state updates."}</p>
-                <div className="space-y-2 rounded-lg border border-[#232323] bg-[#111] p-3">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500">Trade Automation</div>
-                  <p className="text-xs leading-relaxed text-gray-500">
-                    `Trade Now` is separate from zone monitoring. It arms a one-shot execution after the setup is already being tracked.
-                  </p>
-                  <Button
-                    onClick={handleTradeNow}
-                    disabled={tradeNowSaving || tradeNowArmed || !validEntry || !selectedConnectionId}
-                    className={`h-10 w-full ${tradeNowArmed ? "bg-orange-500/20 text-orange-300 hover:bg-orange-500/20" : "bg-orange-600 text-white hover:bg-orange-500"}`}
-                  >
-                    {tradeNowSaving ? "Arming…" : tradeNowArmed ? "ARMED" : "TRADE NOW"}
-                  </Button>
-                  {tradeNowResult && <InlineMessage ok={tradeNowResult.ok} message={tradeNowResult.msg} accent="orange" />}
-                </div>
+                <p className="text-xs leading-relaxed text-gray-500">{stateCfg?.desc ?? "Press Monitor Zone to start runtime state tracking for this setup."}</p>
                 {tradeNowArmed ? (
                   <div className="rounded-lg border border-orange-500/20 bg-orange-500/10 px-3 py-2 text-xs text-orange-300">
-                    Armed one-shot execution: the runtime will queue a 0.01-lot MT5 order on a matching structure break.
+                    Armed one-shot execution: the runtime will queue a 0.01-lot MT5 order on the next matching AI system trigger.
                   </div>
                 ) : null}
               </div>
@@ -1271,7 +1483,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               entryZoneLow={showEntryZones && zone ? zone.low : undefined}
               entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
               sl={showEntryZones ? slValue : undefined}
-              tp={showTPZones ? tpValue : undefined}
+              tp={showTPZones ? effectiveTakeProfit : undefined}
               forming={forming}
               lastClose={lastClose}
               className="w-full"
@@ -1297,8 +1509,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                   <Input type="number" step="any" value={slValue ?? ""} onChange={(e) => setSlValue(e.target.value ? parseFloat(e.target.value) : undefined)} className="border-[#2b2b2b] bg-[#0c0c0c] text-white" />
                 </div>
                 <div className="xl:col-span-1">
-                  <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">TP</Label>
-                  <Input type="number" step="any" value={tpValue ?? ""} onChange={(e) => setTpValue(e.target.value ? parseFloat(e.target.value) : undefined)} className="border-[#2b2b2b] bg-[#0c0c0c] text-white" />
+                  <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">TP (from RR)</Label>
+                  <Input type="number" step="any" value={effectiveTakeProfit ?? ""} readOnly className="border-[#2b2b2b] bg-[#0c0c0c] text-white" />
                 </div>
                 <div className="xl:col-span-1">
                   <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">Order Type</Label>
@@ -1335,6 +1547,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                 <div className="rounded-lg bg-[#0c0c0c] p-3">Suggested lots <span className="block pt-1 text-sm font-semibold text-white">{lotSuggestion.toFixed(2)}</span></div>
                 <div className="rounded-lg bg-[#0c0c0c] p-3">Stop mode <span className="block pt-1 text-sm font-semibold text-white">{formatStopModeLabel(stopMode)}</span></div>
               </div>
+              <div className="mt-2 text-[11px] text-gray-500">Lot sizing source: <span className="font-semibold text-gray-200">{lotSizing.method === "broker" ? "broker pip value + volume step" : "fallback pip estimate"}</span></div>
+              <div className="mt-1 text-[11px] text-gray-500">Stop distance: <span className="font-semibold text-gray-200">{lotSizing.stopDistancePips > 0 ? lotSizing.stopDistancePips.toFixed(2) : "0.00"} pips</span> · Pip value/lot: <span className="font-semibold text-gray-200">{lotSizing.pipValuePerLot > 0 ? fmtCurrency(lotSizing.pipValuePerLot) : "—"}</span></div>
               <div className="mt-2 text-[11px] text-gray-500">Feed status: <span className="font-semibold text-gray-200">{isConnected ? "LIVE" : "Connecting"}</span></div>
               {manualResult && <div className="mt-3"><InlineMessage ok={manualResult.ok} message={manualResult.msg} /></div>}
             </div>
@@ -1478,6 +1692,23 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                     Risk settings sync: {settingsSyncState === "saved" ? "server + local saved" : settingsSyncState === "saving" ? "saving…" : settingsSyncState === "pending-migration" ? "waiting for terminal settings migration" : settingsSyncState === "error" ? "local saved; server sync failed" : "local ready"}.
                   </div>
                 )}
+                <div className="space-y-2 rounded-lg border border-[#232323] bg-[#111] p-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500">Trade Automation</div>
+                  <p className="text-xs leading-relaxed text-gray-500">
+                    Monitor Zone starts state tracking first. After SL, TP, and risk checks are valid, you can arm `Trade Now` at the end here.
+                  </p>
+                  <div className="rounded-lg border border-[#1f1f1f] bg-[#0c0c0c] px-3 py-2 text-[11px] text-gray-400">
+                    {tradeNowPrereqMsg}
+                  </div>
+                  <Button
+                    onClick={handleTradeNow}
+                    disabled={!tradeNowCanArm}
+                    className={`h-10 w-full ${tradeNowArmed ? "bg-orange-500/20 text-orange-300 hover:bg-orange-500/20" : tradeNowCanArm ? "bg-orange-600 text-white hover:bg-orange-500" : "bg-[#1a1a1a] text-gray-500 hover:bg-[#1a1a1a]"}`}
+                  >
+                    {tradeNowSaving ? "Arming…" : tradeNowArmed ? "ARMED" : "TRADE NOW"}
+                  </Button>
+                  {tradeNowResult && <InlineMessage ok={tradeNowResult.ok} message={tradeNowResult.msg} accent="orange" />}
+                </div>
               </div>
             </section>
 
@@ -1815,7 +2046,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               entryZoneLow={showEntryZones && zone ? zone.low : undefined}
               entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
               sl={showEntryZones ? slValue : undefined}
-              tp={showTPZones ? tpValue : undefined}
+              tp={showTPZones ? effectiveTakeProfit : undefined}
               forming={forming}
               lastClose={lastClose}
               className="w-full"
@@ -1839,8 +2070,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               <Input type="number" step="any" value={slValue ?? ""} onChange={(e) => setSlValue(e.target.value ? parseFloat(e.target.value) : undefined)} className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
             </div>
             <div>
-              <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">TP</Label>
-              <Input type="number" step="any" value={tpValue ?? ""} onChange={(e) => setTpValue(e.target.value ? parseFloat(e.target.value) : undefined)} className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+              <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">TP (from RR)</Label>
+              <Input type="number" step="any" value={effectiveTakeProfit ?? ""} readOnly className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
             </div>
           </div>
           <Button onClick={handlePlaceTrade} disabled={isPending || !selectedConnectionId || !selectedSymbol} className="h-10 w-full bg-orange-600 text-white hover:bg-orange-500">

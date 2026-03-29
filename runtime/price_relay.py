@@ -727,6 +727,9 @@ class RelayHandler(BaseHTTPRequestHandler):
         elif path == "/prices":
             self._handle_get_prices(qs)
 
+        elif path == "/symbol-spec":
+            self._handle_get_symbol_spec(qs)
+
         elif path == "/debug/mt5_status":
             self._handle_debug_mt5_status(qs)
 
@@ -883,6 +886,27 @@ class RelayHandler(BaseHTTPRequestHandler):
                     prices.update(syms)
         body = json.dumps({"prices": prices}).encode()
         self._send(200, body)
+
+    def _handle_get_symbol_spec(self, qs: dict):
+        """GET /symbol-spec?symbol=BTCUSDm&conn_id=... — broker sizing metadata."""
+        symbol = (qs.get("symbol", [""])[0]).strip()
+        conn_id = (qs.get("conn_id", [""])[0]).strip()
+
+        if not symbol:
+            self._send(400, b'{"error":"symbol required"}')
+            return
+        if not conn_id:
+            self._send(400, b'{"error":"conn_id required"}')
+            return
+
+        try:
+            from runtime.mt5_candles import get_symbol_trade_specs
+
+            spec = get_symbol_trade_specs(conn_id, symbol)
+            self._send(200, json.dumps(spec).encode())
+        except Exception as exc:
+            log.warning(f"GET /symbol-spec error conn={conn_id[:8]} symbol={symbol}: {exc!r}")
+            self._send(200, json.dumps({"symbol": symbol, "error": repr(exc)}).encode())
 
     def _handle_sse_stream(self, qs: dict) -> None:
         """GET /stream  — Server-Sent Events price feed.

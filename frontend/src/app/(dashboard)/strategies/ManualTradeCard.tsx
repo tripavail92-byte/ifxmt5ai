@@ -491,7 +491,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
       setTradeNowBySymbol(prev => ({ ...prev, [formSymbol]: true }));
       setTradeNowResult({
         ok:  true,
-        msg: "ARMED — waiting for STALKING state + matching structure break",
+        msg: "ARMED — waiting for STALKING state + matching AI system trigger",
       });
     } catch (err: unknown) {
       setTradeNowResult({ ok: false, msg: err instanceof Error ? err.message : "Arm failed" });
@@ -853,7 +853,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                   <div className="flex items-center gap-2 px-2.5 py-1.5 rounded border border-orange-500/30 bg-orange-500/10">
                     <span className="w-2 h-2 rounded-full bg-orange-400 animate-pulse shrink-0" />
                     <span className="text-[10px] font-bold text-orange-400 tracking-wide">
-                      ARMED — waiting for STALKING + structure break
+                      ARMED — waiting for STALKING + AI system trigger
                     </span>
                   </div>
                 )}

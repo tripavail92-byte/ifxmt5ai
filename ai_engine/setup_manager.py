@@ -129,6 +129,7 @@ class SetupManager:
         self._write_q:  queue.Queue = queue.Queue(maxsize=WRITE_QUEUE_MAXSIZE)
         self._ready     = False
         self._db        = None
+        self._db_module = None
         self._started   = False
 
         # Structure detection dedupe
@@ -374,8 +375,27 @@ class SetupManager:
                         (side_val == 'sell' and evt.break_dir == 'bear')
                     )
                     if direction_match:
+                        rejection_reason = self._get_trade_now_rejection_reason(
+                            setup=setup,
+                            close_price=float(evt.close_price),
+                        )
+                        if rejection_reason:
+                            log.warning(
+                                "[trade_now] Armed setup %s skipped by AI system: %s",
+                                setup_id[:8], rejection_reason,
+                            )
+                            setup.trade_now_active = False
+                            self._queue_trade_now_rejection(
+                                setup_id=setup_id,
+                                connection_id=setup_conn_id,
+                                symbol=getattr(setup, 'symbol', ''),
+                                side=side_val,
+                                reason=rejection_reason,
+                                close_price=float(evt.close_price),
+                            )
+                            continue
                         log.info(
-                            "[trade_now] Armed setup %s matched %s_%s — queuing trade",
+                            "[trade_now] Armed setup %s matched AI trigger %s_%s — queuing trade",
                             setup_id[:8], evt.break_dir, evt.event_type,
                         )
                         # Deactivate in memory immediately (one-shot — no double-fire)
@@ -677,6 +697,71 @@ class SetupManager:
                 setup_id[:8],
             )
 
+    def _queue_trade_now_rejection(
+        self,
+        setup_id: str,
+        connection_id: str,
+        symbol: str,
+        side: str,
+        reason: str,
+        close_price: float,
+    ) -> None:
+        """Persist a user-facing AI-system rejection for an armed Trade Now setup."""
+        try:
+            self._write_q.put_nowait({
+                "type": "trade_now_rejected",
+                "setup_id": setup_id,
+                "connection_id": connection_id,
+                "symbol": symbol,
+                "side": side,
+                "reason": reason,
+                "close_price": close_price,
+            })
+        except queue.Full:
+            log.warning(
+                "[setup_manager] write queue full — dropped trade_now rejection for %s",
+                setup_id[:8],
+            )
+
+    def _get_trade_now_rejection_reason(self, setup, close_price: float) -> Optional[str]:
+        """Return a user-facing reason when an AI trigger should not queue execution."""
+        side = str(getattr(setup, "side", "") or "")
+        sl = float(getattr(setup, "loss_edge", 0.0) or 0.0)
+        tp = float(getattr(setup, "target", 0.0) or 0.0)
+
+        if close_price <= 0:
+            return "AI system trigger fired, but the live execution price was unavailable."
+        if sl <= 0 or tp <= 0:
+            return "AI system trigger fired, but the stop or target is missing."
+
+        if side == "buy":
+            if sl >= close_price:
+                return "AI system trigger fired, but the protective stop is no longer below the market price."
+            if tp <= close_price:
+                return "AI system trigger fired, but the target is already at or below the market price."
+        elif side == "sell":
+            if sl <= close_price:
+                return "AI system trigger fired, but the protective stop is no longer above the market price."
+            if tp >= close_price:
+                return "AI system trigger fired, but the target is already at or above the market price."
+
+        risk_distance = abs(close_price - sl)
+        reward_distance = abs(tp - close_price)
+        if risk_distance <= 0 or reward_distance <= 0:
+            return "AI system trigger fired, but there is no execution room left between stop and target."
+
+        user_id = getattr(setup, "user_id", None)
+        if user_id:
+            blocker = self._get_db_module().get_terminal_execution_blocker(
+                user_id=user_id,
+                connection_id=str(getattr(setup, "connection_id", "") or ""),
+                trade_volume=0.01,
+            )
+            if blocker:
+                return blocker
+
+        return None
+
     def _write_loop(self) -> None:
         """Drain the write queue and persist each state change to Supabase."""
         while True:
@@ -816,14 +901,45 @@ class SetupManager:
             )
             return
 
+        if kind == "trade_now_rejected":
+            setup_id = item["setup_id"]
+            connection_id = item["connection_id"]
+            symbol = item["symbol"]
+            reason = item["reason"]
+
+            db.table("trading_setups") \
+              .update({"trade_now_active": False}) \
+              .eq("id", setup_id) \
+              .execute()
+
+            self._get_db_module().log_event(
+                "warn",
+                "scheduler",
+                f"AI system trigger skipped for {symbol} — {reason}",
+                connection_id,
+                {
+                    "event_kind": "trade_now_rejected",
+                    "setup_id": setup_id,
+                    "symbol": symbol,
+                    "side": item.get("side"),
+                    "reason": reason,
+                    "close_price": item.get("close_price"),
+                },
+            )
+            return
+
     # ------------------------------------------------------------------ #
     # Supabase client                                                      #
     # ------------------------------------------------------------------ #
 
     def _get_db(self):
         if self._db is None:
+            self._db = self._get_db_module().get_client()
+        return self._db
+
+    def _get_db_module(self):
+        if self._db_module is None:
             _ensure_path()
-            # Import db_client from the runtime/ sibling directory
             runtime_dir = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                 "runtime",
@@ -831,8 +947,8 @@ class SetupManager:
             if runtime_dir not in sys.path:
                 sys.path.insert(0, runtime_dir)
             import db_client
-            self._db = db_client.get_client()
-        return self._db
+            self._db_module = db_client
+        return self._db_module
 
     # ------------------------------------------------------------------ #
     # Introspection helpers (useful for /health endpoint)                  #
