@@ -1250,7 +1250,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     && !setupSaving
     && !executionBlocker
   );
-  const availableSymbols = [...new Set([...(symbols.map((row) => row.symbol)), ...(liveSymbols ?? [])])];
+  const dbSymbols = [...new Set(symbols.map((row) => row.symbol).filter(Boolean))];
+  const liveSelectableSymbols = [...new Set((liveSymbols ?? []).filter(Boolean))];
+  const availableSymbols = liveSelectableSymbols.length > 0 ? liveSelectableSymbols : dbSymbols;
+  const hasLiveQuoteForSelected = selectedSymbol ? Boolean(prices[selectedSymbol]) : false;
   // Fallback symbol list while SSE connects — same as ManualTradeCard SUBSCRIBED list
   const SUBSCRIBED_DEFAULT = ["BTCUSDm","ETHUSDm","EURUSDm","GBPUSDm","USDJPYm","XAUUSDm","USDCADm","AUDUSDm","NZDUSDm","USDCHFm","EURGBPm","USOILm"];
   const rawTabSymbols = liveSymbols.length > 0 ? liveSymbols : availableSymbols.length > 0 ? availableSymbols : SUBSCRIBED_DEFAULT;
@@ -1305,6 +1308,12 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                     ))}
                   </select>
                 </div>
+
+                {selectedSymbol && !hasLiveQuoteForSelected && liveSelectableSymbols.length > 0 && (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+                    No live MT5 quote is available for {selectedSymbol} on this connection. Switch to a live symbol to see streaming prices.
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-2">
                   <button
