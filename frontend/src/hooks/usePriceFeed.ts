@@ -60,6 +60,12 @@ export function usePriceFeed(connId?: string): PriceFeedState {
   const lastEventAtRef = useRef<number>(0);
   const mountedRef = useRef(true);
 
+  const acceptsConn = useCallback((eventConnId?: string | null) => {
+    if (!connId) return true;
+    if (!eventConnId) return true;
+    return eventConnId === connId;
+  }, [connId]);
+
   const connect = useCallback(() => {
     if (!mountedRef.current) return;
 
@@ -92,10 +98,12 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       try {
         lastEventAtRef.current = Date.now();
         const d = JSON.parse(e.data) as {
+          connection_id?: string;
           prices?: Record<string, PriceSnapshot>;
           forming?: Record<string, CandleBar>;
           symbols?: string[];
         };
+        if (!acceptsConn(d.connection_id)) return;
         setState(s => ({
           ...s,
           isConnected: true,
@@ -110,7 +118,8 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       if (!mountedRef.current) return;
       try {
         lastEventAtRef.current = Date.now();
-        const d = JSON.parse(e.data) as { prices: Record<string, PriceSnapshot> };
+        const d = JSON.parse(e.data) as { connection_id?: string; prices: Record<string, PriceSnapshot> };
+        if (!acceptsConn(d.connection_id)) return;
         setState(s => ({
           ...s,
           prices: { ...s.prices, ...d.prices },
@@ -122,7 +131,8 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       if (!mountedRef.current) return;
       try {
         lastEventAtRef.current = Date.now();
-        const d = JSON.parse(e.data) as { forming: Record<string, CandleBar> };
+        const d = JSON.parse(e.data) as { connection_id?: string; forming: Record<string, CandleBar> };
+        if (!acceptsConn(d.connection_id)) return;
         setState(s => ({
           ...s,
           forming: { ...s.forming, ...d.forming },
@@ -134,7 +144,8 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       if (!mountedRef.current) return;
       try {
         lastEventAtRef.current = Date.now();
-        const d = JSON.parse(e.data) as { symbol: string; bar: CandleBar };
+        const d = JSON.parse(e.data) as { connection_id?: string; symbol: string; bar: CandleBar };
+        if (!acceptsConn(d.connection_id)) return;
         if (d.symbol && d.bar) {
           setState(s => ({ ...s, lastClose: { symbol: d.symbol, bar: d.bar } }));
         }
@@ -145,7 +156,8 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       if (!mountedRef.current) return;
       try {
         lastEventAtRef.current = Date.now();
-        const d = JSON.parse(e.data) as { symbols?: string[] };
+        const d = JSON.parse(e.data) as { connection_id?: string; symbols?: string[] };
+        if (!acceptsConn(d.connection_id)) return;
         if (d.symbols?.length) {
           setState(s => ({ ...s, symbols: d.symbols! }));
         }
@@ -156,7 +168,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       lastEventAtRef.current = Date.now();
     });
 
-  }, [connId]);
+  }, [acceptsConn, connId]);
 
   const pollPrices = useCallback(async () => {
     try {
@@ -186,6 +198,17 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     } catch {
     }
   }, [connId, connect]);
+
+  useEffect(() => {
+    setState({
+      prices: {},
+      forming: {},
+      lastClose: null,
+      symbols: [],
+      isConnected: false,
+    });
+    lastEventAtRef.current = Date.now();
+  }, [connId]);
 
   useEffect(() => {
     mountedRef.current = true;

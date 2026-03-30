@@ -266,8 +266,9 @@ latest_price   = collections.defaultdict(dict)   # conn_id -> {symbol -> {bid,as
 config_symbols = collections.defaultdict(list)   # conn_id -> [symbol, ...]
 
 # ─── SSE client registry ──────────────────────────────────────────────────────
-# Each connected browser gets a Queue. The broadcaster pushes msgs every 200ms.
-_sse_clients: list = []                  # list[queue.Queue]
+# Each connected browser gets a queue + connection filter. The broadcaster
+# only forwards events for that connection to avoid cross-account symbol bleed.
+_sse_clients: list = []                  # list[dict(queue=queue.Queue, conn_id=str)]
 _sse_lock    = threading.Lock()
 
 # Pending tick accumulator: filled by _handle_tick_batch, drained by broadcaster
@@ -279,22 +280,27 @@ SSE_INTERVAL_S = float(os.getenv("SSE_INTERVAL_MS", "200")) / 1000  # default 20
 
 
 def _broadcast_sse_event(msg: dict) -> None:
-    """Push msg to every connected SSE client queue (non-blocking)."""
+    """Push msg to matching SSE clients only (non-blocking)."""
     event_type = msg.get("type", "message")
+    target_conn_id = str(msg.get("connection_id") or "").strip()
     payload = (f"event: {event_type}\ndata: {json.dumps(msg)}\n\n").encode()
     dead = []
     with _sse_lock:
         clients = list(_sse_clients)
-    for q in clients:
+    for client in clients:
+        q = client.get("queue")
+        client_conn_id = str(client.get("conn_id") or "").strip()
+        if client_conn_id and target_conn_id and client_conn_id != target_conn_id:
+            continue
         try:
             q.put_nowait(payload)
         except queue.Full:
-            dead.append(q)
+            dead.append(client)
     if dead:
         with _sse_lock:
-            for q in dead:
+            for client in dead:
                 try:
-                    _sse_clients.remove(q)
+                    _sse_clients.remove(client)
                 except ValueError:
                     pass
 
@@ -932,28 +938,48 @@ class RelayHandler(BaseHTTPRequestHandler):
             with _state_lock:
                 price_snapshot   = dict(latest_price.get(conn_id, {}))
                 forming_snapshot = dict(forming.get(conn_id, {}))
+                symbol_snapshot  = list(config_symbols.get(conn_id, []))
+                if not symbol_snapshot:
+                    symbol_snapshot = sorted(set(price_snapshot.keys()) | set(forming_snapshot.keys()))
             if price_snapshot:
                 init_msg = json.dumps({
-                    "type": "prices",
+                    "type": "init",
                     "connection_id": conn_id,
+                    "symbols": symbol_snapshot,
                     "prices": price_snapshot,
+                    "forming": forming_snapshot,
                 })
-                self.wfile.write(f"event: prices\ndata: {init_msg}\n\n".encode())
-            if forming_snapshot:
+                self.wfile.write(f"event: init\ndata: {init_msg}\n\n".encode())
+            else:
+                init_msg = json.dumps({
+                    "type": "init",
+                    "connection_id": conn_id,
+                    "symbols": symbol_snapshot,
+                    "prices": {},
+                    "forming": forming_snapshot,
+                })
+                self.wfile.write(f"event: init\ndata: {init_msg}\n\n".encode())
+            if forming_snapshot and not price_snapshot:
                 forming_msg = json.dumps({
                     "type": "candle_update",
                     "connection_id": conn_id,
                     "forming": forming_snapshot,
                 })
                 self.wfile.write(f"event: candle_update\ndata: {forming_msg}\n\n".encode())
-            self.wfile.write(b"event: connected\ndata: {\"status\":\"ok\"}\n\n")
+            connected_msg = json.dumps({
+                "type": "connected",
+                "connection_id": conn_id,
+                "symbols": symbol_snapshot,
+                "status": "ok",
+            })
+            self.wfile.write(f"event: connected\ndata: {connected_msg}\n\n".encode())
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             return
 
         client_q: queue.Queue = queue.Queue(maxsize=30)
         with _sse_lock:
-            _sse_clients.append(client_q)
+            _sse_clients.append({"queue": client_q, "conn_id": conn_id})
         stats["sse_active"] = stats.get("sse_active", 0) + 1
         log.info(f"[SSE] client connected  conn_id={conn_id[:8]}  total={len(_sse_clients)}")
 
@@ -972,7 +998,10 @@ class RelayHandler(BaseHTTPRequestHandler):
         finally:
             with _sse_lock:
                 try:
-                    _sse_clients.remove(client_q)
+                    for client in list(_sse_clients):
+                        if client.get("queue") is client_q:
+                            _sse_clients.remove(client)
+                            break
                 except ValueError:
                     pass
             stats["sse_active"] = max(0, stats.get("sse_active", 1) - 1)

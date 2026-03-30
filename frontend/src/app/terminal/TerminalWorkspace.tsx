@@ -1253,7 +1253,11 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const availableSymbols = [...new Set([...(symbols.map((row) => row.symbol)), ...(liveSymbols ?? [])])];
   // Fallback symbol list while SSE connects — same as ManualTradeCard SUBSCRIBED list
   const SUBSCRIBED_DEFAULT = ["BTCUSDm","ETHUSDm","EURUSDm","GBPUSDm","USDJPYm","XAUUSDm","USDCADm","AUDUSDm","NZDUSDm","USDCHFm","EURGBPm","USOILm"];
-  const tabSymbols = liveSymbols.length > 0 ? liveSymbols : availableSymbols.length > 0 ? availableSymbols : SUBSCRIBED_DEFAULT;
+  const rawTabSymbols = liveSymbols.length > 0 ? liveSymbols : availableSymbols.length > 0 ? availableSymbols : SUBSCRIBED_DEFAULT;
+  const tabSymbols = [
+    ...(displaySymbol ? [displaySymbol] : []),
+    ...rawTabSymbols,
+  ].filter((sym, index, arr) => Boolean(sym) && arr.indexOf(sym) === index);
 
   function renderAITrading() {
     return (

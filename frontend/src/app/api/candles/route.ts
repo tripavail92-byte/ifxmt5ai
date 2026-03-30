@@ -118,13 +118,11 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // Fast-path: serve from in-memory state (populated via /api/mt5/ingest).
-  // Always compare exact conn_id vs merged-all-connections and use whichever
-  // has more bars. This handles conn_id drift where exact has only 1 forming
-  // bar but merged state has full history.
+  // Fast-path: serve from connection-scoped in-memory state only.
+  // Do not merge bars from other connections here; that can leak unrelated
+  // symbol streams into the active chart and create visual gaps.
   const exactStateBars = mt5State.getCandles(connId, symbol, tf, count);
-  const mergedStateBars = mt5State.getCandles("", symbol, tf, count);
-  let stateBars = mergedStateBars.length > exactStateBars.length ? mergedStateBars : exactStateBars;
+  const stateBars = exactStateBars;
 
   // If state has enough bars, trust it and skip relay fetch.
   if (stateBars.length >= MIN_STATE_BARS) {
@@ -137,7 +135,6 @@ export async function GET(req: NextRequest) {
         bars: stateBars,
         debug: {
           exact_state_count: exactStateBars.length,
-          merged_state_count: mergedStateBars.length,
           instance: INSTANCE_ID,
         },
       },
@@ -156,7 +153,6 @@ export async function GET(req: NextRequest) {
         bars: stateBars,
         debug: {
           exact_state_count: exactStateBars.length,
-          merged_state_count: mergedStateBars.length,
           instance: INSTANCE_ID,
         },
       },
@@ -192,7 +188,6 @@ export async function GET(req: NextRequest) {
         bars: stateBars,
         debug: {
           exact_state_count: exactStateBars.length,
-          merged_state_count: mergedStateBars.length,
           instance: INSTANCE_ID,
         },
       },
@@ -221,7 +216,6 @@ export async function GET(req: NextRequest) {
       bars: bestBars,
       debug: {
         exact_state_count: exactStateBars.length,
-        merged_state_count: mergedStateBars.length,
         relay_count: relay.bars.length,
         instance: INSTANCE_ID,
       },

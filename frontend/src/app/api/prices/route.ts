@@ -53,9 +53,6 @@ export async function GET(req: NextRequest) {
   const symbol = searchParams.get("symbol")  ?? undefined;
 
   let all = mt5State.getPrices(connId);
-  if (connId && !Object.keys(all).length) {
-    all = mt5State.getPrices();
-  }
 
   let prices = symbol ? (all[symbol] ? { [symbol]: all[symbol] } : {}) : all;
 
@@ -68,9 +65,7 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const symbols = connId
-    ? (mt5State.getSymbols(connId).length ? mt5State.getSymbols(connId) : mt5State.getSymbols())
-    : mt5State.getSymbols();
+  const symbols = connId ? mt5State.getSymbols(connId) : mt5State.getSymbols();
 
   return NextResponse.json(
     { prices, symbols },
