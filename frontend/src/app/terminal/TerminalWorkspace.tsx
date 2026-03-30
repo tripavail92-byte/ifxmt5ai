@@ -481,6 +481,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     [connections, selectedConnectionId]
   );
 
+  const liveQuoteSymbols = useMemo(
+    () => Object.keys(prices).filter((sym) => Boolean(prices[sym])),
+    [prices]
+  );
   const livePrice = selectedSymbol ? prices[selectedSymbol] : undefined;
   const parsedEntry = parseFloat(entryPrice);
   const validEntry = Number.isFinite(parsedEntry) && parsedEntry > 0;
@@ -488,7 +492,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     () => (validEntry ? calcZone(parsedEntry, zonePercent) : null),
     [parsedEntry, validEntry, zonePercent]
   );
-  const displaySymbol = selectedSymbol || liveSymbols[0] || symbols[0]?.symbol || "EURUSD";
+  const displaySymbol = selectedSymbol || liveQuoteSymbols[0] || liveSymbols[0] || symbols[0]?.symbol || "EURUSD";
   const aiManagedExecution = stopMode === "ai_dynamic";
   const effectiveStop = useMemo(() => {
     if (!selectedSymbol) return 0;
@@ -846,14 +850,15 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
 
   useEffect(() => {
     if (!selectedConnectionId) return;
-    const liveAvailable = [...new Set((liveSymbols ?? []).filter(Boolean))];
+    const liveAvailable = [...new Set(liveQuoteSymbols.filter(Boolean))];
+    const streamAvailable = [...new Set((liveSymbols ?? []).filter(Boolean))];
     const dbAvailable = [...new Set(symbols.map((row) => row.symbol).filter(Boolean))];
-    const available = liveAvailable.length > 0 ? liveAvailable : dbAvailable;
+    const available = liveAvailable.length > 0 ? liveAvailable : streamAvailable.length > 0 ? streamAvailable : dbAvailable;
     if (!available.length) return;
     if (!selectedSymbol || !available.includes(selectedSymbol)) {
       setSelectedSymbol(available[0]);
     }
-  }, [selectedConnectionId, symbols, liveSymbols, selectedSymbol]);
+  }, [selectedConnectionId, symbols, liveSymbols, liveQuoteSymbols, selectedSymbol]);
 
   useEffect(() => {
     if (!selectedSymbol) return;
@@ -1253,12 +1258,13 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     && !executionBlocker
   );
   const dbSymbols = [...new Set(symbols.map((row) => row.symbol).filter(Boolean))];
-  const liveSelectableSymbols = [...new Set((liveSymbols ?? []).filter(Boolean))];
-  const availableSymbols = liveSelectableSymbols.length > 0 ? liveSelectableSymbols : dbSymbols;
+  const liveSelectableSymbols = [...new Set(liveQuoteSymbols.filter(Boolean))];
+  const streamSelectableSymbols = [...new Set((liveSymbols ?? []).filter(Boolean))];
+  const availableSymbols = liveSelectableSymbols.length > 0 ? liveSelectableSymbols : streamSelectableSymbols.length > 0 ? streamSelectableSymbols : dbSymbols;
   const hasLiveQuoteForSelected = selectedSymbol ? Boolean(prices[selectedSymbol]) : false;
   // Fallback symbol list while SSE connects — same as ManualTradeCard SUBSCRIBED list
   const SUBSCRIBED_DEFAULT = ["BTCUSDm","ETHUSDm","EURUSDm","GBPUSDm","USDJPYm","XAUUSDm","USDCADm","AUDUSDm","NZDUSDm","USDCHFm","EURGBPm","USOILm"];
-  const rawTabSymbols = liveSymbols.length > 0 ? liveSymbols : availableSymbols.length > 0 ? availableSymbols : SUBSCRIBED_DEFAULT;
+  const rawTabSymbols = liveSelectableSymbols.length > 0 ? liveSelectableSymbols : availableSymbols.length > 0 ? availableSymbols : SUBSCRIBED_DEFAULT;
   const tabSymbols = [
     ...(displaySymbol ? [displaySymbol] : []),
     ...rawTabSymbols,
