@@ -4,8 +4,8 @@
  * Server-Sent Events stream for live MT5 price data.
  *
  * Two modes:
- *  1. RELAY_STREAM_URL is set → proxy relay's SSE directly (Cloudflare Tunnel, ~80ms)
- *  2. No RELAY_STREAM_URL    → stream from Railway in-memory mt5State (fallback)
+ *  1. Warm Railway state     → stream directly from in-memory `mt5State`
+ *  2. Cold Railway state     → proxy relay SSE, then fall back to `mt5State` on timeout/error
  *
  * Events emitted:
  *   connected     — {type, connection_id, symbols[]}
@@ -34,6 +34,13 @@ const RELAY_STREAM_TIMEOUT_MS = Math.max(
 function sseMessage(payload: object): Uint8Array {
   const type = (payload as { type?: string }).type ?? "message";
   return encoder.encode(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`);
+}
+
+function hasWarmState(connFilter?: string): boolean {
+  const symbols = mt5State.getSymbols(connFilter);
+  if (symbols.length > 0) return true;
+  const prices = mt5State.getPrices(connFilter);
+  return Object.keys(prices).length > 0;
 }
 
 /** Fallback: stream from Railway in-memory mt5State */
@@ -115,6 +122,10 @@ async function proxyRelayStream(req: NextRequest, connFilter?: string): Promise<
 
 export async function GET(req: NextRequest) {
   const connFilter = req.nextUrl.searchParams.get("conn_id") ?? undefined;
+
+  if (hasWarmState(connFilter)) {
+    return streamFromState(req, connFilter);
+  }
 
   if (RELAY_STREAM_URL) {
     return proxyRelayStream(req, connFilter);
