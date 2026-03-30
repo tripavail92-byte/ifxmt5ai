@@ -26,6 +26,10 @@ export const dynamic = "force-dynamic";
 
 const encoder = new TextEncoder();
 const RELAY_STREAM_URL = (process.env.RELAY_STREAM_URL ?? "").trim();
+const RELAY_STREAM_TIMEOUT_MS = Math.max(
+  1000,
+  Number.parseInt((process.env.RELAY_STREAM_TIMEOUT_MS ?? "5000").trim(), 10) || 5000
+);
 
 function sseMessage(payload: object): Uint8Array {
   const type = (payload as { type?: string }).type ?? "message";
@@ -79,6 +83,7 @@ async function proxyRelayStream(req: NextRequest, connFilter?: string): Promise<
   if (connFilter) upstreamUrl.searchParams.set("conn_id", connFilter);
 
   const abortCtrl = new AbortController();
+  const timeout = setTimeout(() => abortCtrl.abort(), RELAY_STREAM_TIMEOUT_MS);
   req.signal.addEventListener("abort", () => abortCtrl.abort());
 
   try {
@@ -103,6 +108,8 @@ async function proxyRelayStream(req: NextRequest, connFilter?: string): Promise<
     });
   } catch {
     return streamFromState(req, connFilter);
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
