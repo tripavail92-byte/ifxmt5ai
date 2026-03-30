@@ -74,7 +74,8 @@ function getDigits(sym: string): number {
   const s = sym.toUpperCase();
   if (/JPY/.test(s)) return 3;
   if (/BTC|ETH/.test(s)) return 2;
-  if (/XAU|XAG|OIL/.test(s)) return 2;
+  if (/XAU|XAG/.test(s)) return 3;
+  if (/OIL/.test(s)) return 2;
   return 5;
 }
 

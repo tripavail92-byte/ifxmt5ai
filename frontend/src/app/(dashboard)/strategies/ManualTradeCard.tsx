@@ -104,7 +104,8 @@ function getZoneDefault(sym: string): number {
 }
 
 function getDecimals(sym: string): number {
-  if (/JPY|XAU|BTC|ETH|OIL/i.test(sym)) return 2;
+  if (/JPY|XAU|XAG/i.test(sym)) return 3;
+  if (/BTC|ETH|OIL/i.test(sym)) return 2;
   return 5;
 }
 
@@ -658,7 +659,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
         {tabSymbols.map((sym) => {
           const live   = prices[sym];
           const isAct  = chartSym === sym;
-          const digits = /JPY|XAU|BTC|ETH|OIL/i.test(sym) ? 2 : 5;
+          const digits = getDecimals(sym);
           return (
             <button
               key={sym}

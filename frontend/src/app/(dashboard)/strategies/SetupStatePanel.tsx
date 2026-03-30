@@ -69,7 +69,7 @@ const STATE_CFG: Record<SetupState, {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function fmt(v: number, sym: string): string {
-  return v.toFixed(/JPY|XAU|BTC|ETH|OIL/i.test(sym) ? 2 : 5);
+  return v.toFixed(/JPY|XAU|XAG/i.test(sym) ? 3 : /BTC|ETH|OIL/i.test(sym) ? 2 : 5);
 }
 
 function timeAgo(iso: string): string {

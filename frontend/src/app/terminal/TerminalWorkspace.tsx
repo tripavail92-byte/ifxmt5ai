@@ -233,7 +233,8 @@ function getZoneDefault(symbol: string): number {
 
 function getDecimals(symbol: string): number {
   if (/JPY/i.test(symbol)) return 3;
-  if (/XAU|XAG|BTC|ETH|OIL/i.test(symbol)) return 2;
+  if (/XAU|XAG/i.test(symbol)) return 3;
+  if (/BTC|ETH|OIL/i.test(symbol)) return 2;
   return 5;
 }
 
@@ -1485,7 +1486,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
             {tabSymbols.map((sym) => {
               const live   = prices[sym];
               const isAct  = displaySymbol === sym;
-              const digits = /JPY|XAU|BTC|ETH|OIL/i.test(sym) ? 2 : 5;
+              const digits = getDecimals(sym);
               return (
                 <button
                   key={sym}
