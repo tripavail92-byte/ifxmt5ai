@@ -36,3 +36,11 @@ _mt5_*.out
 git_push_*.txt
 process_check*.txt
 logs/*.log
+
+# Playwright
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
