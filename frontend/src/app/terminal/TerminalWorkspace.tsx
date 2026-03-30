@@ -846,7 +846,9 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
 
   useEffect(() => {
     if (!selectedConnectionId) return;
-    const available = [...new Set([...(liveSymbols ?? []), ...symbols.map((row) => row.symbol)])].filter(Boolean);
+    const liveAvailable = [...new Set((liveSymbols ?? []).filter(Boolean))];
+    const dbAvailable = [...new Set(symbols.map((row) => row.symbol).filter(Boolean))];
+    const available = liveAvailable.length > 0 ? liveAvailable : dbAvailable;
     if (!available.length) return;
     if (!selectedSymbol || !available.includes(selectedSymbol)) {
       setSelectedSymbol(available[0]);
