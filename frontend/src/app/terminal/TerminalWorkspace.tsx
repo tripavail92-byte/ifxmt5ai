@@ -489,6 +489,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     [parsedEntry, validEntry, zonePercent]
   );
   const displaySymbol = selectedSymbol || liveSymbols[0] || symbols[0]?.symbol || "EURUSD";
+  const aiManagedExecution = stopMode === "ai_dynamic";
   const effectiveStop = useMemo(() => {
     if (!selectedSymbol) return 0;
     if (typeof slValue === "number" && Number.isFinite(slValue)) return slValue;
@@ -576,7 +577,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const executionBlocker = useMemo(() => {
     if (!termsAccepted) return "Accept the current terminal terms before queueing live MT5 execution.";
     if (!(riskAmount > 0)) return "Risk amount must be greater than zero.";
-    if (lotSizing.minLotExceedsRisk) {
+    if (!aiManagedExecution && lotSizing.minLotExceedsRisk) {
       return `Minimum broker lot ${lotSizing.volumeMin.toFixed(2)} risks ${fmtCurrency(lotSizing.actualRisk)}, above your selected risk ${fmtCurrency(riskAmount)}.`;
     }
     if (maxTradesPerDay > 0 && todaysTradeCount >= maxTradesPerDay) {
@@ -603,7 +604,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
       }
     }
     return null;
-  }, [accountBalance, accountEquity, dailyLossLimitUsd, dailyProfitTargetUsd, lotSizing.actualRisk, lotSizing.minLotExceedsRisk, lotSizing.volumeMin, lotSuggestion, maxDrawdownPercent, maxPositionSizeLots, maxTradesPerDay, openPositions, riskAmount, termsAccepted, todaysTradeCount]);
+  }, [accountBalance, accountEquity, aiManagedExecution, dailyLossLimitUsd, dailyProfitTargetUsd, lotSizing.actualRisk, lotSizing.minLotExceedsRisk, lotSizing.volumeMin, lotSuggestion, maxDrawdownPercent, maxPositionSizeLots, maxTradesPerDay, openPositions, riskAmount, termsAccepted, todaysTradeCount]);
 
   useEffect(() => {
     try {
@@ -1177,6 +1178,12 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
       setTermsOpen(true);
       return;
     }
+    if (aiManagedExecution) {
+      const msg = "AI Dynamic mode finalizes SL, TP, and lot size through the AI trigger. Switch Stop Mode to Manual for fixed-value execution.";
+      setManualResult({ ok: false, msg });
+      toast.error(msg);
+      return;
+    }
     if (executionBlocker) {
       setManualResult({ ok: false, msg: executionBlocker });
       toast.error(executionBlocker);
@@ -1213,21 +1220,31 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const stateCfg = activeSetupState ? SETUP_STATE_CFG[activeSetupState] : null;
   const validStopLoss = typeof slValue === "number" && Number.isFinite(slValue) && slValue > 0 && stopDistance > 0;
   const validTakeProfit = typeof effectiveTakeProfit === "number" && Number.isFinite(effectiveTakeProfit) && effectiveTakeProfit > 0;
+  const aiStructureReady = dynamicStopState.stop != null;
+  const liveLotsDisplay = aiManagedExecution ? "AI" : lotSuggestion.toFixed(2);
+  const liveSlDisplay = aiManagedExecution ? "AI" : (slValue ?? "");
+  const liveTpDisplay = aiManagedExecution ? "AI" : (effectiveTakeProfit ?? "");
   const tradeNowPrereqMsg = !currentSetupId
     ? "Press Monitor Zone first so the runtime starts tracking state."
-    : !validStopLoss
-      ? "Set a valid stop loss before arming Trade Now."
-      : !validTakeProfit
-        ? "Risk-reward target is not ready yet. TP is derived automatically from your RR setting once entry and SL are valid."
+    : aiManagedExecution
+      ? !aiStructureReady
+        ? "AI is still reading structure. SL, TP, and lot size will be finalized by AI when the trigger happens."
         : executionBlocker
           ? executionBlocker
-          : "Trade Now is ready to arm.";
+          : "Trade Now is ready. AI will finalize SL, TP, and lot size at trigger time."
+      : !validStopLoss
+        ? "Set a valid stop loss before arming Trade Now."
+        : !validTakeProfit
+          ? "Risk-reward target is not ready yet. TP is derived automatically from your RR setting once entry and SL are valid."
+          : executionBlocker
+            ? executionBlocker
+            : "Trade Now is ready to arm.";
   const tradeNowCanArm = Boolean(
     currentSetupId
     && selectedConnectionId
     && validEntry
-    && validStopLoss
-    && validTakeProfit
+    && (aiManagedExecution ? aiStructureReady : validStopLoss)
+    && (aiManagedExecution ? true : validTakeProfit)
     && !tradeNowArmed
     && !tradeNowSaving
     && !setupSaving
@@ -1482,8 +1499,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               entryPrice={showEntryZones && validEntry ? parsedEntry : undefined}
               entryZoneLow={showEntryZones && zone ? zone.low : undefined}
               entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
-              sl={showEntryZones ? slValue : undefined}
-              tp={showTPZones ? effectiveTakeProfit : undefined}
+              sl={showEntryZones && !aiManagedExecution ? slValue : undefined}
+              tp={showTPZones && !aiManagedExecution ? effectiveTakeProfit : undefined}
               forming={forming}
               lastClose={lastClose}
               className="w-full"
@@ -1499,18 +1516,27 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               <div className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-gray-500">
                 <Edit3 className="size-4" /> Live Execution Form
               </div>
+              {aiManagedExecution ? (
+                <div className="mb-3 rounded-lg border border-blue-500/20 bg-blue-500/10 px-3 py-2 text-xs text-blue-200">
+                  AI Dynamic mode does not expose fixed SL, TP, or lot values here. The AI system finalizes them at trigger time.
+                </div>
+              ) : null}
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
                 <div className="xl:col-span-1">
-                  <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">Lots</Label>
-                  <Input value={Number(lotSuggestion.toFixed(2))} readOnly className="border-[#2b2b2b] bg-[#0c0c0c] text-white" />
+                  <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">{aiManagedExecution ? "Lots (AI)" : "Lots"}</Label>
+                  <Input value={liveLotsDisplay} readOnly className="border-[#2b2b2b] bg-[#0c0c0c] text-white" />
                 </div>
                 <div className="xl:col-span-1">
-                  <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">SL</Label>
-                  <Input type="number" step="any" value={slValue ?? ""} onChange={(e) => setSlValue(e.target.value ? parseFloat(e.target.value) : undefined)} className="border-[#2b2b2b] bg-[#0c0c0c] text-white" />
+                  <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">{aiManagedExecution ? "SL (AI)" : "SL"}</Label>
+                  {aiManagedExecution ? (
+                    <Input value={liveSlDisplay} readOnly className="border-[#2b2b2b] bg-[#0c0c0c] text-white" />
+                  ) : (
+                    <Input type="number" step="any" value={slValue ?? ""} onChange={(e) => setSlValue(e.target.value ? parseFloat(e.target.value) : undefined)} className="border-[#2b2b2b] bg-[#0c0c0c] text-white" />
+                  )}
                 </div>
                 <div className="xl:col-span-1">
-                  <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">TP (from RR)</Label>
-                  <Input type="number" step="any" value={effectiveTakeProfit ?? ""} readOnly className="border-[#2b2b2b] bg-[#0c0c0c] text-white" />
+                  <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">{aiManagedExecution ? "TP (AI)" : "TP (from RR)"}</Label>
+                  <Input type={aiManagedExecution ? "text" : "number"} step={aiManagedExecution ? undefined : "any"} value={liveTpDisplay} readOnly className="border-[#2b2b2b] bg-[#0c0c0c] text-white" />
                 </div>
                 <div className="xl:col-span-1">
                   <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">Order Type</Label>
@@ -1537,18 +1563,24 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                   </div>
                 )}
                 <div className="xl:col-span-2 flex items-end">
-                  <Button onClick={handlePlaceTrade} disabled={isPending || !selectedConnectionId || !selectedSymbol} className="h-10 w-full bg-orange-600 text-white hover:bg-orange-500">
+                  <Button onClick={handlePlaceTrade} disabled={isPending || !selectedConnectionId || !selectedSymbol || aiManagedExecution} className="h-10 w-full bg-orange-600 text-white hover:bg-orange-500 disabled:bg-[#1a1a1a] disabled:text-gray-500 disabled:hover:bg-[#1a1a1a]">
                     {isPending ? "Queueing…" : orderType === "market" ? `Queue ${side.toUpperCase()} Trade` : `Place ${orderType.charAt(0).toUpperCase() + orderType.slice(1)} Order`}
                   </Button>
                 </div>
               </div>
               <div className="mt-3 grid gap-2 text-xs text-gray-500 sm:grid-cols-3">
                 <div className="rounded-lg bg-[#0c0c0c] p-3">Risk amount <span className="block pt-1 text-sm font-semibold text-white">{fmtCurrency(riskAmount)}</span></div>
-                <div className="rounded-lg bg-[#0c0c0c] p-3">Suggested lots <span className="block pt-1 text-sm font-semibold text-white">{lotSuggestion.toFixed(2)}</span></div>
+                <div className="rounded-lg bg-[#0c0c0c] p-3">{aiManagedExecution ? "Lot sizing" : "Suggested lots"} <span className="block pt-1 text-sm font-semibold text-white">{aiManagedExecution ? "AI" : lotSuggestion.toFixed(2)}</span></div>
                 <div className="rounded-lg bg-[#0c0c0c] p-3">Stop mode <span className="block pt-1 text-sm font-semibold text-white">{formatStopModeLabel(stopMode)}</span></div>
               </div>
-              <div className="mt-2 text-[11px] text-gray-500">Lot sizing source: <span className="font-semibold text-gray-200">{lotSizing.method === "broker" ? "broker pip value + volume step" : "fallback pip estimate"}</span></div>
-              <div className="mt-1 text-[11px] text-gray-500">Stop distance: <span className="font-semibold text-gray-200">{lotSizing.stopDistancePips > 0 ? lotSizing.stopDistancePips.toFixed(2) : "0.00"} pips</span> · Pip value/lot: <span className="font-semibold text-gray-200">{lotSizing.pipValuePerLot > 0 ? fmtCurrency(lotSizing.pipValuePerLot) : "—"}</span></div>
+              {aiManagedExecution ? (
+                <div className="mt-2 text-[11px] text-gray-500">AI Dynamic mode keeps stop distance, TP, and lot size under AI control until the execution trigger confirms.</div>
+              ) : (
+                <>
+                  <div className="mt-2 text-[11px] text-gray-500">Lot sizing source: <span className="font-semibold text-gray-200">{lotSizing.method === "broker" ? "broker pip value + volume step" : "fallback pip estimate"}</span></div>
+                  <div className="mt-1 text-[11px] text-gray-500">Stop distance: <span className="font-semibold text-gray-200">{lotSizing.stopDistancePips > 0 ? lotSizing.stopDistancePips.toFixed(2) : "0.00"} pips</span> · Pip value/lot: <span className="font-semibold text-gray-200">{lotSizing.pipValuePerLot > 0 ? fmtCurrency(lotSizing.pipValuePerLot) : "—"}</span></div>
+                </>
+              )}
               <div className="mt-2 text-[11px] text-gray-500">Feed status: <span className="font-semibold text-gray-200">{isConnected ? "LIVE" : "Connecting"}</span></div>
               {manualResult && <div className="mt-3"><InlineMessage ok={manualResult.ok} message={manualResult.msg} /></div>}
             </div>
@@ -1674,11 +1706,11 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                   <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 p-3 text-xs text-blue-200">
                     <div className="flex items-center justify-between gap-3">
                       <span>AI Dynamic SL</span>
-                      <span className="font-semibold text-white">{dynamicStopLoading ? "Loading…" : dynamicStopState.stop != null ? fmtPrice(dynamicStopState.stop, selectedSymbol || displaySymbol) : "Unavailable"}</span>
+                      <span className="font-semibold text-white">{dynamicStopLoading ? "Loading…" : aiStructureReady ? "AI" : "Waiting"}</span>
                     </div>
                     <div className="mt-2 space-y-1 text-[11px] text-blue-100/90">
                       <div>Pivot window: {pivotWindow}</div>
-                      <div>Reference structure: {dynamicStopState.referenceLevel != null ? fmtPrice(dynamicStopState.referenceLevel, selectedSymbol || displaySymbol) : "Not found"}</div>
+                      <div>Final SL, TP, and lot size are set by AI at trigger time.</div>
                       <div>{dynamicStopState.message ?? "AI Dynamic SL uses the confirmed swing from the active structure read."}</div>
                     </div>
                   </div>
@@ -1695,7 +1727,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                 <div className="space-y-2 rounded-lg border border-[#232323] bg-[#111] p-3">
                   <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500">Trade Automation</div>
                   <p className="text-xs leading-relaxed text-gray-500">
-                    Monitor Zone starts state tracking first. After SL, TP, and risk checks are valid, you can arm `Trade Now` at the end here.
+                    Monitor Zone starts state tracking first. In AI Dynamic mode, the AI system finalizes SL, TP, and lot size only when the trigger happens.
                   </p>
                   <div className="rounded-lg border border-[#1f1f1f] bg-[#0c0c0c] px-3 py-2 text-[11px] text-gray-400">
                     {tradeNowPrereqMsg}
@@ -2045,8 +2077,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               entryPrice={showEntryZones && validEntry ? parsedEntry : undefined}
               entryZoneLow={showEntryZones && zone ? zone.low : undefined}
               entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
-              sl={showEntryZones ? slValue : undefined}
-              tp={showTPZones ? effectiveTakeProfit : undefined}
+              sl={showEntryZones && !aiManagedExecution ? slValue : undefined}
+              tp={showTPZones && !aiManagedExecution ? effectiveTakeProfit : undefined}
               forming={forming}
               lastClose={lastClose}
               className="w-full"
@@ -2062,21 +2094,28 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
             <Field label="Connection" value={selectedConnection ? `${selectedConnection.account_login} · ${selectedConnection.broker_server}` : "No connection"} />
             <Field label="Symbol" value={selectedSymbol || "—"} />
             <Field label="Side" value={side.toUpperCase()} />
-            <Field label="Suggested Lots" value={lotSuggestion.toFixed(2)} />
+            <Field label={aiManagedExecution ? "Lot Sizing" : "Suggested Lots"} value={aiManagedExecution ? "AI" : lotSuggestion.toFixed(2)} />
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
-              <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">SL</Label>
-              <Input type="number" step="any" value={slValue ?? ""} onChange={(e) => setSlValue(e.target.value ? parseFloat(e.target.value) : undefined)} className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+              <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">{aiManagedExecution ? "SL (AI)" : "SL"}</Label>
+              {aiManagedExecution ? (
+                <Input value="AI" readOnly className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+              ) : (
+                <Input type="number" step="any" value={slValue ?? ""} onChange={(e) => setSlValue(e.target.value ? parseFloat(e.target.value) : undefined)} className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+              )}
             </div>
             <div>
-              <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">TP (from RR)</Label>
-              <Input type="number" step="any" value={effectiveTakeProfit ?? ""} readOnly className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+              <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">{aiManagedExecution ? "TP (AI)" : "TP (from RR)"}</Label>
+              <Input type={aiManagedExecution ? "text" : "number"} step={aiManagedExecution ? undefined : "any"} value={aiManagedExecution ? "AI" : (effectiveTakeProfit ?? "")} readOnly className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
             </div>
           </div>
-          <Button onClick={handlePlaceTrade} disabled={isPending || !selectedConnectionId || !selectedSymbol} className="h-10 w-full bg-orange-600 text-white hover:bg-orange-500">
+          <Button onClick={handlePlaceTrade} disabled={isPending || !selectedConnectionId || !selectedSymbol || aiManagedExecution} className="h-10 w-full bg-orange-600 text-white hover:bg-orange-500 disabled:bg-[#1a1a1a] disabled:text-gray-500 disabled:hover:bg-[#1a1a1a]">
             {isPending ? "Queueing…" : "Queue Manual Trade"}
           </Button>
+          {aiManagedExecution ? (
+            <div className="mt-2 text-[11px] text-gray-500">Switch Stop Mode to Manual if you want fixed user-entered SL and lot values for immediate execution.</div>
+          ) : null}
           {manualResult ? <InlineMessage ok={manualResult.ok} message={manualResult.msg} /> : null}
         </div>
       </div>
