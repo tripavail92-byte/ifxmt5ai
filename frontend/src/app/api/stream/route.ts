@@ -26,9 +26,14 @@ export const dynamic = "force-dynamic";
 
 const encoder = new TextEncoder();
 const RELAY_STREAM_URL = (process.env.RELAY_STREAM_URL ?? "").trim();
+const PRICE_RELAY_URL = (process.env.PRICE_RELAY_URL ?? "").trim();
 const RELAY_STREAM_TIMEOUT_MS = Math.max(
   1000,
   Number.parseInt((process.env.RELAY_STREAM_TIMEOUT_MS ?? "5000").trim(), 10) || 5000
+);
+const WARM_STATE_MAX_AGE_MS = Math.max(
+  1000,
+  Number.parseInt((process.env.MT5_STREAM_WARM_MAX_AGE_MS ?? "15000").trim(), 10) || 15000
 );
 
 function sseMessage(payload: object): Uint8Array {
@@ -37,10 +42,34 @@ function sseMessage(payload: object): Uint8Array {
 }
 
 function hasWarmState(connFilter?: string): boolean {
-  const symbols = mt5State.getSymbols(connFilter);
-  if (symbols.length > 0) return true;
+  const now = Date.now();
   const prices = mt5State.getPrices(connFilter);
-  return Object.keys(prices).length > 0;
+  for (const snap of Object.values(prices)) {
+    if (snap?.ts_ms && now - snap.ts_ms <= WARM_STATE_MAX_AGE_MS) {
+      return true;
+    }
+  }
+
+  if (connFilter) {
+    const forming = mt5State.forming.get(connFilter);
+    if (!forming || forming.size === 0) return false;
+    for (const bar of forming.values()) {
+      if (bar?.t && now - bar.t * 1000 <= WARM_STATE_MAX_AGE_MS) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  for (const [, forming] of mt5State.forming) {
+    for (const bar of forming.values()) {
+      if (bar?.t && now - bar.t * 1000 <= WARM_STATE_MAX_AGE_MS) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 /** Fallback: stream from Railway in-memory mt5State */
@@ -86,7 +115,17 @@ function streamFromState(req: NextRequest, connFilter?: string): Response {
 
 /** Primary: proxy relay SSE via Cloudflare Tunnel */
 async function proxyRelayStream(req: NextRequest, connFilter?: string): Promise<Response> {
-  const upstreamUrl = new URL(RELAY_STREAM_URL);
+  const relayBaseUrl = RELAY_STREAM_URL
+    ? new URL(RELAY_STREAM_URL)
+    : PRICE_RELAY_URL
+      ? new URL("/stream", PRICE_RELAY_URL)
+      : null;
+
+  if (!relayBaseUrl) {
+    return streamFromState(req, connFilter);
+  }
+
+  const upstreamUrl = new URL(relayBaseUrl.toString());
   if (connFilter) upstreamUrl.searchParams.set("conn_id", connFilter);
 
   const abortCtrl = new AbortController();
@@ -123,13 +162,15 @@ async function proxyRelayStream(req: NextRequest, connFilter?: string): Promise<
 export async function GET(req: NextRequest) {
   const connFilter = req.nextUrl.searchParams.get("conn_id") ?? undefined;
 
+  if (RELAY_STREAM_URL || PRICE_RELAY_URL) {
+    const proxied = await proxyRelayStream(req, connFilter);
+    if (proxied.ok) return proxied;
+  }
+
   if (hasWarmState(connFilter)) {
     return streamFromState(req, connFilter);
   }
 
-  if (RELAY_STREAM_URL) {
-    return proxyRelayStream(req, connFilter);
-  }
   return streamFromState(req, connFilter);
 }
 

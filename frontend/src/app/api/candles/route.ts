@@ -23,6 +23,10 @@ const PRICE_RELAY_TIMEOUT_MS = Math.max(
   500,
   Number.parseInt((process.env.PRICE_RELAY_TIMEOUT_MS ?? "5000").trim(), 10) || 5000
 );
+const CANDLE_STATE_MAX_AGE_MS = Math.max(
+  1000,
+  Number.parseInt((process.env.MT5_CANDLE_STATE_MAX_AGE_MS ?? "15000").trim(), 10) || 15000
+);
 
 type RelayFetchResult = {
   bars: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }> | null;
@@ -97,6 +101,25 @@ async function fetchRelayHealth(): Promise<RelayHealth | null> {
   }
 }
 
+function connectionStateIsFresh(connId: string): boolean {
+  const now = Date.now();
+  const prices = mt5State.getPrices(connId);
+  for (const snap of Object.values(prices)) {
+    if (snap?.ts_ms && now - snap.ts_ms <= CANDLE_STATE_MAX_AGE_MS) {
+      return true;
+    }
+  }
+
+  const forming = mt5State.forming.get(connId);
+  if (!forming) return false;
+  for (const bar of forming.values()) {
+    if (bar?.t && now - bar.t * 1000 <= CANDLE_STATE_MAX_AGE_MS) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
 
@@ -123,9 +146,10 @@ export async function GET(req: NextRequest) {
   // symbol streams into the active chart and create visual gaps.
   const exactStateBars = mt5State.getCandles(connId, symbol, tf, count);
   const stateBars = exactStateBars;
+  const stateIsFresh = connectionStateIsFresh(connId);
 
   // If state has enough bars, trust it and skip relay fetch.
-  if (stateBars.length >= MIN_STATE_BARS) {
+  if (stateBars.length >= MIN_STATE_BARS && stateIsFresh) {
     return NextResponse.json(
       {
         symbol,
@@ -195,8 +219,8 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const bestBars = relay.bars.length > stateBars.length ? relay.bars : stateBars;
-  const source = relay.bars.length > stateBars.length ? "relay" : "state";
+  const bestBars = !stateIsFresh || relay.bars.length >= stateBars.length ? relay.bars : stateBars;
+  const source = bestBars === relay.bars ? "relay" : "state";
 
   // Seed state from relay history so subsequent calls can hit the fast-path.
   try {
