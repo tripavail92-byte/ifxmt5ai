@@ -1217,6 +1217,11 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
       setTermsOpen(true);
       return;
     }
+    if (tradeNowStateBlocker) {
+      setTradeNowResult({ ok: false, msg: tradeNowStateBlocker });
+      toast.error(tradeNowStateBlocker);
+      return;
+    }
     if (executionBlocker) {
       setTradeNowResult({ ok: false, msg: executionBlocker });
       toast.error(executionBlocker);
@@ -1341,8 +1346,13 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const liveLotsDisplay = aiManagedExecution ? "AI" : (Number.isFinite(lotSuggestion) && lotSuggestion > 0 ? lotSuggestion.toFixed(2) : "0.01");
   const liveSlDisplay = aiManagedExecution ? "AI" : (slValue ?? "");
   const liveTpDisplay = aiManagedExecution ? "AI" : (effectiveTakeProfit ?? "");
+  const tradeNowStateBlocker = activeSetupState === "DEAD"
+    ? "This setup is DEAD after an H1 close beyond the loss edge. Press Monitor Zone to reset it before arming Trade Now."
+    : null;
   const tradeNowPrereqMsg = !currentSetupId
     ? "Press Monitor Zone first so the runtime starts tracking state."
+    : tradeNowStateBlocker
+      ? tradeNowStateBlocker
     : aiManagedExecution
       ? !aiStructureReady
         ? "AI is still reading structure. SL, TP, and lot size will be finalized by AI when the trigger happens."
@@ -1365,6 +1375,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     && !tradeNowArmed
     && !tradeNowSaving
     && !setupSaving
+    && !tradeNowStateBlocker
     && !executionBlocker
   );
   const dbSymbols = [...new Set(symbols.map((row) => row.symbol).filter(Boolean))];

@@ -507,6 +507,21 @@ class SetupManager:
                     # If dying now, record the trigger candle time for resurrection (C2)
                     if new_state == DEAD:
                         setup.dead_trigger_candle_time = h1_candle_time
+                        if getattr(setup, 'trade_now_active', False):
+                            reason = "The setup was invalidated when the H1 candle closed beyond the loss edge."
+                            log.warning(
+                                "[trade_now] Armed setup %s invalidated by H1 close — clearing Trade Now",
+                                setup_id[:8],
+                            )
+                            setup.trade_now_active = False
+                            self._queue_trade_now_rejection(
+                                setup_id=setup_id,
+                                connection_id=str(getattr(setup, 'connection_id', '') or ''),
+                                symbol=getattr(setup, 'symbol', ''),
+                                side=getattr(setup, 'side', ''),
+                                reason=reason,
+                                close_price=float(h1_close),
+                            )
 
                     setup.state = new_state
                     self._queue_write(

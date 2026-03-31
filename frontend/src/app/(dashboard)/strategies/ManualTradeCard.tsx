@@ -456,6 +456,13 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
 
   async function handleTradeNow() {
     if (!validEp || !autoConn) return;
+    if (activeSetupState === "DEAD") {
+      setTradeNowResult({
+        ok: false,
+        msg: "This setup is DEAD after an H1 close beyond the loss edge. Update the monitor before arming Trade Now.",
+      });
+      return;
+    }
     setTradeNowSaving(true);
     setTradeNowResult(null);
     try {
@@ -576,22 +583,45 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
       }, (payload: any) => {
         if (payload.new?.state) setActiveSetupState(payload.new.state as SetupState);
 
-        // Detect Trade Now completion: trade_now_active flipped false → trade was fired
         if (typeof payload.new?.trade_now_active === "boolean") {
           const nowArmed = payload.new.trade_now_active as boolean;
-          setTradeNowBySymbol(prev => {
-            // Use functional update so `prev` is always the current value (avoids stale closure)
-            const wasArmed = prev[formSymbol];
-            if (wasArmed && !nowArmed) {
-              // Trade fired — schedule feedback display
-              setTimeout(() => setTradeNowResult({
-                ok:  true,
-                msg: "TRADE FIRED — 0.01 lot order queued. Check Trades page for status.",
-              }), 0);
-            }
-            return { ...prev, [formSymbol]: nowArmed };
+          setTradeNowBySymbol(prev => ({ ...prev, [formSymbol]: nowArmed }));
+        }
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .on("postgres_changes" as any, {
+        event: "INSERT",
+        schema: "public",
+        table: "trade_jobs",
+        filter: `connection_id=eq.${autoConn.id}`,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }, (payload: any) => {
+        const row = payload.new as { symbol?: string; idempotency_key?: string };
+        if (row.symbol !== formSymbol) return;
+        if (typeof row.idempotency_key === "string" && row.idempotency_key.startsWith("trade_now:")) {
+          setTradeNowResult({
+            ok: true,
+            msg: "TRADE FIRED — 0.01 lot order queued. Check Trades page for status.",
           });
         }
+      })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .on("postgres_changes" as any, {
+        event: "INSERT",
+        schema: "public",
+        table: "mt5_runtime_events",
+        filter: `connection_id=eq.${autoConn.id}`,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }, (payload: any) => {
+        const row = payload.new as { details?: { event_kind?: string; symbol?: string; reason?: string } };
+        if (row.details?.event_kind !== "trade_now_rejected" || row.details?.symbol !== formSymbol) return;
+        const reason = typeof row.details?.reason === "string" && row.details.reason.trim()
+          ? row.details.reason.trim()
+          : "AI system conditions were no longer valid for execution.";
+        setTradeNowResult({
+          ok: false,
+          msg: `AI trigger skipped — ${reason}`,
+        });
       })
       .subscribe();
 
@@ -600,7 +630,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
       sb.removeChannel(channel);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slotSetupIds[formSymbol], formSymbol]);
+  }, [autoConn?.id, slotSetupIds[formSymbol], formSymbol]);
 
   // All subscribed pairs — fall back to known list while SSE connects
   const SUBSCRIBED = ["BTCUSDm","ETHUSDm","EURUSDm","GBPUSDm","USDJPYm","XAUUSDm","USDCADm","AUDUSDm","NZDUSDm","USDCHFm","EURGBPm","USOILm"];
