@@ -177,6 +177,7 @@ export async function GET(req: NextRequest) {
         bars: stateBars,
         debug: {
           exact_state_count: exactStateBars.length,
+          relay_error: "PRICE_RELAY_URL not configured",
           instance: INSTANCE_ID,
         },
       },
@@ -212,6 +213,7 @@ export async function GET(req: NextRequest) {
         bars: stateBars,
         debug: {
           exact_state_count: exactStateBars.length,
+          relay_error: relay.error ?? null,
           instance: INSTANCE_ID,
         },
       },
