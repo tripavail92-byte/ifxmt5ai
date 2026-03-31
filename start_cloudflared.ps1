@@ -64,7 +64,7 @@ if ($RAILWAY) {
     Write-Host "Updating Railway env vars..."
     Push-Location $RAIL_DIR
     try {
-        & $RAILWAY variables set "RELAY_STREAM_URL=$streamUrl" "PRICE_RELAY_URL=$url"
+        & $RAILWAY variables set "RELAY_STREAM_URL=$streamUrl" "PRICE_RELAY_URL=$url" "NEXT_PUBLIC_PRICE_RELAY_URL=$url"
         if ($LASTEXITCODE -ne 0) { throw "railway variables set failed" }
         Write-Host "Triggering Railway redeploy..."
         & $RAILWAY up --detach
@@ -74,6 +74,7 @@ if ($RAILWAY) {
         Write-Host "Set manually in Railway dashboard:"
         Write-Host "  RELAY_STREAM_URL=$streamUrl"
         Write-Host "  PRICE_RELAY_URL=$url"
+        Write-Host "  NEXT_PUBLIC_PRICE_RELAY_URL=$url"
     } finally {
         Pop-Location
     }
@@ -81,6 +82,7 @@ if ($RAILWAY) {
     Write-Warning "railway CLI not found -- update Railway manually:"
     Write-Host "  RELAY_STREAM_URL=$streamUrl"
     Write-Host "  PRICE_RELAY_URL=$url"
+    Write-Host "  NEXT_PUBLIC_PRICE_RELAY_URL=$url"
 }
 
 Write-Host ""

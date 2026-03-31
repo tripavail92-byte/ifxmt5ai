@@ -47,6 +47,7 @@ const TF_MINUTES: Record<TF, number> = {
   M1: 1, M3: 3, M5: 5, M15: 15, M30: 30, H1: 60,
   H4: 240, D1: 1440, W1: 10080, MN: 43200,
 };
+const PUBLIC_PRICE_RELAY_URL = (process.env.NEXT_PUBLIC_PRICE_RELAY_URL ?? "").trim();
 
 // ── Indicator config ─────────────────────────────────────────────────────────
 export interface IndicatorConfig {
@@ -450,11 +451,42 @@ export function CandlestickChart({
     const load = async () => {
       try {
         const resp = await fetch(url, { signal: ac.signal, cache: "no-store" });
-        const data = (await resp.json()) as { bars?: RawCandleBar[] };
+        const data = (await resp.json()) as {
+          bars?: RawCandleBar[];
+          source?: string;
+          debug?: { relay_error?: string | null };
+        };
         if (ac.signal.aborted) return;
         if (seq !== fetchSeqRef.current) return;
 
-        const normalized = normalizeBars(data.bars ?? []);
+        let bars = Array.isArray(data.bars) ? data.bars : [];
+        const shouldTryPublicRelay = (
+          bars.length < 20 &&
+          data.source === "state" &&
+          !!data.debug?.relay_error &&
+          !!PUBLIC_PRICE_RELAY_URL
+        );
+
+        if (shouldTryPublicRelay) {
+          try {
+            const relayUrl = new URL("/candles", PUBLIC_PRICE_RELAY_URL);
+            relayUrl.searchParams.set("symbol", liveSymbol);
+            relayUrl.searchParams.set("tf", TF_API[activeTf]);
+            relayUrl.searchParams.set("count", String(HISTORY_COUNT));
+            relayUrl.searchParams.set("conn_id", connId);
+            const relayResp = await fetch(relayUrl.toString(), { signal: ac.signal, cache: "no-store" });
+            if (relayResp.ok) {
+              const relayData = (await relayResp.json()) as { bars?: RawCandleBar[] };
+              if (Array.isArray(relayData.bars) && relayData.bars.length > bars.length) {
+                bars = relayData.bars;
+              }
+            }
+          } catch {
+            // Keep the server response if the browser fallback also fails.
+          }
+        }
+
+        const normalized = normalizeBars(bars);
         if (!normalized.length) return;
 
         drawSeries(normalized, fitOnNextLoadRef.current);
