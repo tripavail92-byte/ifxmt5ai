@@ -313,6 +313,21 @@ function calcZone(entryPrice: number, zonePercent: number) {
   };
 }
 
+function deriveDisplaySetupState(args: {
+  runtimeState: SetupState | null;
+  zone: { low: number; high: number } | null;
+  price?: { bid: number; ask: number };
+}): SetupState | null {
+  const { runtimeState, zone, price } = args;
+  if (!zone || !price) return runtimeState;
+  if (runtimeState === "PURGATORY" || runtimeState === "DEAD") return runtimeState;
+
+  const spreadTouchesZone = price.bid <= zone.high && price.ask >= zone.low;
+  if (spreadTouchesZone) return "STALKING";
+
+  return runtimeState;
+}
+
 function loadDraft(symbol: string): SetupDraft {
   if (typeof window === "undefined") return {};
   try {
@@ -1250,7 +1265,18 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
 
   const currentSetupId = selectedSymbol ? setupIdsBySymbol[selectedSymbol] : undefined;
   const tradeNowArmed = selectedSymbol ? Boolean(tradeNowBySymbol[selectedSymbol]) : false;
-  const stateCfg = activeSetupState ? SETUP_STATE_CFG[activeSetupState] : null;
+  const displaySetupState = deriveDisplaySetupState({
+    runtimeState: activeSetupState,
+    zone,
+    price: livePrice,
+  });
+  const stateCfg = displaySetupState ? SETUP_STATE_CFG[displaySetupState] : null;
+  const setupStateDerivedFromQuote = Boolean(
+    displaySetupState === "STALKING"
+    && activeSetupState !== "STALKING"
+    && activeSetupState !== "PURGATORY"
+    && activeSetupState !== "DEAD"
+  );
   const validStopLoss = typeof slValue === "number" && Number.isFinite(slValue) && slValue > 0 && stopDistance > 0;
   const validTakeProfit = typeof effectiveTakeProfit === "number" && Number.isFinite(effectiveTakeProfit) && effectiveTakeProfit > 0;
   const aiStructureReady = dynamicStopState.stop != null;
@@ -1477,7 +1503,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                 <div className="flex flex-wrap gap-2">
                   {(["IDLE", "STALKING", "PURGATORY", "DEAD"] as SetupState[]).map((state) => {
                     const cfg = SETUP_STATE_CFG[state];
-                    const active = activeSetupState === state;
+                    const active = displaySetupState === state;
                     return (
                       <span key={state} className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-bold tracking-wider ${active ? cfg.badge : "border-[#2a2a2a] bg-[#111] text-gray-600"}`}>
                         {active ? <span className={`size-1.5 rounded-full ${cfg.dot}`} /> : null}
@@ -1487,6 +1513,11 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                   })}
                 </div>
                 <p className="text-xs leading-relaxed text-gray-500">{stateCfg?.desc ?? "Press Monitor Zone to start runtime state tracking for this setup."}</p>
+                {setupStateDerivedFromQuote ? (
+                  <p className="text-[11px] leading-relaxed text-blue-300">
+                    Live quote is already inside the zone. The runtime state badge is being elevated locally while backend state sync catches up.
+                  </p>
+                ) : null}
                 {tradeNowArmed ? (
                   <div className="rounded-lg border border-orange-500/20 bg-orange-500/10 px-3 py-2 text-xs text-orange-300">
                     Armed one-shot execution: the runtime will queue a 0.01-lot MT5 order on the next matching AI system trigger.
