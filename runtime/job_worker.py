@@ -24,6 +24,7 @@ Environment:
 
 import json
 import logging
+import math
 import os
 import signal
 import socket
@@ -480,6 +481,64 @@ def execute_order(job: dict, logger: logging.Logger) -> dict:
     tp = float(job["tp"]) if job.get("tp") else 0.0
     comment_field = (job.get("comment") or "").strip()
 
+    def _round_price(value: float, tick_size: float, digits: int, direction: str = "nearest") -> float:
+        if value <= 0:
+            return 0.0
+        step = tick_size if tick_size > 0 else 0.0
+        if step <= 0:
+            return round(value, max(0, digits))
+        units = value / step
+        if direction == "up":
+            rounded = math.ceil(units - 1e-12) * step
+        elif direction == "down":
+            rounded = math.floor(units + 1e-12) * step
+        else:
+            rounded = round(units) * step
+        return round(rounded, max(0, digits))
+
+    def _normalize_market_stops(
+        symbol_info,
+        current_tick,
+        order_side: str,
+        stop_loss: float,
+        take_profit: float,
+    ) -> tuple[float, float]:
+        digits = int(getattr(symbol_info, "digits", 0) or 0)
+        point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+        tick_size = float(getattr(symbol_info, "trade_tick_size", 0.0) or 0.0)
+        if tick_size <= 0:
+            tick_size = point
+
+        stops_level = float(getattr(symbol_info, "trade_stops_level", 0.0) or 0.0)
+        freeze_level = float(getattr(symbol_info, "trade_freeze_level", 0.0) or 0.0)
+        min_distance = max(stops_level, freeze_level) * point if point > 0 else 0.0
+        if tick_size > 0:
+            min_distance = max(min_distance, tick_size)
+
+        normalized_sl = stop_loss
+        normalized_tp = take_profit
+
+        if order_side == "buy":
+            bid_ref = float(getattr(current_tick, "bid", 0.0) or 0.0)
+            ask_ref = float(getattr(current_tick, "ask", 0.0) or 0.0)
+            if normalized_sl > 0 and bid_ref > 0:
+                max_sl = bid_ref - min_distance
+                normalized_sl = _round_price(min(normalized_sl, max_sl), tick_size, digits, "down")
+            if normalized_tp > 0 and ask_ref > 0:
+                min_tp = ask_ref + min_distance
+                normalized_tp = _round_price(max(normalized_tp, min_tp), tick_size, digits, "up")
+        else:
+            ask_ref = float(getattr(current_tick, "ask", 0.0) or 0.0)
+            bid_ref = float(getattr(current_tick, "bid", 0.0) or 0.0)
+            if normalized_sl > 0 and ask_ref > 0:
+                min_sl = ask_ref + min_distance
+                normalized_sl = _round_price(max(normalized_sl, min_sl), tick_size, digits, "up")
+            if normalized_tp > 0 and bid_ref > 0:
+                max_tp = bid_ref - min_distance
+                normalized_tp = _round_price(min(normalized_tp, max_tp), tick_size, digits, "down")
+
+        return normalized_sl, normalized_tp
+
     # ------------------------------------------------------------------ #
     # Detect pending order type from comment prefix                        #
     # __limit__:<price>  → BUY_LIMIT / SELL_LIMIT                         #
@@ -549,6 +608,20 @@ def execute_order(job: dict, logger: logging.Logger) -> dict:
     symbol_info = mt5.symbol_info(symbol)
     if symbol_info is None:
         raise RuntimeError(f"Cannot get symbol info for {symbol}: {mt5.last_error()}")
+
+    normalized_sl, normalized_tp = _normalize_market_stops(symbol_info, tick, side, sl, tp)
+    if normalized_sl != sl or normalized_tp != tp:
+        logger.info(
+            "Normalized stops for %s %s: sl %.5f -> %.5f | tp %.5f -> %.5f",
+            symbol,
+            side,
+            sl,
+            normalized_sl,
+            tp,
+            normalized_tp,
+        )
+        sl = normalized_sl
+        tp = normalized_tp
 
     preferred_filling = symbol_info.filling_mode
     filling_modes = [
