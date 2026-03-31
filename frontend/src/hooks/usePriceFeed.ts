@@ -14,6 +14,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 const PUBLIC_PRICE_RELAY_URL = (process.env.NEXT_PUBLIC_PRICE_RELAY_URL ?? "").trim();
 const MAX_SERVER_PRICE_AGE_MS = 2_500;
+const STREAM_STALE_MS = 4_000;
+const HEALTHY_POLL_MS = 8_000;
+const DEGRADED_POLL_MS = 1_000;
+const RECONNECT_GRACE_MS = 1_500;
 
 // ─── Types (mirror CandleBar / PriceSnapshot from mt5-state.ts) ───────────────
 
@@ -59,9 +63,11 @@ export function usePriceFeed(connId?: string): PriceFeedState {
   const esRef      = useRef<EventSource | null>(null);
   const backoffRef = useRef<number>(1_000);
   const timerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastEventAtRef = useRef<number>(0);
   const mountedRef = useRef(true);
+  const reconnectSeqRef = useRef(0);
+  const stalePollsRef = useRef(0);
 
   const newestTs = useCallback((prices?: Record<string, PriceSnapshot>) => {
     let newest = 0;
@@ -94,17 +100,38 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     return eventConnId === connId;
   }, [connId]);
 
+  const clearReconnectTimer = useCallback(() => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  const clearPollTimer = useCallback(() => {
+    if (pollRef.current) {
+      clearTimeout(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  const schedulePoll = useCallback((delay: number, poller: () => void) => {
+    clearPollTimer();
+    pollRef.current = setTimeout(poller, delay);
+  }, [clearPollTimer]);
+
   const connect = useCallback(() => {
     if (!mountedRef.current) return;
 
     const qs  = connId ? `?conn_id=${encodeURIComponent(connId)}` : "";
-    const url = `/api/stream${qs}`;
+    const nonce = `stream_seq=${reconnectSeqRef.current}`;
+    const url = `/api/stream${qs ? `${qs}&${nonce}` : `?${nonce}`}`;
     const es  = new EventSource(url);
     esRef.current = es;
 
     es.onopen = () => {
       if (!mountedRef.current) return;
       backoffRef.current = 1_000;
+      stalePollsRef.current = 0;
       lastEventAtRef.current = Date.now();
       setState(s => ({ ...s, isConnected: true }));
     };
@@ -116,6 +143,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       setState(s => ({ ...s, isConnected: false }));
       const delay = backoffRef.current;
       backoffRef.current = Math.min(delay * 2, 30_000);
+      clearReconnectTimer();
       timerRef.current = setTimeout(connect, delay);
     };
 
@@ -196,7 +224,20 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       lastEventAtRef.current = Date.now();
     });
 
-  }, [acceptsConn, connId]);
+  }, [acceptsConn, clearReconnectTimer, connId]);
+
+  const refreshStream = useCallback(() => {
+    clearReconnectTimer();
+    esRef.current?.close();
+    esRef.current = null;
+    if (!mountedRef.current) return;
+    setState(s => ({ ...s, isConnected: false }));
+    reconnectSeqRef.current += 1;
+    timerRef.current = setTimeout(() => {
+      if (!mountedRef.current) return;
+      connect();
+    }, RECONNECT_GRACE_MS);
+  }, [clearReconnectTimer, connect]);
 
   const pollPrices = useCallback(async () => {
     try {
@@ -221,6 +262,10 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       if (!mountedRef.current) return;
 
       if (best?.prices && Object.keys(best.prices).length > 0) {
+        const newest = newestTs(best.prices);
+        if (newest > 0) {
+          lastEventAtRef.current = Math.max(lastEventAtRef.current, newest);
+        }
         setState(s => ({
           ...s,
           prices: { ...s.prices, ...best.prices },
@@ -229,14 +274,31 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         }));
       }
 
-      if (Date.now() - lastEventAtRef.current > 20_000) {
-        esRef.current?.close();
-        esRef.current = null;
-        connect();
+      const eventAge = Date.now() - lastEventAtRef.current;
+      const streamHealthy = esRef.current && eventAge <= STREAM_STALE_MS;
+      if (streamHealthy) {
+        stalePollsRef.current = 0;
+      } else {
+        stalePollsRef.current += 1;
+        if (stalePollsRef.current >= 2) {
+          stalePollsRef.current = 0;
+          refreshStream();
+        }
       }
+
+      schedulePoll(streamHealthy ? HEALTHY_POLL_MS : DEGRADED_POLL_MS, () => {
+        void pollPrices();
+      });
     } catch {
+      const eventAge = Date.now() - lastEventAtRef.current;
+      if (eventAge > STREAM_STALE_MS) {
+        refreshStream();
+      }
+      schedulePoll(DEGRADED_POLL_MS, () => {
+        void pollPrices();
+      });
     }
-  }, [connId, connect]);
+  }, [connId, fetchDirectRelayPrices, newestTs, refreshStream, schedulePoll]);
 
   useEffect(() => {
     setState({
@@ -252,19 +314,38 @@ export function usePriceFeed(connId?: string): PriceFeedState {
   useEffect(() => {
     mountedRef.current = true;
     lastEventAtRef.current = Date.now();
+    stalePollsRef.current = 0;
     connect();
-    pollRef.current = setInterval(() => {
+    schedulePoll(DEGRADED_POLL_MS, () => {
       void pollPrices();
-    }, 1000);
+    });
     return () => {
       mountedRef.current = false;
       esRef.current?.close();
       esRef.current = null;
-      if (timerRef.current) clearTimeout(timerRef.current);
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = null;
+      clearReconnectTimer();
+      clearPollTimer();
     };
-  }, [connect, pollPrices]);
+  }, [clearPollTimer, clearReconnectTimer, connect, pollPrices, schedulePoll]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      if ((Date.now() - lastEventAtRef.current) > STREAM_STALE_MS) {
+        refreshStream();
+        schedulePoll(DEGRADED_POLL_MS, () => {
+          void pollPrices();
+        });
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [pollPrices, refreshStream, schedulePoll]);
 
   return state;
 }
