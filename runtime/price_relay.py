@@ -586,12 +586,27 @@ def _buffer_autosave_loop() -> None:
 #  When RAILWAY_INGEST_URL is blank, messages are discarded after logging.
 
 _fwd_queue: queue.Queue = queue.Queue(maxsize=2000)
+_fwd_tick_lock = threading.Lock()
+_fwd_tick_batches: dict[str, dict] = {}
+TICK_FORWARD_INTERVAL_S = max(
+    0.1,
+    float(os.getenv("RAILWAY_TICK_FORWARD_INTERVAL_SECONDS", "0.25") or "0.25"),
+)
 
 
 def enqueue_fwd(msg: dict) -> None:
     """Thread-safe: enqueue a message for forwarding to Railway ingest."""
     if not RAILWAY_INGEST_URL:
         return  # buffering only — no Railway endpoint configured
+    if msg.get("type") == "tick_batch":
+        conn_id = str(msg.get("connection_id") or "default").strip() or "default"
+        with _fwd_tick_lock:
+            prev = _fwd_tick_batches.get(conn_id)
+            prev_ts = int((prev or {}).get("ts_ms") or 0)
+            next_ts = int((msg or {}).get("ts_ms") or 0)
+            if prev is None or next_ts >= prev_ts:
+                _fwd_tick_batches[conn_id] = dict(msg)
+        return
     try:
         if "_retry" not in msg:
             msg["_retry"] = 0
@@ -602,6 +617,29 @@ def enqueue_fwd(msg: dict) -> None:
 
 # Keep the old name as alias so existing call sites don't need changing
 enqueue_ws = enqueue_fwd
+
+
+def _tick_batch_enqueue_loop() -> None:
+    """Coalesce latest tick batches per connection before HTTP forwarding.
+
+    This prevents Railway ingest from falling behind on old price snapshots when
+    the local relay is producing ticks faster than the remote API can accept.
+    """
+    while True:
+        time.sleep(TICK_FORWARD_INTERVAL_S)
+        with _fwd_tick_lock:
+            if not _fwd_tick_batches:
+                continue
+            batches = list(_fwd_tick_batches.values())
+            _fwd_tick_batches.clear()
+
+        for msg in batches:
+            try:
+                if "_retry" not in msg:
+                    msg["_retry"] = 0
+                _fwd_queue.put_nowait(msg)
+            except queue.Full:
+                stats["ws_dropped"] += 1
 
 
 def _http_relay_loop() -> None:
@@ -669,6 +707,7 @@ def _http_relay_loop() -> None:
 
 def _start_ws_thread() -> None:
     """Start the HTTP relay forwarding thread."""
+    threading.Thread(target=_tick_batch_enqueue_loop, name="tick-forward-queue", daemon=True).start()
     t = threading.Thread(target=_http_relay_loop, name="http-relay", daemon=True)
     t.start()
     log.info("HTTP relay thread started")
