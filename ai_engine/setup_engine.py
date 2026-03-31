@@ -91,7 +91,7 @@ class Setup:
 
     dead_trigger_candle_time: Optional[int] = None  # epoch_s of H1 that caused DEAD
 
-    # Trade Now: when True, setup_manager fires a 0.01-lot market order
+    # Trade Now: when True, setup_manager fires a risk-based market order
     # the moment STALKING + matching structure break is detected (one-shot).
     trade_now_active: bool = False
 

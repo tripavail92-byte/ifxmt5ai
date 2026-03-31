@@ -205,6 +205,7 @@ export async function activateTradeNow(params: {
   zone_percent: number;
   timeframe: string;
   ai_sensitivity: number;
+  trade_plan_notes?: string | null;
   setup_id?: string | null;
 }): Promise<string> {
   const supabase = await createClient();
@@ -221,6 +222,7 @@ export async function activateTradeNow(params: {
     p_zone_percent:   params.zone_percent,
     p_timeframe:      params.timeframe,
     p_ai_sensitivity: params.ai_sensitivity,
+    p_notes:          params.trade_plan_notes ?? null,
     p_setup_id:       params.setup_id ?? null,
   });
 

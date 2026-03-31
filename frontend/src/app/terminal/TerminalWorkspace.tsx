@@ -163,6 +163,19 @@ type SymbolTradeSpec = {
   error?: string | null;
 };
 
+type TradeNowPlan = {
+  version: 1;
+  stopMode: StopMode;
+  plannedStopLoss: number | null;
+  plannedTakeProfit: number | null;
+  riskMode: "percent" | "usd";
+  riskPercent: number;
+  riskUsd: number;
+  riskRewardRatio: number;
+  armedEntryPrice: number;
+  armedAt: string;
+};
+
 type LotSizingDetails = {
   lotSize: number;
   rawLot: number;
@@ -405,6 +418,31 @@ function fmtPrice(value: number, symbol: string) {
 
 function fmtCurrency(value: number | undefined | null) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value ?? 0);
+}
+
+function buildTradeNowPlan(args: {
+  stopMode: StopMode;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  riskMode: "percent" | "usd";
+  riskPercent: number;
+  riskUsd: number;
+  riskRewardRatio: number;
+  armedEntryPrice: number;
+}) {
+  const plan: TradeNowPlan = {
+    version: 1,
+    stopMode: args.stopMode,
+    plannedStopLoss: args.stopLoss,
+    plannedTakeProfit: args.takeProfit,
+    riskMode: args.riskMode,
+    riskPercent: args.riskPercent,
+    riskUsd: args.riskUsd,
+    riskRewardRatio: args.riskRewardRatio,
+    armedEntryPrice: args.armedEntryPrice,
+    armedAt: new Date().toISOString(),
+  };
+  return JSON.stringify({ tradePlan: plan });
 }
 
 function timeAgo(iso?: string | null) {
@@ -1102,7 +1140,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
             const inserted = payload.new as TradeJobRow;
             setRecentJobs((prev) => [inserted, ...prev].slice(0, 30));
             if (typeof inserted.idempotency_key === "string" && inserted.idempotency_key.startsWith("trade_now:")) {
-              const msg = `AI system triggered ${inserted.symbol} — the MT5 order was queued.`;
+              const msg = `AI system triggered ${inserted.symbol} — the risk-based MT5 order was queued.`;
               setTradeNowResult({ ok: true, msg });
               toast.success(msg);
             }
@@ -1230,6 +1268,16 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     setTradeNowSaving(true);
     setTradeNowResult(null);
     try {
+      const tradePlanNotes = buildTradeNowPlan({
+        stopMode,
+        stopLoss: validStopLoss ? Number(slValue) : null,
+        takeProfit: validTakeProfit ? Number(effectiveTakeProfit) : null,
+        riskMode,
+        riskPercent,
+        riskUsd,
+        riskRewardRatio,
+        armedEntryPrice: parsedEntry,
+      });
       const setupId = await activateTradeNow({
         connection_id: selectedConnectionId,
         symbol: selectedSymbol,
@@ -1238,6 +1286,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
         zone_percent: zonePercent,
         timeframe: getSelectedSetupTimeframe(),
         ai_sensitivity: aiSensitivity,
+        trade_plan_notes: tradePlanNotes,
         setup_id: setupIdsBySymbol[selectedSymbol] ?? null,
       });
       setSetupIdsBySymbol((prev) => ({ ...prev, [selectedSymbol]: setupId }));
@@ -1589,7 +1638,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                 ) : null}
                 {tradeNowArmed ? (
                   <div className="rounded-lg border border-orange-500/20 bg-orange-500/10 px-3 py-2 text-xs text-orange-300">
-                    Armed one-shot execution: the runtime will queue a 0.01-lot MT5 order on the next matching AI system trigger.
+                    Armed one-shot execution: the runtime will queue a risk-based MT5 order on the next matching AI system trigger.
                   </div>
                 ) : null}
               </div>
@@ -1950,7 +1999,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                     </div>
                     <div className="mt-2 space-y-1 text-[11px] text-blue-100/90">
                       <div>Pivot window: {pivotWindow}</div>
-                      <div>Final SL, TP, and lot size are set by AI at trigger time.</div>
+                      <div>Final SL, TP, and lot size are set by AI from your armed risk settings at trigger time.</div>
                       <div>{dynamicStopState.message ?? "AI Dynamic SL uses the confirmed swing from the active structure read."}</div>
                     </div>
                   </div>

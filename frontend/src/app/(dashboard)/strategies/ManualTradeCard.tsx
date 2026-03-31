@@ -601,7 +601,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
         if (typeof row.idempotency_key === "string" && row.idempotency_key.startsWith("trade_now:")) {
           setTradeNowResult({
             ok: true,
-            msg: "TRADE FIRED — 0.01 lot order queued. Check Trades page for status.",
+            msg: "TRADE FIRED — risk-based order queued. Check Trades page for status.",
           });
         }
       })
@@ -910,7 +910,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                 </button>
 
                 <p className="text-[9px] text-gray-700 text-center px-1">
-                  Fires a 0.01-lot test order when STALKING + CHOCH/BOS matches direction
+                  Fires a risk-based MT5 order when STALKING + CHOCH/BOS matches direction
                 </p>
 
                 {tradeNowResult && (

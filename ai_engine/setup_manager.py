@@ -40,6 +40,7 @@ standard Exness/MetaQuotes hour-boundary bars.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -114,6 +115,51 @@ def _is_retryable_persist_error(exc: Exception) -> bool:
 def _is_missing_column_error(exc: Exception) -> bool:
     msg = f"{type(exc).__name__}: {exc}".lower()
     return "42703" in msg or "column" in msg and "does not exist" in msg
+
+
+def _get_pip_size(symbol: str) -> float:
+    normalized = str(symbol or "").upper()
+    if "JPY" in normalized:
+        return 0.01
+    if "XAU" in normalized or "GOLD" in normalized:
+        return 0.1
+    if "XAG" in normalized or "SILVER" in normalized:
+        return 0.001
+    if "BTC" in normalized or "ETH" in normalized:
+        return 1.0
+    return 0.0001
+
+
+def _get_step_decimals(step: float) -> int:
+    if not step or step <= 0:
+        return 2
+    normalized = f"{step}".lower()
+    if "e-" in normalized:
+        try:
+            return int(normalized.split("e-")[-1])
+        except Exception:
+            return 2
+    if "." not in normalized:
+        return 0
+    return len(normalized.split(".", 1)[1].rstrip("0"))
+
+
+def _round_volume_down(value: float, step: float) -> float:
+    if value <= 0:
+        return 0.0
+    if step <= 0:
+        return value
+    decimals = min(8, max(0, _get_step_decimals(step)))
+    floored = int((value + 1e-12) / step) * step
+    return float(f"{floored:.{decimals}f}")
+
+
+def _legacy_risk_per_lot(symbol: str, stop_distance: float) -> tuple[float, float, float]:
+    pip_size = _get_pip_size(symbol)
+    stop_distance_pips = stop_distance / pip_size if pip_size > 0 else 0.0
+    symbol_upper = str(symbol or "").upper()
+    pip_value_per_lot = 9.0 if "JPY" in symbol_upper else 10.0
+    return stop_distance_pips, pip_value_per_lot, stop_distance_pips * pip_value_per_lot
 
 
 class SetupManager:
@@ -367,7 +413,7 @@ class SetupManager:
                     int(evt.candle_time),
                 )
 
-                # ── Trade Now: fire a test trade when break matches side ──────
+                # ── Trade Now: fire a risk-based trade when break matches side ──
                 if getattr(setup, 'trade_now_active', False):
                     side_val = getattr(setup, 'side', '')
                     direction_match = (
@@ -375,7 +421,7 @@ class SetupManager:
                         (side_val == 'sell' and evt.break_dir == 'bear')
                     )
                     if direction_match:
-                        rejection_reason = self._get_trade_now_rejection_reason(
+                        trade_plan, rejection_reason = self._build_trade_now_order(
                             setup=setup,
                             close_price=float(evt.close_price),
                         )
@@ -405,8 +451,9 @@ class SetupManager:
                             connection_id=setup_conn_id,
                             symbol=getattr(setup, 'symbol', ''),
                             side=side_val,
-                            sl=float(getattr(setup, 'loss_edge', 0.0)),
-                            tp=float(getattr(setup, 'target', 0.0)),
+                            volume=float(trade_plan["volume"]),
+                            sl=float(trade_plan["sl"]),
+                            tp=float(trade_plan["tp"]),
                             close_price=evt.close_price,
                         )
 
@@ -687,11 +734,12 @@ class SetupManager:
         connection_id: str,
         symbol: str,
         side: str,
+        volume: float,
         sl: float,
         tp: float,
         close_price: float,
     ) -> None:
-        """Queue a test trade (0.01 lot) triggered by Trade Now + structure break."""
+        """Queue a risk-based trade triggered by Trade Now + structure break."""
         try:
             now_ms = int(time.time() * 1000)
             self._write_q.put_nowait({
@@ -700,6 +748,7 @@ class SetupManager:
                 "connection_id": connection_id,
                 "symbol":       symbol,
                 "side":         side,
+                "volume":       float(volume),
                 "sl":           sl,
                 "tp":           tp,
                 "close_price":  close_price,
@@ -738,44 +787,171 @@ class SetupManager:
                 setup_id[:8],
             )
 
-    def _get_trade_now_rejection_reason(self, setup, close_price: float) -> Optional[str]:
-        """Return a user-facing reason when an AI trigger should not queue execution."""
+    def _parse_trade_now_plan(self, setup) -> dict:
+        notes = getattr(setup, "notes", None)
+        if not notes:
+            return {}
+        try:
+            parsed = json.loads(notes)
+        except Exception:
+            return {}
+        if isinstance(parsed, dict):
+            plan = parsed.get("tradePlan")
+            if isinstance(plan, dict):
+                return plan
+        return {}
+
+    def _compute_trade_now_volume(
+        self,
+        *,
+        connection_id: str,
+        symbol: str,
+        close_price: float,
+        stop_loss: float,
+        plan: dict,
+    ) -> tuple[Optional[float], Optional[str]]:
+        prefs = self._get_db_module().get_terminal_prefs_for_connection(connection_id)
+        risk_mode = str(plan.get("riskMode") or prefs.get("riskMode") or "percent").lower()
+        risk_percent = float(plan.get("riskPercent") or prefs.get("riskPercent") or 0.0)
+        risk_usd = float(plan.get("riskUsd") or prefs.get("riskUsd") or 0.0)
+
+        hb = self._get_db_module()._select_first(
+            self._get_db()
+            .table("mt5_worker_heartbeats")
+            .select("last_metrics")
+            .eq("connection_id", connection_id)
+        )
+        metrics = hb.get("last_metrics") or {}
+        balance = float(metrics.get("balance") or 0.0)
+        equity = float(metrics.get("equity") or balance)
+
+        risk_amount = risk_usd if risk_mode == "usd" else (equity * risk_percent) / 100.0
+        if risk_amount <= 0:
+            return None, "AI system trigger fired, but the armed risk amount is zero."
+
+        stop_distance = abs(float(close_price) - float(stop_loss))
+        if stop_distance <= 0:
+            return None, "AI system trigger fired, but the stop distance is zero."
+
+        volume_min = 0.01
+        volume_max = 100.0
+        volume_step = 0.01
+        tick_size = 0.0
+        tick_value = 0.0
+
+        try:
+            _ensure_path()
+            from runtime.mt5_candles import get_symbol_trade_specs
+
+            spec = get_symbol_trade_specs(connection_id, symbol)
+            volume_min = float(spec.get("volume_min") or volume_min)
+            volume_max = float(spec.get("volume_max") or volume_max)
+            volume_step = float(spec.get("volume_step") or volume_step)
+            tick_size = float(spec.get("trade_tick_size") or 0.0)
+            tick_value = float(spec.get("trade_tick_value") or 0.0)
+        except Exception:
+            spec_row = self._get_db_module()._select_first(
+                self._get_db()
+                .table("mt5_symbols")
+                .select("trade_tick_size, trade_tick_value, volume_min, volume_max, volume_step")
+                .eq("connection_id", connection_id)
+                .eq("symbol", symbol)
+            )
+            volume_min = float(spec_row.get("volume_min") or volume_min)
+            volume_max = float(spec_row.get("volume_max") or volume_max)
+            volume_step = float(spec_row.get("volume_step") or volume_step)
+            tick_size = float(spec_row.get("trade_tick_size") or 0.0)
+            tick_value = float(spec_row.get("trade_tick_value") or 0.0)
+
+        pip_size = _get_pip_size(symbol)
+        stop_distance_pips = stop_distance / pip_size if pip_size > 0 else 0.0
+        if tick_size > 0 and tick_value > 0 and pip_size > 0:
+            pip_value_per_lot = tick_value * (pip_size / tick_size)
+            risk_per_lot = stop_distance_pips * pip_value_per_lot
+        else:
+            _, _, risk_per_lot = _legacy_risk_per_lot(symbol, stop_distance)
+
+        if risk_per_lot <= 0:
+            return None, "AI system trigger fired, but risk sizing could not determine broker pip value."
+
+        raw_lot = risk_amount / risk_per_lot
+        rounded_lot = _round_volume_down(raw_lot, volume_step)
+        bounded_lot = min(volume_max, max(volume_min, rounded_lot if rounded_lot > 0 else volume_min))
+        lot_size = float(f"{bounded_lot:.{min(8, max(2, _get_step_decimals(volume_step)))}f}")
+        actual_risk = risk_per_lot * lot_size
+
+        if raw_lot < volume_min and actual_risk > risk_amount:
+            return None, (
+                f"Minimum broker lot {volume_min:.2f} risks ${actual_risk:.2f}, above your armed risk ${risk_amount:.2f}."
+            )
+
+        return lot_size, None
+
+    def _build_trade_now_order(self, setup, close_price: float) -> tuple[Optional[dict], Optional[str]]:
+        """Build the live AI trade plan using armed risk/RR settings."""
         side = str(getattr(setup, "side", "") or "")
-        sl = float(getattr(setup, "loss_edge", 0.0) or 0.0)
-        tp = float(getattr(setup, "target", 0.0) or 0.0)
+        connection_id = str(getattr(setup, "connection_id", "") or "")
+        plan = self._parse_trade_now_plan(setup)
+        prefs = self._get_db_module().get_terminal_prefs_for_connection(connection_id)
+
+        sl = float(plan.get("plannedStopLoss") or getattr(setup, "loss_edge", 0.0) or 0.0)
+        rr = float(plan.get("riskRewardRatio") or prefs.get("riskRewardRatio") or 0.0)
+        if rr <= 0:
+            base_risk = abs(float(getattr(setup, "entry_price", 0.0) or 0.0) - sl)
+            base_reward = abs(float(getattr(setup, "target", 0.0) or 0.0) - float(getattr(setup, "entry_price", 0.0) or 0.0))
+            rr = (base_reward / base_risk) if base_risk > 0 and base_reward > 0 else 1.0
 
         if close_price <= 0:
-            return "AI system trigger fired, but the live execution price was unavailable."
-        if sl <= 0 or tp <= 0:
-            return "AI system trigger fired, but the stop or target is missing."
+            return None, "AI system trigger fired, but the live execution price was unavailable."
+        if sl <= 0:
+            return None, "AI system trigger fired, but the protective stop is missing."
+        if rr <= 0:
+            return None, "AI system trigger fired, but the armed risk / reward ratio is invalid."
 
         if side == "buy":
             if sl >= close_price:
-                return "AI system trigger fired, but the protective stop is no longer below the market price."
-            if tp <= close_price:
-                return "AI system trigger fired, but the target is already at or below the market price."
+                return None, "AI system trigger fired, but the protective stop is no longer below the market price."
+            tp = close_price + abs(close_price - sl) * rr
         elif side == "sell":
             if sl <= close_price:
-                return "AI system trigger fired, but the protective stop is no longer above the market price."
-            if tp >= close_price:
-                return "AI system trigger fired, but the target is already at or above the market price."
+                return None, "AI system trigger fired, but the protective stop is no longer above the market price."
+            tp = close_price - abs(close_price - sl) * rr
+        else:
+            return None, "AI system trigger fired, but the setup side is invalid."
 
         risk_distance = abs(close_price - sl)
         reward_distance = abs(tp - close_price)
         if risk_distance <= 0 or reward_distance <= 0:
-            return "AI system trigger fired, but there is no execution room left between stop and target."
+            return None, "AI system trigger fired, but there is no execution room left between stop and target."
+
+        volume, volume_error = self._compute_trade_now_volume(
+            connection_id=connection_id,
+            symbol=str(getattr(setup, "symbol", "") or ""),
+            close_price=float(close_price),
+            stop_loss=float(sl),
+            plan=plan,
+        )
+        if volume_error:
+            return None, volume_error
+        if volume is None or volume <= 0:
+            return None, "AI system trigger fired, but the risk-based lot size is invalid."
 
         user_id = getattr(setup, "user_id", None)
         if user_id:
             blocker = self._get_db_module().get_terminal_execution_blocker(
                 user_id=user_id,
-                connection_id=str(getattr(setup, "connection_id", "") or ""),
-                trade_volume=0.01,
+                connection_id=connection_id,
+                trade_volume=volume,
             )
             if blocker:
-                return blocker
+                return None, blocker
 
-        return None
+        return {
+            "sl": float(sl),
+            "tp": float(tp),
+            "volume": float(volume),
+            "rr": float(rr),
+        }, None
 
     def _write_loop(self) -> None:
         """Drain the write queue and persist each state change to Supabase."""
@@ -886,15 +1062,16 @@ class SetupManager:
             connection_id  = item["connection_id"]
             symbol         = item["symbol"]
             side           = item["side"]
+            volume         = float(item.get("volume") or 0.0)
             close_price    = float(item["close_price"])
             idempotency_key = item["idempotency_key"]
 
-            # Insert a queued market-order trade job (0.01 lot test)
+            # Insert a queued market-order trade job using the armed risk plan.
             db.table("trade_jobs").insert({
                 "connection_id":   connection_id,
                 "symbol":          symbol,
                 "side":            side,
-                "volume":          0.01,
+                "volume":          volume,
                 "sl":              item["sl"] if item["sl"] else None,
                 "tp":              item["tp"] if item["tp"] else None,
                 "idempotency_key": idempotency_key,
