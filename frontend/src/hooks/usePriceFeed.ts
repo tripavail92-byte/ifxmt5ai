@@ -12,6 +12,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+const PUBLIC_PRICE_RELAY_URL = (process.env.NEXT_PUBLIC_PRICE_RELAY_URL ?? "").trim();
+const MAX_SERVER_PRICE_AGE_MS = 10_000;
+
 // ─── Types (mirror CandleBar / PriceSnapshot from mt5-state.ts) ───────────────
 
 export interface PriceSnapshot {
@@ -59,6 +62,31 @@ export function usePriceFeed(connId?: string): PriceFeedState {
   const pollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastEventAtRef = useRef<number>(0);
   const mountedRef = useRef(true);
+
+  const newestTs = useCallback((prices?: Record<string, PriceSnapshot>) => {
+    let newest = 0;
+    for (const snap of Object.values(prices ?? {})) {
+      if (snap?.ts_ms && snap.ts_ms > newest) newest = snap.ts_ms;
+    }
+    return newest;
+  }, []);
+
+  const fetchDirectRelayPrices = useCallback(async () => {
+    if (!PUBLIC_PRICE_RELAY_URL) return null;
+    try {
+      const url = new URL("/prices", PUBLIC_PRICE_RELAY_URL);
+      if (connId) url.searchParams.set("conn_id", connId);
+      const resp = await fetch(url.toString(), { cache: "no-store" });
+      if (!resp.ok) return null;
+      const data = await resp.json() as {
+        prices?: Record<string, PriceSnapshot>;
+        symbols?: string[];
+      };
+      return data;
+    } catch {
+      return null;
+    }
+  }, [connId]);
 
   const acceptsConn = useCallback((eventConnId?: string | null) => {
     if (!connId) return true;
@@ -174,19 +202,30 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     try {
       const qs = connId ? `?conn_id=${encodeURIComponent(connId)}` : "";
       const resp = await fetch(`/api/prices${qs}`, { cache: "no-store" });
-      if (!resp.ok) return;
-      const data = await resp.json() as {
+      const data = resp.ok ? await resp.json() as {
         prices?: Record<string, PriceSnapshot>;
         symbols?: string[];
-      };
+      } : null;
+
+      let best = data;
+      const serverNewest = newestTs(data?.prices);
+      const serverIsStale = !serverNewest || (Date.now() - serverNewest) > MAX_SERVER_PRICE_AGE_MS;
+      if (!best?.prices || !Object.keys(best.prices).length || serverIsStale) {
+        const relayData = await fetchDirectRelayPrices();
+        const relayNewest = newestTs(relayData?.prices);
+        if (relayData?.prices && Object.keys(relayData.prices).length && relayNewest >= serverNewest) {
+          best = relayData;
+        }
+      }
 
       if (!mountedRef.current) return;
 
-      if (data.prices && Object.keys(data.prices).length > 0) {
+      if (best?.prices && Object.keys(best.prices).length > 0) {
         setState(s => ({
           ...s,
-          prices: { ...s.prices, ...data.prices },
-          symbols: data.symbols?.length ? data.symbols : s.symbols,
+          prices: { ...s.prices, ...best.prices },
+          symbols: best.symbols?.length ? best.symbols : s.symbols,
+          isConnected: true,
         }));
       }
 
