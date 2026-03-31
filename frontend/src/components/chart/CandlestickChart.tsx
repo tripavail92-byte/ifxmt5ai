@@ -21,6 +21,12 @@ export interface RawCandleBar {
   t: number; o: number; h: number; l: number; c: number; v: number;
 }
 
+export interface LivePriceSnapshot {
+  bid: number;
+  ask: number;
+  ts_ms: number;
+}
+
 export interface CandlestickChartProps {
   sl?: number;
   tp?: number;
@@ -33,6 +39,7 @@ export interface CandlestickChartProps {
   connId?: string;
   forming?: Record<string, RawCandleBar>;
   lastClose?: { symbol: string; bar: RawCandleBar } | null;
+  prices?: Record<string, LivePriceSnapshot>;
 }
 
 const TIMEFRAMES = ["M1", "M3", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN"] as const;
@@ -200,6 +207,7 @@ export function CandlestickChart({
   connId,
   forming,
   lastClose,
+  prices,
 }: CandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -316,6 +324,61 @@ export function CandlestickChart({
 
     // New candle — append
     series.update(next);                               // lightweight-charts appends automatically
+    historyRef.current = [...current, next];
+    setHistoryVersion(v => v + 1);
+  };
+
+  const upsertPriceBar = (snapshot: LivePriceSnapshot) => {
+    const series = seriesRef.current;
+    if (!series) return;
+
+    const price = Number(snapshot?.bid ?? snapshot?.ask ?? 0);
+    const tsSec = Math.floor(Number(snapshot?.ts_ms ?? 0) / 1000);
+    if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(tsSec) || tsSec <= 0) return;
+
+    const slot = toTfSlot(tsSec, activeTf);
+    const current = historyRef.current;
+    const last = current[current.length - 1];
+
+    if (!last) {
+      const seed: CandlestickData = {
+        time: slot as Time,
+        open: price,
+        high: price,
+        low: price,
+        close: price,
+      };
+      series.setData([seed]);
+      historyRef.current = [seed];
+      hasHistoryRef.current = true;
+      resetViewport(chartRef.current, 1);
+      return;
+    }
+
+    const lastT = Number(last.time);
+    if (slot < lastT) return;
+
+    if (slot === lastT) {
+      const updated: CandlestickData = {
+        time: last.time,
+        open: last.open,
+        high: Math.max(last.high, price),
+        low: Math.min(last.low, price),
+        close: price,
+      };
+      series.update(updated);
+      historyRef.current[current.length - 1] = updated;
+      return;
+    }
+
+    const next: CandlestickData = {
+      time: slot as Time,
+      open: last.close,
+      high: Math.max(last.close, price),
+      low: Math.min(last.close, price),
+      close: price,
+    };
+    series.update(next);
     historyRef.current = [...current, next];
     setHistoryVersion(v => v + 1);
   };
@@ -519,6 +582,15 @@ export function CandlestickChart({
     upsertLiveBar(lastClose.bar);
     setIsLive(true);
   }, [lastClose, liveSymbol, activeTf]);
+
+  useEffect(() => {
+    if (!liveSymbol || !prices) return;
+    if (forming?.[liveSymbol]) return;
+    const snapshot = prices[liveSymbol];
+    if (!snapshot?.ts_ms) return;
+    upsertPriceBar(snapshot);
+    setIsLive(true);
+  }, [prices, forming, liveSymbol, activeTf]);
 
   // ── Draw / refresh indicators whenever candles or toggle state changes ──
   useEffect(() => {

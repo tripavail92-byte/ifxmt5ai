@@ -1523,6 +1523,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
               sl={showEntryZones && !aiManagedExecution ? slValue : undefined}
               tp={showTPZones && !aiManagedExecution ? effectiveTakeProfit : undefined}
+              prices={prices}
               forming={forming}
               lastClose={lastClose}
               className="w-full"
@@ -2101,6 +2102,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
               sl={showEntryZones && !aiManagedExecution ? slValue : undefined}
               tp={showTPZones && !aiManagedExecution ? effectiveTakeProfit : undefined}
+              prices={prices}
               forming={forming}
               lastClose={lastClose}
               className="w-full"
