@@ -1265,6 +1265,30 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
 
   const currentSetupId = selectedSymbol ? setupIdsBySymbol[selectedSymbol] : undefined;
   const tradeNowArmed = selectedSymbol ? Boolean(tradeNowBySymbol[selectedSymbol]) : false;
+  const armedSetupRows = useMemo(() => {
+    return Object.values(setupsBySymbol)
+      .filter((setup) => Boolean(setup?.symbol) && Boolean(tradeNowBySymbol[setup.symbol] || setup.trade_now_active))
+      .map((setup) => {
+        const setupZone = calcZone(setup.entry_price, Number(setup.zone_percent) || getZoneDefault(setup.symbol));
+        const setupPrice = prices[setup.symbol];
+        const displayState = deriveDisplaySetupState({
+          runtimeState: (setup.state as SetupState | undefined) ?? null,
+          zone: setupZone,
+          price: setupPrice,
+        });
+        return {
+          ...setup,
+          displayState,
+          zone: setupZone,
+          livePrice: setupPrice,
+        };
+      })
+      .sort((a, b) => {
+        if (a.symbol === selectedSymbol) return -1;
+        if (b.symbol === selectedSymbol) return 1;
+        return a.symbol.localeCompare(b.symbol);
+      });
+  }, [prices, selectedSymbol, setupsBySymbol, tradeNowBySymbol]);
   const displaySetupState = deriveDisplaySetupState({
     runtimeState: activeSetupState,
     zone,
@@ -1357,7 +1381,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   function renderAITrading() {
     return (
       <div className="grid min-h-[calc(100vh-76px)] grid-cols-1 gap-4 lg:grid-cols-[320px_minmax(0,1fr)_340px] lg:gap-0">
-        <aside className="rounded-xl border border-[#1f1f1f] bg-[#101010] lg:rounded-none lg:border-y-0 lg:border-l-0 lg:border-r lg:border-[#1a1a1a]">
+        <aside className="order-2 rounded-xl border border-[#1f1f1f] bg-[#101010] lg:order-none lg:rounded-none lg:border-y-0 lg:border-l-0 lg:border-r lg:border-[#1a1a1a]">
           <div className="space-y-6 p-4 lg:p-5">
             <section className="space-y-3">
               <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-gray-500">
@@ -1528,138 +1552,151 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
           </div>
         </aside>
 
-        <section className="space-y-4 rounded-xl border border-[#1f1f1f] bg-[#0c0c0c] p-4 lg:rounded-none lg:border-y-0 lg:border-l-0 lg:border-r-0 lg:px-5 lg:py-4">
-          {/* ── Account / status strip ── */}
-          <div className="grid gap-3 xl:grid-cols-[1fr_auto] xl:items-center">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge className={side === "buy" ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}>{side.toUpperCase()}</Badge>
-              <StatusBadge status={accountHeartbeat?.status ?? selectedConnection?.status} />
-              <span className="text-xs text-gray-500">{selectedConnection ? `${selectedConnection.account_login} · ${selectedConnection.broker_server}` : "No active connection"}</span>
+        <section className="order-1 space-y-4 rounded-xl border border-[#1f1f1f] bg-[#0c0c0c] p-4 lg:order-none lg:rounded-none lg:border-y-0 lg:border-l-0 lg:border-r-0 lg:px-5 lg:py-4">
+          <div className="sticky top-0 z-20 -mx-4 space-y-4 border-b border-[#1a1a1a] bg-[#090909]/98 px-4 pb-4 backdrop-blur-sm lg:static lg:mx-0 lg:border-b-0 lg:bg-transparent lg:px-0 lg:pb-0 lg:backdrop-blur-0">
+            {/* ── Account / status strip ── */}
+            <div className="grid gap-3 xl:grid-cols-[1fr_auto] xl:items-center">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge className={side === "buy" ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}>{side.toUpperCase()}</Badge>
+                <StatusBadge status={accountHeartbeat?.status ?? selectedConnection?.status} />
+                {tradeNowArmed ? <Badge className="bg-orange-500/15 text-orange-300">ARMED</Badge> : null}
+                <span className="text-xs text-gray-500">{selectedConnection ? `${selectedConnection.account_login} · ${selectedConnection.broker_server}` : "No active connection"}</span>
+              </div>
+              <div className="flex items-center gap-4 text-xs">
+                <div className="text-right">
+                  <div className="text-gray-500">Balance</div>
+                  <div className="font-semibold text-white">{fmtCurrency(accountBalance)}</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-gray-500">Equity</div>
+                  <div className="font-semibold text-emerald-300">{fmtCurrency(accountEquity)}</div>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className={`h-1.5 w-1.5 rounded-full ${feedStatus.dot}`} />
+                  <span className={`font-medium ${feedStatus.tone}`}>{feedStatus.label}</span>
+                </div>
+              </div>
             </div>
-            <div className="flex items-center gap-4 text-xs">
-              <div className="text-right">
-                <div className="text-gray-500">Balance</div>
-                <div className="font-semibold text-white">{fmtCurrency(accountBalance)}</div>
-              </div>
-              <div className="text-right">
-                <div className="text-gray-500">Equity</div>
-                <div className="font-semibold text-emerald-300">{fmtCurrency(accountEquity)}</div>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className={`h-1.5 w-1.5 rounded-full ${feedStatus.dot}`} />
-                <span className={`font-medium ${feedStatus.tone}`}>{feedStatus.label}</span>
-              </div>
-            </div>
-          </div>
 
-          {/* ── Symbol tab bar — identical pattern to strategies page ManualTradeCard ── */}
-          <div
-            className="flex overflow-x-auto rounded-lg border border-[#1a1a1a] bg-[#0d0d0d]"
-            style={{ scrollbarWidth: "none" }}
-          >
-            {tabSymbols.map((sym) => {
-              const live   = prices[sym];
-              const isAct  = displaySymbol === sym;
-              const digits = getDecimals(sym);
-              return (
-                <button
-                  key={sym}
-                  type="button"
-                  onClick={() => setSelectedSymbol(sym)}
-                  className={`flex-shrink-0 flex flex-col items-start px-3 py-2 border-b-2 transition-colors whitespace-nowrap
-                    ${isAct
-                      ? "border-orange-500 bg-[#141414]"
-                      : "border-transparent hover:bg-[#111] hover:border-gray-700"
-                    }`}
-                >
-                  <span className={`font-mono font-semibold text-[11px] ${isAct ? "text-white" : "text-gray-500"}`}>
-                    {sym}
-                  </span>
-                  {live ? (
-                    <span className={`text-[10px] font-mono mt-0.5 ${isAct ? "text-emerald-400" : "text-gray-600"}`}>
-                      {live.bid.toFixed(digits)}
+            {/* ── Symbol tab bar — identical pattern to strategies page ManualTradeCard ── */}
+            <div
+              className="flex overflow-x-auto rounded-lg border border-[#1a1a1a] bg-[#0d0d0d]"
+              style={{ scrollbarWidth: "none" }}
+            >
+              {tabSymbols.map((sym) => {
+                const live   = prices[sym];
+                const isAct  = displaySymbol === sym;
+                const digits = getDecimals(sym);
+                return (
+                  <button
+                    key={sym}
+                    type="button"
+                    onClick={() => setSelectedSymbol(sym)}
+                    className={`flex-shrink-0 flex flex-col items-start px-3 py-2 border-b-2 transition-colors whitespace-nowrap
+                      ${isAct
+                        ? "border-orange-500 bg-[#141414]"
+                        : "border-transparent hover:bg-[#111] hover:border-gray-700"
+                      }`}
+                  >
+                    <span className={`font-mono font-semibold text-[11px] ${isAct ? "text-white" : "text-gray-500"}`}>
+                      {sym}
                     </span>
-                  ) : (
-                    <span className="text-[10px] text-gray-700 mt-0.5">—</span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="rounded-xl border border-[#1f1f1f] bg-[#101010] p-3">
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div>
-                <div className="text-[11px] uppercase tracking-[0.2em] text-gray-500">Active quote</div>
-                <div className="mt-1 flex items-center gap-2">
-                  <span className="text-lg font-semibold text-white">{quoteSymbol}</span>
-                  <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold ${side === "buy" ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
-                    {side.toUpperCase()} ready
-                  </span>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-2 md:min-w-[280px]">
-                <div className="rounded-lg border border-[#1f3a2f] bg-emerald-500/10 px-3 py-2">
-                  <div className="text-[10px] uppercase tracking-[0.18em] text-emerald-300/80">Bid</div>
-                  <div className="mt-1 font-mono text-lg font-semibold text-emerald-300">{quoteBid}</div>
-                </div>
-                <div className="rounded-lg border border-[#3a2323] bg-red-500/10 px-3 py-2">
-                  <div className="text-[10px] uppercase tracking-[0.18em] text-red-300/80">Ask</div>
-                  <div className="mt-1 font-mono text-lg font-semibold text-red-300">{quoteAsk}</div>
-                </div>
-              </div>
+                    {live ? (
+                      <span className={`text-[10px] font-mono mt-0.5 ${isAct ? "text-emerald-400" : "text-gray-600"}`}>
+                        {live.bid.toFixed(digits)}
+                      </span>
+                    ) : (
+                      <span className="text-[10px] text-gray-700 mt-0.5">—</span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => setSide("buy")}
-                className={`h-11 rounded-lg border text-sm font-semibold transition ${side === "buy" ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300" : "border-[#2a2a2a] bg-[#111] text-gray-400 hover:text-white"}`}
-              >
-                BUY
-              </button>
-              <button
-                type="button"
-                onClick={() => setSide("sell")}
-                className={`h-11 rounded-lg border text-sm font-semibold transition ${side === "sell" ? "border-red-500/40 bg-red-500/15 text-red-300" : "border-[#2a2a2a] bg-[#111] text-gray-400 hover:text-white"}`}
-              >
-                SELL
-              </button>
-            </div>
-          </div>
 
-          {hydrated && selectedConnectionId ? (
-            <div className="relative">
-              <CandlestickChart
-                symbol={displaySymbol}
-                liveSymbol={displaySymbol}
-                connId={selectedConnectionId || undefined}
-                entryPrice={showEntryZones && validEntry ? parsedEntry : undefined}
-                entryZoneLow={showEntryZones && zone ? zone.low : undefined}
-                entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
-                sl={showEntryZones && !aiManagedExecution ? slValue : undefined}
-                tp={showTPZones && !aiManagedExecution ? effectiveTakeProfit : undefined}
-                prices={prices}
-                forming={forming}
-                lastClose={lastClose}
-                className="w-full"
-              />
-              {isPairSwitchLoading ? (
-                <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-xl bg-[#050505]/72 backdrop-blur-[1px]">
-                  <div className="flex items-center gap-3 rounded-full border border-white/10 bg-black/70 px-4 py-2 text-sm text-white shadow-lg">
-                    <RefreshCw className="size-4 animate-spin text-orange-400" />
-                    <div>
-                      <div className="font-medium">Loading {selectedSymbol} live feed…</div>
-                      <div className="text-[11px] text-gray-400">Waiting for fresh prices to stabilize</div>
+            <div className="rounded-xl border border-[#1f1f1f] bg-[#101010] p-3">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.2em] text-gray-500">Active quote</div>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="text-lg font-semibold text-white">{quoteSymbol}</span>
+                    <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold ${side === "buy" ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
+                      {side.toUpperCase()} ready
+                    </span>
+                    {tradeNowArmed ? (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-orange-500/15 px-2 py-0.5 text-[10px] font-semibold text-orange-300">
+                        ARMED setup
+                      </span>
+                    ) : null}
+                  </div>
+                  {tradeNowArmed ? (
+                    <div className="mt-1 text-[11px] text-orange-300">
+                      Waiting for `STALKING` + matching AI trigger.
                     </div>
+                  ) : null}
+                </div>
+                <div className="grid grid-cols-2 gap-2 md:min-w-[280px]">
+                  <div className="rounded-lg border border-[#1f3a2f] bg-emerald-500/10 px-3 py-2">
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-emerald-300/80">Bid</div>
+                    <div className="mt-1 font-mono text-lg font-semibold text-emerald-300">{quoteBid}</div>
+                  </div>
+                  <div className="rounded-lg border border-[#3a2323] bg-red-500/10 px-3 py-2">
+                    <div className="text-[10px] uppercase tracking-[0.18em] text-red-300/80">Ask</div>
+                    <div className="mt-1 font-mono text-lg font-semibold text-red-300">{quoteAsk}</div>
                   </div>
                 </div>
-              ) : null}
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSide("buy")}
+                  className={`h-11 rounded-lg border text-sm font-semibold transition ${side === "buy" ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300" : "border-[#2a2a2a] bg-[#111] text-gray-400 hover:text-white"}`}
+                >
+                  BUY
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSide("sell")}
+                  className={`h-11 rounded-lg border text-sm font-semibold transition ${side === "sell" ? "border-red-500/40 bg-red-500/15 text-red-300" : "border-[#2a2a2a] bg-[#111] text-gray-400 hover:text-white"}`}
+                >
+                  SELL
+                </button>
+              </div>
             </div>
-          ) : hydrated ? (
-            <div className="flex min-h-[320px] items-center justify-center rounded-lg border border-[#2a2a2a] bg-[#0c0c0c] px-6 py-10 text-center text-sm text-gray-500">
-              Select an active MT5 connection to load live prices and historical candles.
-            </div>
-          ) : null}
+
+            {hydrated && selectedConnectionId ? (
+              <div className="relative">
+                <CandlestickChart
+                  symbol={displaySymbol}
+                  liveSymbol={displaySymbol}
+                  connId={selectedConnectionId || undefined}
+                  entryPrice={showEntryZones && validEntry ? parsedEntry : undefined}
+                  entryZoneLow={showEntryZones && zone ? zone.low : undefined}
+                  entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
+                  sl={showEntryZones && !aiManagedExecution ? slValue : undefined}
+                  tp={showTPZones && !aiManagedExecution ? effectiveTakeProfit : undefined}
+                  prices={prices}
+                  forming={forming}
+                  lastClose={lastClose}
+                  className="w-full"
+                />
+                {isPairSwitchLoading ? (
+                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-xl bg-[#050505]/72 backdrop-blur-[1px]">
+                    <div className="flex items-center gap-3 rounded-full border border-white/10 bg-black/70 px-4 py-2 text-sm text-white shadow-lg">
+                      <RefreshCw className="size-4 animate-spin text-orange-400" />
+                      <div>
+                        <div className="font-medium">Loading {selectedSymbol} live feed…</div>
+                        <div className="text-[11px] text-gray-400">Waiting for fresh prices to stabilize</div>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : hydrated ? (
+              <div className="flex min-h-[320px] items-center justify-center rounded-lg border border-[#2a2a2a] bg-[#0c0c0c] px-6 py-10 text-center text-sm text-gray-500">
+                Select an active MT5 connection to load live prices and historical candles.
+              </div>
+            ) : null}
+          </div>
 
           <div className="grid gap-4 xl:grid-cols-[1.3fr_0.7fr]">
             <div className="rounded-xl border border-[#1f1f1f] bg-[#121212] p-4">
@@ -1760,7 +1797,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
           </div>
         </section>
 
-        <aside className="rounded-xl border border-[#1f1f1f] bg-[#101010] lg:rounded-none lg:border-y-0 lg:border-r-0 lg:border-l lg:border-[#1a1a1a]">
+        <aside className="order-3 rounded-xl border border-[#1f1f1f] bg-[#101010] lg:order-none lg:rounded-none lg:border-y-0 lg:border-r-0 lg:border-l lg:border-[#1a1a1a]">
           <div className="space-y-6 p-4 lg:p-5">
             <section className="space-y-3">
               <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-gray-500">
@@ -2091,7 +2128,84 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               accent={profitColor}
             />
             <MetricCard label="Open Trades" value={String(openPositions.length)} />
+            <MetricCard label="Armed Setups" value={String(armedSetupRows.length)} accent="text-orange-300" />
           </div>
+        </div>
+
+        <div className="rounded-xl border border-[#1f1f1f] bg-[#101010] p-5">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-gray-200">
+              <Target className="size-4 text-orange-400" /> Armed Waiting Setups
+            </div>
+            <span className="text-xs text-gray-500">
+              {armedSetupRows.length} armed setup{armedSetupRows.length !== 1 ? "s" : ""}
+            </span>
+          </div>
+
+          {armedSetupRows.length === 0 ? (
+            <EmptyState
+              title="No armed setups"
+              description="When Trade Now is armed, the waiting setup will appear here until the trigger queues the MT5 order."
+              icon={Target}
+            />
+          ) : (
+            <div className="space-y-3">
+              {armedSetupRows.map((setup) => {
+                const state = setup.displayState ?? "IDLE";
+                const stateUi = SETUP_STATE_CFG[state];
+                const digits = getDecimals(setup.symbol);
+                return (
+                  <div key={setup.id} className="rounded-lg border border-[#202020] bg-[#151515] p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-mono text-sm font-semibold text-white">{setup.symbol}</span>
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${setup.side === "buy" ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
+                            {setup.side}
+                          </span>
+                          <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${stateUi.badge}`}>
+                            <span className={`size-1.5 rounded-full ${stateUi.dot}`} />
+                            {stateUi.label}
+                          </span>
+                          <span className="rounded-full bg-orange-500/15 px-2 py-0.5 text-[10px] font-semibold text-orange-300">
+                            Waiting for trigger
+                          </span>
+                        </div>
+                        <div className="mt-1 text-xs text-gray-500">
+                          Armed Trade Now setup. It will appear in live execution once the setup reaches stalking state and the matching AI trigger fires.
+                        </div>
+                      </div>
+                      <div className="text-xs text-gray-400">
+                        Timeframe <span className="font-semibold text-gray-200">{setup.timeframe}</span>
+                      </div>
+                    </div>
+                    <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-5">
+                      <div className="rounded-lg bg-[#0f0f0f] p-3">
+                        <div className="text-gray-500">Entry</div>
+                        <div className="mt-1 font-mono text-white">{setup.entry_price.toFixed(digits)}</div>
+                      </div>
+                      <div className="rounded-lg bg-[#0f0f0f] p-3">
+                        <div className="text-gray-500">Zone</div>
+                        <div className="mt-1 font-mono text-blue-300">{setup.zone.low.toFixed(digits)} - {setup.zone.high.toFixed(digits)}</div>
+                      </div>
+                      <div className="rounded-lg bg-[#0f0f0f] p-3">
+                        <div className="text-gray-500">Live Bid</div>
+                        <div className="mt-1 font-mono text-emerald-300">{setup.livePrice ? setup.livePrice.bid.toFixed(digits) : "—"}</div>
+                      </div>
+                      <div className="rounded-lg bg-[#0f0f0f] p-3">
+                        <div className="text-gray-500">Live Ask</div>
+                        <div className="mt-1 font-mono text-red-300">{setup.livePrice ? setup.livePrice.ask.toFixed(digits) : "—"}</div>
+                      </div>
+                      <div className="rounded-lg bg-[#0f0f0f] p-3">
+                        <div className="text-gray-500">State</div>
+                        <div className="mt-1 text-gray-200">{stateUi.desc}</div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Open positions workstation */}
