@@ -495,6 +495,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     [parsedEntry, validEntry, zonePercent]
   );
   const displaySymbol = selectedSymbol || liveQuoteSymbols[0] || liveSymbols[0] || symbols[0]?.symbol || "EURUSD";
+  const activeSymbol = selectedSymbol || displaySymbol;
   const aiManagedExecution = stopMode === "ai_dynamic";
   const effectiveStop = useMemo(() => {
     if (!selectedSymbol) return 0;
@@ -1287,6 +1288,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const streamSelectableSymbols = [...new Set((liveSymbols ?? []).filter(Boolean))];
   const availableSymbols = liveSelectableSymbols.length > 0 ? liveSelectableSymbols : streamSelectableSymbols.length > 0 ? streamSelectableSymbols : dbSymbols;
   const hasLiveQuoteForSelected = selectedSymbol ? Boolean(prices[selectedSymbol]) : false;
+  const quoteSymbol = activeSymbol;
+  const quoteDigits = getDecimals(quoteSymbol);
+  const quoteBid = livePrice ? livePrice.bid.toFixed(quoteDigits) : "—";
+  const quoteAsk = livePrice ? livePrice.ask.toFixed(quoteDigits) : "—";
   const selectedPriceAgeMs = livePrice?.ts_ms ? Date.now() - livePrice.ts_ms : Number.POSITIVE_INFINITY;
   const hasFreshSelectedQuote = Boolean(livePrice && selectedPriceAgeMs <= 3_000);
   const isPairSwitchLoading = Boolean(
@@ -1375,22 +1380,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                     No live MT5 quote is available for {selectedSymbol} on this connection. Switch to a live symbol to see streaming prices.
                   </div>
                 )}
-
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setSide("buy")}
-                    className={`h-10 rounded-lg border text-sm font-semibold transition ${side === "buy" ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300" : "border-[#2a2a2a] bg-[#111] text-gray-400 hover:text-white"}`}
-                  >
-                    BUY
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSide("sell")}
-                    className={`h-10 rounded-lg border text-sm font-semibold transition ${side === "sell" ? "border-red-500/40 bg-red-500/15 text-red-300" : "border-[#2a2a2a] bg-[#111] text-gray-400 hover:text-white"}`}
-                  >
-                    SELL
-                  </button>
+                <div className="rounded-lg border border-[#252525] bg-[#101010] px-3 py-2 text-[11px] text-gray-500">
+                  Primary symbol selector for chart, pricing, and execution.
                 </div>
 
                 <div>
@@ -1563,6 +1554,46 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                 </button>
               );
             })}
+          </div>
+
+          <div className="rounded-xl border border-[#1f1f1f] bg-[#101010] p-3">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.2em] text-gray-500">Active quote</div>
+                <div className="mt-1 flex items-center gap-2">
+                  <span className="text-lg font-semibold text-white">{quoteSymbol}</span>
+                  <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold ${side === "buy" ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
+                    {side.toUpperCase()} ready
+                  </span>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 md:min-w-[280px]">
+                <div className="rounded-lg border border-[#1f3a2f] bg-emerald-500/10 px-3 py-2">
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-emerald-300/80">Bid</div>
+                  <div className="mt-1 font-mono text-lg font-semibold text-emerald-300">{quoteBid}</div>
+                </div>
+                <div className="rounded-lg border border-[#3a2323] bg-red-500/10 px-3 py-2">
+                  <div className="text-[10px] uppercase tracking-[0.18em] text-red-300/80">Ask</div>
+                  <div className="mt-1 font-mono text-lg font-semibold text-red-300">{quoteAsk}</div>
+                </div>
+              </div>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setSide("buy")}
+                className={`h-11 rounded-lg border text-sm font-semibold transition ${side === "buy" ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300" : "border-[#2a2a2a] bg-[#111] text-gray-400 hover:text-white"}`}
+              >
+                BUY
+              </button>
+              <button
+                type="button"
+                onClick={() => setSide("sell")}
+                className={`h-11 rounded-lg border text-sm font-semibold transition ${side === "sell" ? "border-red-500/40 bg-red-500/15 text-red-300" : "border-[#2a2a2a] bg-[#111] text-gray-400 hover:text-white"}`}
+              >
+                SELL
+              </button>
+            </div>
           </div>
 
           {hydrated && selectedConnectionId ? (
@@ -2234,12 +2265,13 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               </div>
             </div>
             <div className="h-8 w-px bg-[#242424]" />
-            <select value={selectedSymbol} onChange={(e) => setSelectedSymbol(e.target.value)} className="h-10 rounded-lg border border-[#2a2a2a] bg-[#161616] px-4 text-sm text-white outline-none focus:border-blue-500/50">
-              {availableSymbols.map((sym) => <option key={sym} value={sym}>{sym}</option>)}
-            </select>
-            <div className="flex gap-2">
-              <button type="button" onClick={() => setSide("buy")} className={`rounded-lg px-5 py-2 text-sm font-semibold ${side === "buy" ? "bg-green-600 text-white" : "bg-[#1a1a1a] text-gray-400 hover:text-white"}`}>BUY</button>
-              <button type="button" onClick={() => setSide("sell")} className={`rounded-lg px-5 py-2 text-sm font-semibold ${side === "sell" ? "bg-red-600 text-white" : "bg-[#1a1a1a] text-gray-400 hover:text-white"}`}>SELL</button>
+            <div className="rounded-lg border border-[#242424] bg-[#161616] px-4 py-2 text-sm">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500">Selected symbol</div>
+              <div className="mt-1 flex items-center gap-3">
+                <span className="font-semibold text-white">{activeSymbol}</span>
+                <span className="font-mono text-emerald-300">Bid {quoteBid}</span>
+                <span className="font-mono text-red-300">Ask {quoteAsk}</span>
+              </div>
             </div>
           </div>
           <div className="flex items-center gap-6 text-right text-sm">
@@ -2273,12 +2305,13 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               <div className="font-semibold text-emerald-300">{fmtCurrency(accountEquity)}</div>
             </div>
           </div>
-          <div className="flex gap-2">
-            <select value={selectedSymbol} onChange={(e) => setSelectedSymbol(e.target.value)} className="h-10 flex-1 rounded-lg border border-[#2a2a2a] bg-[#161616] px-3 text-sm text-white outline-none">
-              {availableSymbols.map((sym) => <option key={sym} value={sym}>{sym}</option>)}
-            </select>
-            <button type="button" onClick={() => setSide("buy")} className={`rounded-lg px-4 text-sm font-semibold ${side === "buy" ? "bg-green-600 text-white" : "bg-[#1a1a1a] text-gray-400"}`}>BUY</button>
-            <button type="button" onClick={() => setSide("sell")} className={`rounded-lg px-4 text-sm font-semibold ${side === "sell" ? "bg-red-600 text-white" : "bg-[#1a1a1a] text-gray-400"}`}>SELL</button>
+          <div className="rounded-lg border border-[#2a2a2a] bg-[#161616] px-3 py-2 text-sm text-white">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500">Selected symbol</div>
+            <div className="mt-1 flex items-center justify-between gap-3 text-xs">
+              <span className="font-semibold text-white">{activeSymbol}</span>
+              <span className="font-mono text-emerald-300">B {quoteBid}</span>
+              <span className="font-mono text-red-300">A {quoteAsk}</span>
+            </div>
           </div>
         </div>
       </div>
