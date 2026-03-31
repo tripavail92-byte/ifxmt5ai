@@ -261,6 +261,11 @@ function getStepDecimals(step: number) {
   return fraction.length;
 }
 
+function toFiniteNumber(value: unknown, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function roundVolumeDown(value: number, step: number) {
   if (!(value > 0)) return 0;
   if (!(step > 0)) return value;
@@ -525,46 +530,53 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const riskAmount = riskMode === "percent" ? (accountEquity * riskPercent) / 100 : riskUsd;
   const stopDistance = validEntry && effectiveStop > 0 ? Math.abs(parsedEntry - effectiveStop) : 0;
   const lotSizing = useMemo<LotSizingDetails>(() => {
-    const volumeMin = Number(symbolTradeSpec?.volume_min ?? 0.01) > 0 ? Number(symbolTradeSpec?.volume_min) : 0.01;
-    const volumeMax = Number(symbolTradeSpec?.volume_max ?? 100) > 0 ? Number(symbolTradeSpec?.volume_max) : 100;
-    const volumeStep = Number(symbolTradeSpec?.volume_step ?? 0.01) > 0 ? Number(symbolTradeSpec?.volume_step) : 0.01;
+    const volumeMinRaw = toFiniteNumber(symbolTradeSpec?.volume_min, 0.01);
+    const volumeMaxRaw = toFiniteNumber(symbolTradeSpec?.volume_max, 100);
+    const volumeStepRaw = toFiniteNumber(symbolTradeSpec?.volume_step, 0.01);
+    const volumeMin = volumeMinRaw > 0 ? volumeMinRaw : 0.01;
+    const volumeMax = volumeMaxRaw > 0 ? volumeMaxRaw : 100;
+    const volumeStep = volumeStepRaw > 0 ? volumeStepRaw : 0.01;
 
-    const tickSize = Number(symbolTradeSpec?.trade_tick_size ?? 0);
-    const tickValue = Number(symbolTradeSpec?.trade_tick_value ?? 0);
+    const tickSize = toFiniteNumber(symbolTradeSpec?.trade_tick_size, 0);
+    const tickValue = toFiniteNumber(symbolTradeSpec?.trade_tick_value, 0);
     const pipSize = getPipSize(displaySymbol);
+    const safeRiskAmount = toFiniteNumber(riskAmount, 0);
+    const safeStopDistance = toFiniteNumber(stopDistance, 0);
 
     let method: "broker" | "fallback" = "fallback";
     let riskPerLot = 0;
     let stopDistancePips = 0;
     let pipValuePerLot = 0;
 
-    if (stopDistance > 0) {
-      stopDistancePips = pipSize > 0 ? stopDistance / pipSize : 0;
+    if (safeStopDistance > 0) {
+      stopDistancePips = pipSize > 0 ? safeStopDistance / pipSize : 0;
       if (tickSize > 0 && tickValue > 0) {
         pipValuePerLot = tickValue * (pipSize / tickSize);
         riskPerLot = stopDistancePips * pipValuePerLot;
         method = "broker";
       } else {
-        const legacy = getLegacyRiskPerLot(displaySymbol, stopDistance);
+        const legacy = getLegacyRiskPerLot(displaySymbol, safeStopDistance);
         stopDistancePips = legacy.stopDistancePips;
         pipValuePerLot = legacy.pipValuePerLot;
         riskPerLot = legacy.riskPerLot;
       }
     }
 
-    const rawLot = riskPerLot > 0 && riskAmount > 0 ? riskAmount / riskPerLot : volumeMin;
+    const safeRiskPerLot = toFiniteNumber(riskPerLot, 0);
+    const rawLot = safeRiskPerLot > 0 && safeRiskAmount > 0 ? safeRiskAmount / safeRiskPerLot : volumeMin;
     const roundedLot = rawLot > 0 ? roundVolumeDown(rawLot, volumeStep) : 0;
+    const boundedLot = Math.min(volumeMax, Math.max(volumeMin, roundedLot > 0 ? roundedLot : volumeMin));
     const lotSize = Number(
-      Math.min(volumeMax, Math.max(volumeMin, roundedLot > 0 ? roundedLot : volumeMin)).toFixed(
+      toFiniteNumber(boundedLot, volumeMin).toFixed(
         Math.min(8, Math.max(2, getStepDecimals(volumeStep)))
       )
     );
-    const actualRisk = riskPerLot > 0 ? riskPerLot * lotSize : 0;
+    const actualRisk = safeRiskPerLot > 0 ? safeRiskPerLot * lotSize : 0;
 
     return {
       lotSize,
       rawLot,
-      riskPerLot,
+      riskPerLot: safeRiskPerLot,
       actualRisk,
       stopDistancePips,
       pipValuePerLot,
@@ -572,7 +584,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
       volumeMax,
       volumeStep,
       method,
-      minLotExceedsRisk: riskPerLot > 0 && riskAmount > 0 && rawLot < volumeMin && actualRisk > riskAmount,
+      minLotExceedsRisk: safeRiskPerLot > 0 && safeRiskAmount > 0 && rawLot < volumeMin && actualRisk > safeRiskAmount,
     };
   }, [displaySymbol, riskAmount, stopDistance, symbolTradeSpec]);
   const lotSuggestion = lotSizing.lotSize;
@@ -833,9 +845,14 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     let cancelled = false;
 
     const load = async () => {
-      const [{ data: symbolRows }, { data: setupRows }, { data: heartbeatRow }, { data: jobs }] = await Promise.all([
+      const [{ data: symbolRows }, { data: setupRows }, { data: setupFlags }, { data: heartbeatRow }, { data: jobs }] = await Promise.all([
         supabase.from("mt5_symbols").select("symbol, description, category").eq("connection_id", selectedConnectionId).order("symbol"),
         supabase.rpc("get_setups_for_connection", { p_connection_id: selectedConnectionId }),
+        supabase
+          .from("trading_setups")
+          .select("id, symbol, state, trade_now_active")
+          .eq("connection_id", selectedConnectionId)
+          .eq("is_active", true),
         supabase.from("mt5_worker_heartbeats").select("connection_id, status, last_seen_at, last_metrics").eq("connection_id", selectedConnectionId).maybeSingle(),
         supabase.from("trade_jobs").select("id, connection_id, symbol, side, volume, sl, tp, status, created_at, idempotency_key, error, result").eq("connection_id", selectedConnectionId).order("created_at", { ascending: false }).limit(30),
       ]);
@@ -846,14 +863,25 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
       setRecentJobs((jobs ?? []) as TradeJobRow[]);
 
       const rows = (setupRows ?? []) as SetupRow[];
+      const flagsBySymbol = new Map(
+        ((setupFlags ?? []) as Array<{ id: string; symbol: string; state?: string | null; trade_now_active?: boolean | null }>)
+          .filter((row) => Boolean(row?.symbol))
+          .map((row) => [row.symbol, row])
+      );
       const nextBySymbol: Record<string, SetupRow> = {};
       const nextIds: Record<string, string> = {};
       const nextTradeNow: Record<string, boolean> = {};
       for (const row of rows) {
         if (!row?.symbol) continue;
-        if (!nextBySymbol[row.symbol]) nextBySymbol[row.symbol] = row;
+        const flags = flagsBySymbol.get(row.symbol);
+        const mergedRow: SetupRow = {
+          ...row,
+          state: (flags?.state as SetupState | undefined) ?? row.state,
+          trade_now_active: typeof flags?.trade_now_active === "boolean" ? flags.trade_now_active : row.trade_now_active,
+        };
+        if (!nextBySymbol[row.symbol]) nextBySymbol[row.symbol] = mergedRow;
         nextIds[row.symbol] = row.id;
-        nextTradeNow[row.symbol] = Boolean(row.trade_now_active);
+        nextTradeNow[row.symbol] = Boolean(mergedRow.trade_now_active);
       }
       setSetupsBySymbol(nextBySymbol);
       setSetupIdsBySymbol(nextIds);
@@ -1237,6 +1265,12 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
       toast.error(executionBlocker);
       return;
     }
+    if (!Number.isFinite(lotSuggestion) || lotSuggestion <= 0) {
+      const msg = "Manual lot sizing is invalid for the current entry, stop, and risk inputs. Adjust the stop or risk settings and try again.";
+      setManualResult({ ok: false, msg });
+      toast.error(msg);
+      return;
+    }
 
     startTransition(async () => {
       try {
@@ -1304,7 +1338,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const validStopLoss = typeof slValue === "number" && Number.isFinite(slValue) && slValue > 0 && stopDistance > 0;
   const validTakeProfit = typeof effectiveTakeProfit === "number" && Number.isFinite(effectiveTakeProfit) && effectiveTakeProfit > 0;
   const aiStructureReady = dynamicStopState.stop != null;
-  const liveLotsDisplay = aiManagedExecution ? "AI" : lotSuggestion.toFixed(2);
+  const liveLotsDisplay = aiManagedExecution ? "AI" : (Number.isFinite(lotSuggestion) && lotSuggestion > 0 ? lotSuggestion.toFixed(2) : "0.01");
   const liveSlDisplay = aiManagedExecution ? "AI" : (slValue ?? "");
   const liveTpDisplay = aiManagedExecution ? "AI" : (effectiveTakeProfit ?? "");
   const tradeNowPrereqMsg = !currentSetupId
@@ -1750,14 +1784,14 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                   </div>
                 )}
                 <div className="xl:col-span-2 flex items-end">
-                  <Button onClick={handlePlaceTrade} disabled={isPending || !selectedConnectionId || !selectedSymbol || aiManagedExecution} className="h-10 w-full bg-orange-600 text-white hover:bg-orange-500 disabled:bg-[#1a1a1a] disabled:text-gray-500 disabled:hover:bg-[#1a1a1a]">
+                  <Button onClick={handlePlaceTrade} disabled={isPending || !selectedConnectionId || !selectedSymbol || aiManagedExecution || !Number.isFinite(lotSuggestion) || lotSuggestion <= 0} className="h-10 w-full bg-orange-600 text-white hover:bg-orange-500 disabled:bg-[#1a1a1a] disabled:text-gray-500 disabled:hover:bg-[#1a1a1a]">
                     {isPending ? "Queueing…" : orderType === "market" ? `Queue ${side.toUpperCase()} Trade` : `Place ${orderType.charAt(0).toUpperCase() + orderType.slice(1)} Order`}
                   </Button>
                 </div>
               </div>
               <div className="mt-3 grid gap-2 text-xs text-gray-500 sm:grid-cols-3">
                 <div className="rounded-lg bg-[#0c0c0c] p-3">Risk amount <span className="block pt-1 text-sm font-semibold text-white">{fmtCurrency(riskAmount)}</span></div>
-                <div className="rounded-lg bg-[#0c0c0c] p-3">{aiManagedExecution ? "Lot sizing" : "Suggested lots"} <span className="block pt-1 text-sm font-semibold text-white">{aiManagedExecution ? "AI" : lotSuggestion.toFixed(2)}</span></div>
+                <div className="rounded-lg bg-[#0c0c0c] p-3">{aiManagedExecution ? "Lot sizing" : "Suggested lots"} <span className="block pt-1 text-sm font-semibold text-white">{aiManagedExecution ? "AI" : (Number.isFinite(lotSuggestion) && lotSuggestion > 0 ? lotSuggestion.toFixed(2) : "0.01")}</span></div>
                 <div className="rounded-lg bg-[#0c0c0c] p-3">Stop mode <span className="block pt-1 text-sm font-semibold text-white">{formatStopModeLabel(stopMode)}</span></div>
               </div>
               {aiManagedExecution ? (
@@ -2383,7 +2417,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
               <Input type={aiManagedExecution ? "text" : "number"} step={aiManagedExecution ? undefined : "any"} value={aiManagedExecution ? "AI" : (effectiveTakeProfit ?? "")} readOnly className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
             </div>
           </div>
-          <Button onClick={handlePlaceTrade} disabled={isPending || !selectedConnectionId || !selectedSymbol || aiManagedExecution} className="h-10 w-full bg-orange-600 text-white hover:bg-orange-500 disabled:bg-[#1a1a1a] disabled:text-gray-500 disabled:hover:bg-[#1a1a1a]">
+          <Button onClick={handlePlaceTrade} disabled={isPending || !selectedConnectionId || !selectedSymbol || aiManagedExecution || !Number.isFinite(lotSuggestion) || lotSuggestion <= 0} className="h-10 w-full bg-orange-600 text-white hover:bg-orange-500 disabled:bg-[#1a1a1a] disabled:text-gray-500 disabled:hover:bg-[#1a1a1a]">
             {isPending ? "Queueing…" : "Queue Manual Trade"}
           </Button>
           {aiManagedExecution ? (

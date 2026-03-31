@@ -87,6 +87,20 @@ def _format_supabase_exc(exc: Exception) -> str:
     return " | ".join(parts)
 
 
+def _select_first(query):
+    """Execute a select query and return the first row or {}.
+
+    The sync Supabase client used by the runtime does not expose
+    `maybeSingle()`, so callers that want optional single-row reads should use
+    this helper instead.
+    """
+    resp = query.limit(1).execute()
+    data = resp.data or []
+    if isinstance(data, list):
+        return data[0] if data else {}
+    return data or {}
+
+
 # ---------------------------------------------------------------------------
 # Connections
 # ---------------------------------------------------------------------------
@@ -402,20 +416,17 @@ def get_terminal_execution_blocker(
 
     client = get_client()
     try:
-        settings_resp = (
+        settings = _select_first(
             client
             .table("user_terminal_settings")
             .select("preferences_json, terms_version")
             .eq("user_id", user_id)
-            .maybeSingle()
-            .execute()
         )
     except Exception as exc:
         if _is_missing_relation_error(exc):
             return None
         return f"Failed to validate terminal settings: {getattr(exc, 'message', str(exc))}"
 
-    settings = settings_resp.data or {}
     if not settings or settings.get("terms_version") != TERMINAL_TERMS_VERSION:
         return "Accept the current terminal terms before queueing live MT5 execution."
 
@@ -448,15 +459,12 @@ def get_terminal_execution_blocker(
 
     if needs_heartbeat:
         try:
-            hb_resp = (
+            hb = _select_first(
                 client
                 .table("mt5_worker_heartbeats")
                 .select("last_metrics")
                 .eq("connection_id", connection_id)
-                .maybeSingle()
-                .execute()
             )
-            hb = hb_resp.data or {}
         except Exception:
             hb = {}
 
@@ -492,28 +500,24 @@ def get_terminal_prefs_for_connection(connection_id: str) -> dict:
     """
     try:
         # Step 1: get user_id from connection row
-        conn_resp = (
+        conn_row = _select_first(
             get_client()
             .table("mt5_user_connections")
             .select("user_id")
             .eq("id", connection_id)
-            .maybeSingle()
-            .execute()
         )
-        user_id = (conn_resp.data or {}).get("user_id")
+        user_id = conn_row.get("user_id")
         if not user_id:
             return {}
 
         # Step 2: get preferences from user_terminal_settings
-        prefs_resp = (
+        prefs_row = _select_first(
             get_client()
             .table("user_terminal_settings")
             .select("preferences_json")
             .eq("user_id", user_id)
-            .maybeSingle()
-            .execute()
         )
-        return (prefs_resp.data or {}).get("preferences_json") or {}
+        return prefs_row.get("preferences_json") or {}
     except Exception as exc:
         logger.debug("get_terminal_prefs_for_connection(%s) failed: %s", connection_id, exc)
         return {}
