@@ -36,48 +36,9 @@ const WARM_STATE_MAX_AGE_MS = Math.max(
   Number.parseInt((process.env.MT5_STREAM_WARM_MAX_AGE_MS ?? "15000").trim(), 10) || 15000
 );
 
-type RelayHealth = {
-  relay_source_connection_id?: string;
-  active_conn_ids?: string[];
-};
-
 function sseMessage(payload: object): Uint8Array {
   const type = (payload as { type?: string }).type ?? "message";
   return encoder.encode(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`);
-}
-
-async function fetchRelayHealth(): Promise<RelayHealth | null> {
-  if (!PRICE_RELAY_URL) return null;
-
-  const url = new URL("/health", PRICE_RELAY_URL);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), RELAY_STREAM_TIMEOUT_MS);
-  try {
-    const resp = await fetch(url.toString(), {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-      cache: "no-store",
-    });
-    if (!resp.ok) return null;
-    return (await resp.json()) as RelayHealth;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function canUseRelayForConnection(connFilter?: string): Promise<boolean> {
-  if (!connFilter) return true;
-  if (!PRICE_RELAY_URL && !RELAY_STREAM_URL) return false;
-
-  const health = await fetchRelayHealth();
-  if (!health) return true;
-
-  const relayConnId = health.relay_source_connection_id || health.active_conn_ids?.[0];
-  if (!relayConnId) return true;
-  return relayConnId === connFilter;
 }
 
 function hasWarmState(connFilter?: string): boolean {
@@ -201,7 +162,7 @@ async function proxyRelayStream(req: NextRequest, connFilter?: string): Promise<
 export async function GET(req: NextRequest) {
   const connFilter = req.nextUrl.searchParams.get("conn_id") ?? undefined;
 
-  if ((RELAY_STREAM_URL || PRICE_RELAY_URL) && await canUseRelayForConnection(connFilter)) {
+  if (RELAY_STREAM_URL || PRICE_RELAY_URL) {
     const proxied = await proxyRelayStream(req, connFilter);
     if (proxied.ok) return proxied;
   }

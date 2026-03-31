@@ -45,6 +45,12 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from runtime.mt5_candles import get_live_price_snapshots
+
 
 def _acquire_single_instance_lock() -> None:
     """Prevent multiple relay instances from running at once (Windows-friendly)."""
@@ -277,6 +283,140 @@ _pending_forming: dict  = {}           # conn_id -> {symbol -> {t,o,h,l,c,v}}
 _pending_lock = threading.Lock()
 
 SSE_INTERVAL_S = float(os.getenv("SSE_INTERVAL_MS", "200")) / 1000  # default 200ms
+DIRECT_PRICE_MAX_AGE_MS = max(1000, int(os.getenv("DIRECT_PRICE_MAX_AGE_MS", "5000") or "5000"))
+DIRECT_PRICE_POLL_SECONDS = max(0.5, float(os.getenv("DIRECT_PRICE_POLL_SECONDS", "1.0") or "1.0"))
+DEFAULT_DIRECT_SYMBOLS = [
+    "BTCUSDm", "ETHUSDm", "EURUSDm", "GBPUSDm", "USDJPYm", "XAUUSDm",
+    "USDCADm", "AUDUSDm", "NZDUSDm", "USDCHFm", "EURGBPm", "USOILm",
+]
+DIRECT_CONN_REFRESH_SECONDS = max(5.0, float(os.getenv("DIRECT_CONN_REFRESH_SECONDS", "15") or "15"))
+_direct_conn_cache: tuple[float, list[str]] = (0.0, [])
+
+
+def _newest_price_ts_ms(prices: dict) -> int:
+    newest = 0
+    for snap in prices.values():
+        try:
+            ts_ms = int((snap or {}).get("ts_ms") or 0)
+        except Exception:
+            ts_ms = 0
+        if ts_ms > newest:
+            newest = ts_ms
+    return newest
+
+
+def _resolve_price_symbols(conn_id: str) -> list[str]:
+    with _state_lock:
+        configured = list(config_symbols.get(conn_id, []))
+        cached = list(latest_price.get(conn_id, {}).keys())
+        forming_symbols = list(forming.get(conn_id, {}).keys())
+    ordered = configured + cached + forming_symbols + DEFAULT_DIRECT_SYMBOLS
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in ordered:
+        sym = str(raw or "").strip()
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        result.append(sym)
+    return result
+
+
+def _refresh_direct_prices(conn_id: str) -> dict:
+    if not conn_id:
+        return {}
+    symbols = _resolve_price_symbols(conn_id)
+    if not symbols:
+        return {}
+    try:
+        snapshots = get_live_price_snapshots(conn_id, symbols)
+    except Exception as exc:
+        log.debug(f"direct price fallback failed conn={conn_id[:8]}: {exc!r}")
+        return {}
+
+    if snapshots:
+        with _state_lock:
+            latest_price[conn_id].update(snapshots)
+    return snapshots
+
+
+def _list_direct_price_connections() -> list[str]:
+    global _direct_conn_cache
+
+    cached_at, cached_conn_ids = _direct_conn_cache
+    now = time.time()
+    if cached_conn_ids and (now - cached_at) < DIRECT_CONN_REFRESH_SECONDS:
+        return list(cached_conn_ids)
+
+    conn_ids: list[str] = []
+    try:
+        from runtime import db_client  # type: ignore
+
+        active_rows = db_client.get_active_connections()
+        for row in active_rows:
+            conn_id = str((row or {}).get("id") or "").strip()
+            if conn_id:
+                conn_ids.append(conn_id)
+    except Exception as exc:
+        log.debug(f"direct price connection discovery failed: {exc!r}")
+
+    with _state_lock:
+        conn_ids.extend(list(config_symbols.keys()))
+        conn_ids.extend(list(latest_price.keys()))
+        conn_ids.extend(list(forming.keys()))
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in conn_ids:
+        conn_id = str(raw or "").strip()
+        if not conn_id or conn_id in seen:
+            continue
+        seen.add(conn_id)
+        result.append(conn_id)
+    _direct_conn_cache = (now, list(result))
+    return result
+
+
+def _direct_price_forward_loop() -> None:
+    """Poll direct MT5 prices for non-source connections and forward them.
+
+    This keeps Railway state warm for accounts that do not have an EA-driven
+    tick feed but do have a live local MT5 terminal/worker session.
+    """
+    while True:
+        time.sleep(DIRECT_PRICE_POLL_SECONDS)
+        try:
+            conn_ids = _list_direct_price_connections()
+            for conn_id in conn_ids:
+                if RELAY_SOURCE_CONNECTION_ID and conn_id == RELAY_SOURCE_CONNECTION_ID:
+                    continue
+
+                prices = _refresh_direct_prices(conn_id)
+                if not prices:
+                    continue
+
+                with _pending_lock:
+                    bucket = _pending_broadcast.setdefault(conn_id, {})
+                    bucket.update(prices)
+
+                ticks = [
+                    {
+                        "symbol": sym,
+                        "bid": snap.get("bid"),
+                        "ask": snap.get("ask"),
+                        "ts_ms": snap.get("ts_ms"),
+                    }
+                    for sym, snap in prices.items()
+                ]
+                enqueue_ws({
+                    "type": "tick_batch",
+                    "connection_id": conn_id,
+                    "ts_ms": _newest_price_ts_ms(prices),
+                    "ticks": ticks,
+                    "forming_candles": [],
+                })
+        except Exception as exc:
+            log.debug(f"direct price forward loop error: {exc!r}")
 
 
 def _broadcast_sse_event(msg: dict) -> None:
@@ -890,6 +1030,13 @@ class RelayHandler(BaseHTTPRequestHandler):
                 prices = {}
                 for cid, syms in latest_price.items():
                     prices.update(syms)
+
+        if conn_id:
+            newest = _newest_price_ts_ms(prices)
+            if not prices or (newest and (int(time.time() * 1000) - newest) > DIRECT_PRICE_MAX_AGE_MS):
+                direct_prices = _refresh_direct_prices(conn_id)
+                if direct_prices:
+                    prices = dict(direct_prices)
         body = json.dumps({"prices": prices}).encode()
         self._send(200, body)
 
@@ -921,7 +1068,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         snapshots every SSE_INTERVAL_MS milliseconds without polling.
         No authentication needed – data is read-only market prices.
         """
-        conn_id = _effective_conn_id((qs.get("conn_id", [""])[0] or "").strip())
+        conn_id = ((qs.get("conn_id", [""])[0] or "").strip())
 
         self.send_response(200)
         origin = self.headers.get("Origin", "*")
@@ -941,6 +1088,13 @@ class RelayHandler(BaseHTTPRequestHandler):
                 symbol_snapshot  = list(config_symbols.get(conn_id, []))
                 if not symbol_snapshot:
                     symbol_snapshot = sorted(set(price_snapshot.keys()) | set(forming_snapshot.keys()))
+            newest = _newest_price_ts_ms(price_snapshot)
+            if conn_id and (not price_snapshot or (newest and (int(time.time() * 1000) - newest) > DIRECT_PRICE_MAX_AGE_MS)):
+                direct_prices = _refresh_direct_prices(conn_id)
+                if direct_prices:
+                    price_snapshot = dict(direct_prices)
+                    if not symbol_snapshot:
+                        symbol_snapshot = sorted(set(price_snapshot.keys()) | set(forming_snapshot.keys()))
             if price_snapshot:
                 init_msg = json.dumps({
                     "type": "init",
@@ -984,15 +1138,33 @@ class RelayHandler(BaseHTTPRequestHandler):
         log.info(f"[SSE] client connected  conn_id={conn_id[:8]}  total={len(_sse_clients)}")
 
         try:
+            last_direct_push = 0.0
+            last_direct_snapshot = dict(price_snapshot)
             while True:
                 try:
-                    payload = client_q.get(timeout=15)
+                    payload = client_q.get(timeout=1)
                     self.wfile.write(payload)
                     self.wfile.flush()
                 except queue.Empty:
-                    # Keepalive comment — prevents proxy timeouts
-                    self.wfile.write(b":\n\n")
-                    self.wfile.flush()
+                    now = time.time()
+                    pushed = False
+                    if conn_id and now - last_direct_push >= DIRECT_PRICE_POLL_SECONDS:
+                        direct_prices = _refresh_direct_prices(conn_id)
+                        last_direct_push = now
+                        if direct_prices and direct_prices != last_direct_snapshot:
+                            msg = json.dumps({
+                                "type": "prices",
+                                "connection_id": conn_id,
+                                "prices": direct_prices,
+                            })
+                            self.wfile.write(f"event: prices\ndata: {msg}\n\n".encode())
+                            self.wfile.flush()
+                            last_direct_snapshot = dict(direct_prices)
+                            pushed = True
+                    if not pushed:
+                        # Keepalive comment — prevents proxy timeouts
+                        self.wfile.write(b":\n\n")
+                        self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
@@ -1309,6 +1481,9 @@ def main():
     # Start SSE broadcaster (throttled, pushes price snapshots to browser clients)
     threading.Thread(target=_sse_broadcaster_loop, name="sse-broadcast", daemon=True).start()
     log.info(f"SSE broadcaster started  interval={int(SSE_INTERVAL_S*1000)}ms")
+
+    threading.Thread(target=_direct_price_forward_loop, name="direct-price-forward", daemon=True).start()
+    log.info(f"Direct price forwarder started  interval={DIRECT_PRICE_POLL_SECONDS:.1f}s")
 
     if _setup_manager is not None and _sm_event_queue is not None:
         threading.Thread(target=_setup_event_loop, name="setup-events", daemon=True).start()

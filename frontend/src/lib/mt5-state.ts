@@ -166,11 +166,11 @@ class Mt5State {
   applyHistoricalBulk(connId: string, symbolsData: Array<{symbol: string; bars: Array<{t: number; o: number; h: number; l: number; c: number; v: number}>}>) {
     this.ensureConn(connId);
 
-    const symNames: string[] = [];
+    const symNames = new Set(this.symbols.get(connId) ?? []);
     for (const entry of symbolsData) {
       const sym  = entry.symbol;
       const bars = entry.bars as CandleBar[];
-      symNames.push(sym);
+      symNames.add(sym);
 
       // Seed the buffer with EA-provided history (oldest-first already)
       const sym_map = this.candles.get(connId)!;
@@ -188,10 +188,10 @@ class Mt5State {
       sym_map.set(sym, existing.slice(-CANDLE_MAXBARS));
     }
 
-    if (symNames.length) this.symbols.set(connId, symNames);
+    if (symNames.size) this.symbols.set(connId, [...symNames]);
 
     // Notify subscribers that history is ready
-    this.broadcast({ type: "connected", connection_id: connId, symbols: symNames });
+    this.broadcast({ type: "connected", connection_id: connId, symbols: [...symNames] });
   }
 
   // ── Read methods ───────────────────────────────────────────────────────────
@@ -284,17 +284,13 @@ class Mt5State {
 
   getSymbols(connId?: string): string[] {
     if (connId) {
-      const registered = this.symbols.get(connId) ?? [];
-      if (registered.length) return registered;
-      // Fall back: derive from prices map
-      return [...(this.prices.get(connId)?.keys() ?? [])];
+      const syms = new Set<string>(this.symbols.get(connId) ?? []);
+      this.prices.get(connId)?.forEach((_, key) => syms.add(key));
+      return [...syms];
     }
     const syms = new Set<string>();
     this.symbols.forEach(list => list.forEach(s => syms.add(s)));
-    // Fall back: derive from prices map
-    if (!syms.size) {
-      this.prices.forEach(m => m.forEach((_, k) => syms.add(k)));
-    }
+    this.prices.forEach(m => m.forEach((_, k) => syms.add(k)));
     return [...syms];
   }
 

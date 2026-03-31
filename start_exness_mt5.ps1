@@ -4,13 +4,25 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -Path $Root
 
-$TerminalDir = 'C:\mt5system\terminals\a2baa968-f0b3-49aa-892d-5df0e1e1249f'
+$relaySourceConnId = Get-Content (Join-Path $Root '.env') -ErrorAction SilentlyContinue |
+    ForEach-Object {
+        if ($_ -match '^\s*RELAY_SOURCE_CONNECTION_ID\s*=\s*(.+?)\s*$') {
+            $matches[1].Trim()
+        }
+    } |
+    Select-Object -First 1
+
+if (-not $relaySourceConnId) {
+    $relaySourceConnId = 'a2baa968-f0b3-49aa-892d-5df0e1e1249f'
+}
+
+$TerminalDir = Join-Path $Root ("terminals\{0}" -f $relaySourceConnId)
 $TerminalExe = Join-Path $TerminalDir 'terminal64.exe'
 $StartupIni = Join-Path $TerminalDir 'startup.ini'
 $InstalledExnessExe = 'C:\Program Files\MetaTrader 5 EXNESS\terminal64.exe'
 
 if (-not (Test-Path $TerminalExe)) {
-    throw "Exness MT5 terminal not found: $TerminalExe"
+    throw "Exness MT5 terminal not found for relay source connection ${relaySourceConnId}: $TerminalExe"
 }
 
 Get-CimInstance Win32_Process -Filter "Name='terminal64.exe'" |
@@ -53,4 +65,4 @@ if (-not (Test-TerminalRunning -CandidatePaths @($TerminalExe, $InstalledExnessE
     throw 'Exness MT5 did not stay running after launch attempts.'
 }
 
-Write-Host 'Exness MT5 launched.' -ForegroundColor Green
+Write-Host ("Exness MT5 launched for connection {0}." -f $relaySourceConnId) -ForegroundColor Green

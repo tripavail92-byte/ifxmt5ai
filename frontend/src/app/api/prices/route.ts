@@ -88,9 +88,8 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const symbols = (connId ? mt5State.getSymbols(connId) : mt5State.getSymbols()).length
-    ? (connId ? mt5State.getSymbols(connId) : mt5State.getSymbols())
-    : Object.keys(all);
+  const stateSymbols = connId ? mt5State.getSymbols(connId) : mt5State.getSymbols();
+  const symbols = [...new Set([...stateSymbols, ...Object.keys(all)])];
 
   return NextResponse.json(
     { prices, symbols },

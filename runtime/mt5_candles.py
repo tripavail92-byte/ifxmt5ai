@@ -299,6 +299,67 @@ def get_symbol_trade_specs(connection_id: str, symbol: str) -> dict:
             }
 
 
+def get_live_price_snapshots(connection_id: str, symbols: list[str]) -> dict[str, dict]:
+    """Return latest live bid/ask snapshots for the requested symbols.
+
+    This is used as a fallback when the EA/relay stream is not publishing a
+    dedicated tick feed for a non-source connection, but the local MT5 terminal
+    for that connection is still available.
+    """
+    requested = []
+    seen: set[str] = set()
+    for raw in symbols or []:
+        sym = str(raw or "").strip()
+        if not sym or sym in seen:
+            continue
+        requested.append(sym)
+        seen.add(sym)
+
+    if not requested:
+        return {}
+
+    with _session_lock:
+        with _Mt5IpcLock():
+            import MetaTrader5 as mt5  # type: ignore
+
+            if not _ensure_session_for_connection(connection_id):
+                raise Mt5CandlesError("mt5.initialize failed")
+
+            now_ms = int(time.time() * 1000)
+            out: dict[str, dict] = {}
+            for symbol in requested:
+                try:
+                    mt5.symbol_select(symbol, True)
+                except Exception:
+                    pass
+
+                try:
+                    tick = mt5.symbol_info_tick(symbol)
+                except Exception:
+                    tick = None
+
+                if tick is None:
+                    continue
+
+                bid = float(getattr(tick, "bid", 0.0) or 0.0)
+                ask = float(getattr(tick, "ask", 0.0) or 0.0)
+                if bid <= 0 and ask <= 0:
+                    continue
+
+                ts_ms = int(getattr(tick, "time_msc", 0) or 0)
+                if ts_ms <= 0:
+                    tick_time = int(getattr(tick, "time", 0) or 0)
+                    ts_ms = tick_time * 1000 if tick_time > 0 else now_ms
+
+                out[symbol] = {
+                    "bid": bid,
+                    "ask": ask,
+                    "ts_ms": ts_ms,
+                }
+
+            return out
+
+
 def get_mt5_status(connection_id: str, symbol: str, timeframe: str) -> dict:
     """Return a small diagnostic snapshot for alignment debugging.
 
