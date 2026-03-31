@@ -299,12 +299,17 @@ class Mt5State {
   broadcast(payload: object) {
     // Include event name so EventSource.addEventListener(type, ...) works
     const type = (payload as { type?: string }).type ?? "message";
+    const targetConnId = String((payload as { connection_id?: string }).connection_id ?? "").trim();
     const line = `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
     const encoded = new TextEncoder().encode(line);
     const dead: SseSubscriber[] = [];
 
     for (const sub of this.subscribers) {
       try {
+        const connFilter = String(sub.connFilter ?? "").trim();
+        if (connFilter && targetConnId && connFilter !== targetConnId) {
+          continue;
+        }
         sub.controller.enqueue(encoded);
       } catch {
         dead.push(sub);
