@@ -162,13 +162,13 @@ async function proxyRelayStream(req: NextRequest, connFilter?: string): Promise<
 export async function GET(req: NextRequest) {
   const connFilter = req.nextUrl.searchParams.get("conn_id") ?? undefined;
 
+  if (hasWarmState(connFilter)) {
+    return streamFromState(req, connFilter);
+  }
+
   if (RELAY_STREAM_URL || PRICE_RELAY_URL) {
     const proxied = await proxyRelayStream(req, connFilter);
     if (proxied.ok) return proxied;
-  }
-
-  if (hasWarmState(connFilter)) {
-    return streamFromState(req, connFilter);
   }
 
   return streamFromState(req, connFilter);
