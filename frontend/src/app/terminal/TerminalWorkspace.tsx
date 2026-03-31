@@ -468,13 +468,14 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const [pendingPrice, setPendingPrice] = useState<string>("");
   // Mirrors ManualTradeCard hydration guard — prevents chart SSR/client mismatch
   const [hydrated, setHydrated] = useState(false);
+  const [pendingFeedSymbol, setPendingFeedSymbol] = useState<string | null>(null);
 
   const {
     prices,
     forming,
     lastClose,
     symbols: liveSymbols,
-    isConnected,
+    transportMode,
   } = usePriceFeed(selectedConnectionId || undefined);
 
   const selectedConnection = useMemo(
@@ -902,6 +903,29 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     });
   }, [selectedSymbol, entryPrice, zonePercent, side, aiSensitivity]);
 
+
+  useEffect(() => {
+    if (!selectedConnectionId || !selectedSymbol) {
+      setPendingFeedSymbol(null);
+      return;
+    }
+    setPendingFeedSymbol(selectedSymbol);
+    const timeout = window.setTimeout(() => {
+      setPendingFeedSymbol((current) => (current === selectedSymbol ? null : current));
+    }, 6_000);
+    return () => window.clearTimeout(timeout);
+  }, [selectedConnectionId, selectedSymbol]);
+
+  useEffect(() => {
+    if (!pendingFeedSymbol || pendingFeedSymbol !== selectedSymbol) return;
+    const freshQuoteReady = Boolean(
+      livePrice
+      && livePrice.ts_ms
+      && (Date.now() - livePrice.ts_ms) <= 3_000
+    );
+    if (!freshQuoteReady) return;
+    setPendingFeedSymbol(null);
+  }, [livePrice, pendingFeedSymbol, selectedSymbol]);
   useEffect(() => {
     if (!selectedConnectionId || !selectedSymbol) {
       setSymbolTradeSpec(null);
@@ -1263,6 +1287,34 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   const streamSelectableSymbols = [...new Set((liveSymbols ?? []).filter(Boolean))];
   const availableSymbols = liveSelectableSymbols.length > 0 ? liveSelectableSymbols : streamSelectableSymbols.length > 0 ? streamSelectableSymbols : dbSymbols;
   const hasLiveQuoteForSelected = selectedSymbol ? Boolean(prices[selectedSymbol]) : false;
+  const selectedPriceAgeMs = livePrice?.ts_ms ? Date.now() - livePrice.ts_ms : Number.POSITIVE_INFINITY;
+  const hasFreshSelectedQuote = Boolean(livePrice && selectedPriceAgeMs <= 3_000);
+  const isPairSwitchLoading = Boolean(
+    selectedConnectionId
+    && selectedSymbol
+    && pendingFeedSymbol === selectedSymbol
+    && !hasFreshSelectedQuote
+  );
+  const feedStatus = transportMode === "sse"
+    ? {
+        dot: "bg-emerald-400 animate-pulse",
+        label: "SSE live",
+        tone: "text-emerald-300",
+        detail: "Primary stream active",
+      }
+    : transportMode === "polling"
+      ? {
+          dot: "bg-red-400 animate-pulse",
+          label: "Polling fallback",
+          tone: "text-red-300",
+          detail: "Recovering live feed",
+        }
+      : {
+          dot: "bg-yellow-500 animate-pulse",
+          label: "Connecting",
+          tone: "text-yellow-300",
+          detail: "Waiting for live feed",
+        };
   // Fallback symbol list while SSE connects — same as ManualTradeCard SUBSCRIBED list
   const SUBSCRIBED_DEFAULT = ["BTCUSDm","ETHUSDm","EURUSDm","GBPUSDm","USDJPYm","XAUUSDm","USDCADm","AUDUSDm","NZDUSDm","USDCHFm","EURGBPm","USOILm"];
   const rawTabSymbols = liveSelectableSymbols.length > 0 ? liveSelectableSymbols : availableSymbols.length > 0 ? availableSymbols : SUBSCRIBED_DEFAULT;
@@ -1472,8 +1524,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                 <div className="font-semibold text-emerald-300">{fmtCurrency(accountEquity)}</div>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className={`h-1.5 w-1.5 rounded-full ${isConnected ? "bg-emerald-400 animate-pulse" : "bg-yellow-500"}`} />
-                <span className="text-gray-500">{isConnected ? "LIVE" : "connecting…"}</span>
+                <span className={`h-1.5 w-1.5 rounded-full ${feedStatus.dot}`} />
+                <span className={`font-medium ${feedStatus.tone}`}>{feedStatus.label}</span>
               </div>
             </div>
           </div>
@@ -1514,20 +1566,33 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
           </div>
 
           {hydrated && selectedConnectionId ? (
-            <CandlestickChart
-              symbol={displaySymbol}
-              liveSymbol={displaySymbol}
-              connId={selectedConnectionId || undefined}
-              entryPrice={showEntryZones && validEntry ? parsedEntry : undefined}
-              entryZoneLow={showEntryZones && zone ? zone.low : undefined}
-              entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
-              sl={showEntryZones && !aiManagedExecution ? slValue : undefined}
-              tp={showTPZones && !aiManagedExecution ? effectiveTakeProfit : undefined}
-              prices={prices}
-              forming={forming}
-              lastClose={lastClose}
-              className="w-full"
-            />
+            <div className="relative">
+              <CandlestickChart
+                symbol={displaySymbol}
+                liveSymbol={displaySymbol}
+                connId={selectedConnectionId || undefined}
+                entryPrice={showEntryZones && validEntry ? parsedEntry : undefined}
+                entryZoneLow={showEntryZones && zone ? zone.low : undefined}
+                entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
+                sl={showEntryZones && !aiManagedExecution ? slValue : undefined}
+                tp={showTPZones && !aiManagedExecution ? effectiveTakeProfit : undefined}
+                prices={prices}
+                forming={forming}
+                lastClose={lastClose}
+                className="w-full"
+              />
+              {isPairSwitchLoading ? (
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-xl bg-[#050505]/72 backdrop-blur-[1px]">
+                  <div className="flex items-center gap-3 rounded-full border border-white/10 bg-black/70 px-4 py-2 text-sm text-white shadow-lg">
+                    <RefreshCw className="size-4 animate-spin text-orange-400" />
+                    <div>
+                      <div className="font-medium">Loading {selectedSymbol} live feed…</div>
+                      <div className="text-[11px] text-gray-400">Waiting for fresh prices to stabilize</div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </div>
           ) : hydrated ? (
             <div className="flex min-h-[320px] items-center justify-center rounded-lg border border-[#2a2a2a] bg-[#0c0c0c] px-6 py-10 text-center text-sm text-gray-500">
               Select an active MT5 connection to load live prices and historical candles.
@@ -1604,7 +1669,15 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                   <div className="mt-1 text-[11px] text-gray-500">Stop distance: <span className="font-semibold text-gray-200">{lotSizing.stopDistancePips > 0 ? lotSizing.stopDistancePips.toFixed(2) : "0.00"} pips</span> · Pip value/lot: <span className="font-semibold text-gray-200">{lotSizing.pipValuePerLot > 0 ? fmtCurrency(lotSizing.pipValuePerLot) : "—"}</span></div>
                 </>
               )}
-              <div className="mt-2 text-[11px] text-gray-500">Feed status: <span className="font-semibold text-gray-200">{isConnected ? "LIVE" : "Connecting"}</span></div>
+              <div className="mt-2 flex items-center gap-2 text-[11px] text-gray-500">
+                <span>Feed status:</span>
+                <span className={`inline-flex items-center gap-1.5 font-semibold ${feedStatus.tone}`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${feedStatus.dot}`} />
+                  {feedStatus.label}
+                </span>
+                <span className="text-gray-600">· {feedStatus.detail}</span>
+                {isPairSwitchLoading ? <span className="text-orange-300">· syncing {selectedSymbol}</span> : null}
+              </div>
               {manualResult && <div className="mt-3"><InlineMessage ok={manualResult.ok} message={manualResult.msg} /></div>}
             </div>
 

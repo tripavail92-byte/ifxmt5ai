@@ -47,6 +47,7 @@ export interface PriceFeedState {
   lastClose:   ClosedBar | null;                // most recently closed bar
   symbols:     string[];                        // symbols known to the relay
   isConnected: boolean;
+  transportMode: "connecting" | "sse" | "polling";
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
@@ -58,6 +59,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     lastClose:   null,
     symbols:     [],
     isConnected: false,
+    transportMode: "connecting",
   });
 
   const esRef      = useRef<EventSource | null>(null);
@@ -133,14 +135,18 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       backoffRef.current = 1_000;
       stalePollsRef.current = 0;
       lastEventAtRef.current = Date.now();
-      setState(s => ({ ...s, isConnected: true }));
+      setState(s => ({ ...s, isConnected: true, transportMode: "sse" }));
     };
 
     es.onerror = () => {
       es.close();
       esRef.current = null;
       if (!mountedRef.current) return;
-      setState(s => ({ ...s, isConnected: false }));
+      setState(s => ({
+        ...s,
+        isConnected: false,
+        transportMode: Object.keys(s.prices).length > 0 ? "polling" : "connecting",
+      }));
       const delay = backoffRef.current;
       backoffRef.current = Math.min(delay * 2, 30_000);
       clearReconnectTimer();
@@ -163,6 +169,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         setState(s => ({
           ...s,
           isConnected: true,
+          transportMode: "sse",
           prices:  d.prices  ?? s.prices,
           forming: d.forming ?? s.forming,
           symbols: d.symbols?.length ? d.symbols : s.symbols,
@@ -178,6 +185,8 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         if (!acceptsConn(d.connection_id)) return;
         setState(s => ({
           ...s,
+          isConnected: true,
+          transportMode: "sse",
           prices: { ...s.prices, ...d.prices },
         }));
       } catch { /* ignore */ }
@@ -191,6 +200,8 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         if (!acceptsConn(d.connection_id)) return;
         setState(s => ({
           ...s,
+          isConnected: true,
+          transportMode: "sse",
           forming: { ...s.forming, ...d.forming },
         }));
       } catch { /* ignore */ }
@@ -203,7 +214,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         const d = JSON.parse(e.data) as { connection_id?: string; symbol: string; bar: CandleBar };
         if (!acceptsConn(d.connection_id)) return;
         if (d.symbol && d.bar) {
-          setState(s => ({ ...s, lastClose: { symbol: d.symbol, bar: d.bar } }));
+          setState(s => ({ ...s, isConnected: true, transportMode: "sse", lastClose: { symbol: d.symbol, bar: d.bar } }));
         }
       } catch { /* ignore */ }
     });
@@ -215,13 +226,15 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         const d = JSON.parse(e.data) as { connection_id?: string; symbols?: string[] };
         if (!acceptsConn(d.connection_id)) return;
         if (d.symbols?.length) {
-          setState(s => ({ ...s, symbols: d.symbols! }));
+          setState(s => ({ ...s, isConnected: true, transportMode: "sse", symbols: d.symbols! }));
         }
       } catch { /* ignore */ }
     });
 
     es.addEventListener("heartbeat", () => {
       lastEventAtRef.current = Date.now();
+      if (!mountedRef.current) return;
+      setState(s => ({ ...s, isConnected: true, transportMode: "sse" }));
     });
 
   }, [acceptsConn, clearReconnectTimer, connId]);
@@ -231,7 +244,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     esRef.current?.close();
     esRef.current = null;
     if (!mountedRef.current) return;
-    setState(s => ({ ...s, isConnected: false }));
+    setState(s => ({ ...s, isConnected: false, transportMode: Object.keys(s.prices).length > 0 ? "polling" : "connecting" }));
     reconnectSeqRef.current += 1;
     timerRef.current = setTimeout(() => {
       if (!mountedRef.current) return;
@@ -271,6 +284,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
           prices: { ...s.prices, ...best.prices },
           symbols: best.symbols?.length ? best.symbols : s.symbols,
           isConnected: true,
+          transportMode: streamHealthy ? "sse" : "polling",
         }));
       }
 
@@ -307,6 +321,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       lastClose: null,
       symbols: [],
       isConnected: false,
+      transportMode: "connecting",
     });
     lastEventAtRef.current = Date.now();
   }, [connId]);
