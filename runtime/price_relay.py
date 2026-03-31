@@ -282,9 +282,9 @@ _pending_broadcast: dict = {}           # conn_id -> {symbol -> {bid,ask,ts_ms}}
 _pending_forming: dict  = {}           # conn_id -> {symbol -> {t,o,h,l,c,v}}
 _pending_lock = threading.Lock()
 
-SSE_INTERVAL_S = float(os.getenv("SSE_INTERVAL_MS", "200")) / 1000  # default 200ms
-DIRECT_PRICE_MAX_AGE_MS = max(1000, int(os.getenv("DIRECT_PRICE_MAX_AGE_MS", "5000") or "5000"))
-DIRECT_PRICE_POLL_SECONDS = max(0.5, float(os.getenv("DIRECT_PRICE_POLL_SECONDS", "1.0") or "1.0"))
+SSE_INTERVAL_S = float(os.getenv("SSE_INTERVAL_MS", "100")) / 1000  # default 100ms
+DIRECT_PRICE_MAX_AGE_MS = max(750, int(os.getenv("DIRECT_PRICE_MAX_AGE_MS", "1500") or "1500"))
+DIRECT_PRICE_POLL_SECONDS = max(0.25, float(os.getenv("DIRECT_PRICE_POLL_SECONDS", "0.25") or "0.25"))
 DEFAULT_DIRECT_SYMBOLS = [
     "BTCUSDm", "ETHUSDm", "EURUSDm", "GBPUSDm", "USDJPYm", "XAUUSDm",
     "USDCADm", "AUDUSDm", "NZDUSDm", "USDCHFm", "EURGBPm", "USOILm",
@@ -589,8 +589,8 @@ _fwd_queue: queue.Queue = queue.Queue(maxsize=2000)
 _fwd_tick_lock = threading.Lock()
 _fwd_tick_batches: dict[str, dict] = {}
 TICK_FORWARD_INTERVAL_S = max(
-    0.1,
-    float(os.getenv("RAILWAY_TICK_FORWARD_INTERVAL_SECONDS", "0.25") or "0.25"),
+    0.05,
+    float(os.getenv("RAILWAY_TICK_FORWARD_INTERVAL_SECONDS", "0.1") or "0.1"),
 )
 
 

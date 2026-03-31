@@ -33,7 +33,7 @@ const RELAY_STREAM_TIMEOUT_MS = Math.max(
 );
 const WARM_STATE_MAX_AGE_MS = Math.max(
   1000,
-  Number.parseInt((process.env.MT5_STREAM_WARM_MAX_AGE_MS ?? "15000").trim(), 10) || 15000
+  Number.parseInt((process.env.MT5_STREAM_WARM_MAX_AGE_MS ?? "3000").trim(), 10) || 3000
 );
 
 function sseMessage(payload: object): Uint8Array {

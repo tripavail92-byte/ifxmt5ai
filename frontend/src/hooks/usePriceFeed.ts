@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const PUBLIC_PRICE_RELAY_URL = (process.env.NEXT_PUBLIC_PRICE_RELAY_URL ?? "").trim();
-const MAX_SERVER_PRICE_AGE_MS = 10_000;
+const MAX_SERVER_PRICE_AGE_MS = 2_500;
 
 // ─── Types (mirror CandleBar / PriceSnapshot from mt5-state.ts) ───────────────
 
@@ -255,7 +255,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     connect();
     pollRef.current = setInterval(() => {
       void pollPrices();
-    }, 3000);
+    }, 1000);
     return () => {
       mountedRef.current = false;
       esRef.current?.close();

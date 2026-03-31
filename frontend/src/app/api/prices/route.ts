@@ -20,7 +20,7 @@ const PRICE_RELAY_TIMEOUT_MS = Math.max(
 );
 const PRICE_STATE_MAX_AGE_MS = Math.max(
   1000,
-  Number.parseInt((process.env.MT5_PRICE_STATE_MAX_AGE_MS ?? "15000").trim(), 10) || 15000
+  Number.parseInt((process.env.MT5_PRICE_STATE_MAX_AGE_MS ?? "3000").trim(), 10) || 3000
 );
 
 function newestPriceTs(prices: Record<string, { bid: number; ask: number; ts_ms: number }>): number {
