@@ -1,7 +1,18 @@
 # start_cloudflared.ps1
-# Starts the Cloudflare quick tunnel, captures the new URL,
+# Starts the Cloudflare quick tunnel OR authenticated tunnel (if API token provided),
 # automatically updates Railway env vars, and triggers a redeploy.
 # Run this on every boot -- no manual URL updates needed.
+
+# Load .env to get CLOUDFLARE_API_TOKEN if present
+$envFile = "C:\mt5system\.env"
+$env:CLOUDFLARE_API_TOKEN = $null
+if (Test-Path $envFile) {
+    Get-Content $envFile | ForEach-Object {
+        if ($_ -match '^\s*CLOUDFLARE_API_TOKEN\s*=\s*(.+)') {
+            $env:CLOUDFLARE_API_TOKEN = $matches[1].Trim('"', "'")
+        }
+    }
+}
 
 $RELAY    = "C:\mt5system\cloudflared.exe"
 $LOG_ERR  = "C:\mt5system\logs\cloudflared_err.log"
@@ -27,12 +38,24 @@ Start-Sleep -Seconds 1
 
 Write-Host "Starting Cloudflare Tunnel -> http://localhost:8082 ..."
 
-Start-Process -FilePath $RELAY `
-    -WorkingDirectory "C:\mt5system" `
-    -ArgumentList "tunnel --url http://localhost:8082 --no-autoupdate" `
-    -RedirectStandardOutput $LOG_OUT `
-    -RedirectStandardError  $LOG_ERR `
-    -NoNewWindow
+if ($env:CLOUDFLARE_API_TOKEN) {
+    Write-Host "Using authenticated tunnel (API token present)"
+    Start-Process -FilePath $RELAY `
+        -WorkingDirectory "C:\mt5system" `
+        -ArgumentList "tunnel --url http://localhost:8082 --no-autoupdate" `
+        -EnvironmentVariables @{ "CLOUDFLARE_API_TOKEN" = $env:CLOUDFLARE_API_TOKEN } `
+        -RedirectStandardOutput $LOG_OUT `
+        -RedirectStandardError  $LOG_ERR `
+        -NoNewWindow
+} else {
+    Write-Host "Using quick tunnel (no API token)"
+    Start-Process -FilePath $RELAY `
+        -WorkingDirectory "C:\mt5system" `
+        -ArgumentList "tunnel --url http://localhost:8082 --no-autoupdate" `
+        -RedirectStandardOutput $LOG_OUT `
+        -RedirectStandardError  $LOG_ERR `
+        -NoNewWindow
+}
 
 # Wait up to 30s for URL to appear
 Write-Host "Waiting for tunnel URL..."
