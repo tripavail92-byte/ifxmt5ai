@@ -29,7 +29,7 @@ const RELAY_STREAM_URL = (process.env.RELAY_STREAM_URL ?? "").trim();
 const PRICE_RELAY_URL = (process.env.PRICE_RELAY_URL ?? "").trim();
 const RELAY_STREAM_TIMEOUT_MS = Math.max(
   1000,
-  Number.parseInt((process.env.RELAY_STREAM_TIMEOUT_MS ?? "5000").trim(), 10) || 5000
+  Number.parseInt((process.env.RELAY_STREAM_TIMEOUT_MS ?? "3000").trim(), 10) || 3000
 );
 const WARM_STATE_MAX_AGE_MS = Math.max(
   1000,
@@ -86,10 +86,12 @@ function streamFromState(req: NextRequest, connFilter?: string): Response {
       const prices  = mt5State.getPrices(connFilter);
       controller.enqueue(sseMessage({ type: "init", symbols, prices, subscribers: mt5State.subscriberCount }));
 
+      // Send frequent heartbeats to prevent frontend from detecting the stream as dead.
+      // Frontend considers stream stale after 4s without events, so heartbeat every 2.5s.
       heartbeatTimer = setInterval(() => {
         try { controller.enqueue(sseMessage({ type: "heartbeat", ts: Date.now() })); }
         catch { /* closed */ }
-      }, 15_000);
+      }, 2_500);
     },
     cancel() {
       if (sub) mt5State.removeSubscriber(sub);
