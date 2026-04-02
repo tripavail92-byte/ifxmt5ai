@@ -205,6 +205,19 @@ def upsert_heartbeat(
             payload, on_conflict="connection_id"
         ).execute()
     except Exception as exc:
+        # Foreign key constraint error (23503): connection no longer exists in mt5_user_connections
+        # This happens when a connection is deleted while the worker is running.
+        # Worker should exit gracefully in this case rather than crashing.
+        exc_str = str(exc)
+        if "23503" in exc_str or "foreign key constraint" in exc_str.lower():
+            logger.info(
+                "Connection %s deleted while worker was running (FK constraint). "
+                "Worker will exit on next heartbeat attempt.",
+                connection_id,
+            )
+            # Re-raise as a signal for the worker to exit gracefully
+            raise RuntimeError(f"Connection {connection_id} no longer exists in database") from exc
+
         # Avoid log spam: only log a detailed message once per connection per 30s.
         now = time.time()
         cache = globals().setdefault("_HB_ERR_LAST", {})

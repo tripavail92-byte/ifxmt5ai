@@ -780,12 +780,17 @@ def run_worker(connection_id: str):
                 terminal_path=str(terminal_path),
                 started_at=started_at,
             )
+        except RuntimeError as e:
+            if "no longer exists" in str(e):
+                logger.warning("Connection deleted during initialization — exiting worker")
+                sys.exit(0)
         except Exception:
             return
 
     def start_keepalive(status: str) -> threading.Event:
         """Keep the heartbeat fresh while blocking calls (e.g., mt5.initialize)."""
         stop_event = threading.Event()
+        deleted_signal = [False]  # Use list for mutable flag in nested function
 
         def _loop() -> None:
             # Fire immediately, then every HEARTBEAT_INTERVAL.
@@ -798,6 +803,12 @@ def run_worker(connection_id: str):
                         terminal_path=str(terminal_path),
                         started_at=started_at,
                     )
+                except RuntimeError as e:
+                    if "no longer exists" in str(e):
+                        logger.warning("Connection deleted during init keepalive — stopping heartbeat updates")
+                        deleted_signal[0] = True
+                        stop_event.set()
+                        break
                 except Exception:
                     pass
                 # Wait with early-exit support.
@@ -882,18 +893,29 @@ def run_worker(connection_id: str):
         logger.error("MT5 failed to initialize after %d attempts. Cooling down.", INIT_RETRIES)
         db.log_event("error", "worker", f"MT5 init failed after {INIT_RETRIES} attempts", connection_id)
         db.update_connection_status(connection_id, "error", "MT5 init failed")
-        db.upsert_heartbeat(connection_id, pid, "error", started_at=started_at)
+        try:
+            db.upsert_heartbeat(connection_id, pid, "error", started_at=started_at)
+        except RuntimeError as e:
+            if "no longer exists" in str(e):
+                logger.warning("Connection deleted during error heartbeat — exiting")
+                sys.exit(0)
         time.sleep(COOLDOWN_SEC)
         sys.exit(1)
 
     logger.info("MT5 initialized and logged in as %s on %s", account_login, broker_server)
-    db.upsert_heartbeat(
-        connection_id, pid, "online",
-        terminal_path=str(terminal_path),
-        mt5_initialized=True,
-        account_login=str(account_login),
-        started_at=started_at,
-    )
+    try:
+        db.upsert_heartbeat(
+            connection_id, pid, "online",
+            terminal_path=str(terminal_path),
+            mt5_initialized=True,
+            account_login=str(account_login),
+            started_at=started_at,
+        )
+    except RuntimeError as e:
+        if "no longer exists" in str(e):
+            logger.warning("Connection deleted after MT5 init — exiting")
+            sys.exit(0)
+        raise
     db.update_connection_status(connection_id, "online")
 
     # Sync live symbol list from broker to Supabase (for frontend dropdown)
@@ -990,14 +1012,20 @@ def run_worker(connection_id: str):
                 }
                 for p in raw_positions
             ]
-            db.upsert_heartbeat(
-                connection_id, pid, "online",
-                terminal_path=str(terminal_path),
-                mt5_initialized=True,
-                account_login=str(account_login),
-                last_metrics=metrics,
-                started_at=started_at,
-            )
+            try:
+                db.upsert_heartbeat(
+                    connection_id, pid, "online",
+                    terminal_path=str(terminal_path),
+                    mt5_initialized=True,
+                    account_login=str(account_login),
+                    last_metrics=metrics,
+                    started_at=started_at,
+                )
+            except RuntimeError as e:
+                if "no longer exists" in str(e):
+                    logger.error("Connection was deleted — exiting worker: %s", e)
+                    sys.exit(0)
+                raise
             last_heartbeat = now
 
             # Periodically sync connection status to 'online' so stale
@@ -1010,20 +1038,36 @@ def run_worker(connection_id: str):
         if not check_terminal_health(logger):
             logger.warning("Terminal health check failed. Attempting reinitialize...")
             db.update_connection_status(connection_id, "degraded", "Health check failed")
-            db.upsert_heartbeat(connection_id, pid, "degraded", started_at=started_at)
+            try:
+                db.upsert_heartbeat(connection_id, pid, "degraded", started_at=started_at)
+            except RuntimeError as e:
+                if "no longer exists" in str(e):
+                    logger.warning("Connection deleted during health check — exiting")
+                    sys.exit(0)
             db.log_event("warn", "worker", "Health check failed — reinitializing", connection_id)
             mt5.shutdown()
             time.sleep(5)
 
             reinit_keepalive_stop = start_keepalive("degraded")
             try:
+                def safe_degraded_hb() -> None:
+                    """Progress callback that handles connection deletion gracefully."""
+                    try:
+                        db.upsert_heartbeat(connection_id, pid, "degraded", started_at=started_at)
+                    except RuntimeError as e:
+                        if "no longer exists" in str(e):
+                            logger.warning("Connection deleted during reinit — exiting")
+                            sys.exit(0)
+                    except Exception:
+                        pass
+
                 if not mt5_init_headless(
                     str(terminal_path / "terminal64.exe"),
                     account_login,
                     password,
                     broker_server,
                     INIT_TIMEOUT,
-                    progress_cb=lambda: db.upsert_heartbeat(connection_id, pid, "degraded", started_at=started_at),
+                    progress_cb=safe_degraded_hb,
                 ):
                     logger.error("Reinitialize failed. Exiting for supervisor restart.")
                     db.update_connection_status(connection_id, "error", "Reinitialize failed")
@@ -1036,7 +1080,7 @@ def run_worker(connection_id: str):
                     password,
                     broker_server,
                     LOGIN_TIMEOUT,
-                    progress_cb=lambda: db.upsert_heartbeat(connection_id, pid, "degraded", started_at=started_at),
+                    progress_cb=safe_degraded_hb,
                 ):
                     logger.error("Relogin failed after reinitialize. Exiting.")
                     db.update_connection_status(connection_id, "error", "Relogin failed")
