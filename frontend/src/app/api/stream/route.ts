@@ -176,6 +176,13 @@ export async function GET(req: NextRequest) {
 
   const connFilter = relayConnectionId(access.connId || undefined);
 
+  // Guest preview mode must prefer the upstream relay stream directly.
+  // If a Railway replica has only a cached snapshot in local state, serving the
+  // in-memory fallback here can make quotes appear online but never advance.
+  if (!access.isAuthenticated && (RELAY_STREAM_URL || PRICE_RELAY_URL)) {
+    return proxyRelayStream(req, connFilter);
+  }
+
   if (hasWarmState(connFilter)) {
     return streamFromState(req, connFilter);
   }
