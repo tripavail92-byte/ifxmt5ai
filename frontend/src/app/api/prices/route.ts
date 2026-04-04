@@ -10,7 +10,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { mt5State } from "@/lib/mt5-state";
-import { SERVER_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
+import { PUBLIC_PRICE_RELAY_URL, SERVER_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
@@ -38,10 +38,10 @@ function hasFreshPrices(prices: Record<string, { bid: number; ask: number; ts_ms
   return newest > 0 && (Date.now() - newest) <= PRICE_STATE_MAX_AGE_MS;
 }
 
-async function fetchRelayPrices(connId?: string): Promise<Record<string, { bid: number; ask: number; ts_ms: number }> | null> {
-  if (!PRICE_RELAY_URL) return null;
+async function fetchRelayPricesFrom(baseUrl: string, connId?: string): Promise<Record<string, { bid: number; ask: number; ts_ms: number }> | null> {
+  if (!baseUrl) return null;
 
-  const url = new URL("/prices", PRICE_RELAY_URL);
+  const url = new URL("/prices", baseUrl);
   if (connId) url.searchParams.set("conn_id", connId);
 
   const controller = new AbortController();
@@ -64,6 +64,18 @@ async function fetchRelayPrices(connId?: string): Promise<Record<string, { bid: 
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function fetchRelayPrices(connId?: string): Promise<Record<string, { bid: number; ask: number; ts_ms: number }> | null> {
+  const candidates = [...new Set([PRICE_RELAY_URL, PUBLIC_PRICE_RELAY_URL].filter(Boolean))];
+  for (const baseUrl of candidates) {
+    const first = await fetchRelayPricesFrom(baseUrl, connId);
+    if (first && Object.keys(first).length) return first;
+
+    const retry = await fetchRelayPricesFrom(baseUrl, connId);
+    if (retry && Object.keys(retry).length) return retry;
+  }
+  return null;
 }
 
 export async function GET(req: NextRequest) {

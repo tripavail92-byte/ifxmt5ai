@@ -263,6 +263,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       } : null;
 
       let best = data;
+      const hasServerPrices = Boolean(data?.prices && Object.keys(data.prices).length > 0);
       const serverNewest = newestTs(data?.prices);
       const serverIsStale = !serverNewest || (Date.now() - serverNewest) > MAX_SERVER_PRICE_AGE_MS;
       if (!best?.prices || !Object.keys(best.prices).length || serverIsStale) {
@@ -291,6 +292,9 @@ export function usePriceFeed(connId?: string): PriceFeedState {
 
       const eventAge = Date.now() - lastEventAtRef.current;
       const streamHealthy = esRef.current && eventAge <= STREAM_STALE_MS;
+      const hasAnyPrices = Boolean(best?.prices && Object.keys(best.prices).length > 0)
+        || hasServerPrices
+        || Object.keys(state.prices).length > 0;
       if (streamHealthy) {
         stalePollsRef.current = 0;
       } else {
@@ -301,7 +305,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         }
       }
 
-      schedulePoll(streamHealthy ? HEALTHY_POLL_MS : DEGRADED_POLL_MS, () => {
+      schedulePoll(streamHealthy && hasAnyPrices ? HEALTHY_POLL_MS : DEGRADED_POLL_MS, () => {
         void pollPrices();
       });
     } catch {
