@@ -31,7 +31,7 @@ const RELAY_STREAM_URL = (process.env.RELAY_STREAM_URL ?? "").trim();
 const PRICE_RELAY_URL = SERVER_PRICE_RELAY_URL;
 const RELAY_STREAM_TIMEOUT_MS = Math.max(
   1000,
-  Number.parseInt((process.env.RELAY_STREAM_TIMEOUT_MS ?? "3000").trim(), 10) || 3000
+  Number.parseInt((process.env.RELAY_STREAM_TIMEOUT_MS ?? "10000").trim(), 10) || 10000
 );
 const WARM_STATE_MAX_AGE_MS = Math.max(
   1000,
