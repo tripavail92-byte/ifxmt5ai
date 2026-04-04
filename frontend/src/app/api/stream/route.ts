@@ -174,7 +174,9 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  const connFilter = relayConnectionId(access.connId || undefined);
+  const connFilter = !access.isAuthenticated
+    ? (access.connId || undefined)
+    : relayConnectionId(access.connId || undefined);
 
   // Guest preview mode must prefer the upstream relay stream directly.
   // If a Railway replica has only a cached snapshot in local state, serving the
