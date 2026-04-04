@@ -1,0 +1,28 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    fastapi \
+    uvicorn[standard] \
+    aiohttp \
+    redis \
+    pydantic
+
+# Copy app
+COPY runtime/control_plane.py .
+
+# Expose port
+EXPOSE 5000
+
+# Run
+CMD ["python", "-m", "uvicorn", "control_plane:app", "--host", "0.0.0.0", "--port", "5000"]

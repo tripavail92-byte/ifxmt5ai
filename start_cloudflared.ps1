@@ -38,24 +38,13 @@ Start-Sleep -Seconds 1
 
 Write-Host "Starting Cloudflare Tunnel -> http://localhost:8082 ..."
 
-if ($env:CLOUDFLARE_API_TOKEN) {
-    Write-Host "Using authenticated tunnel (API token present)"
-    Start-Process -FilePath $RELAY `
-        -WorkingDirectory "C:\mt5system" `
-        -ArgumentList "tunnel --url http://localhost:8082 --no-autoupdate" `
-        -EnvironmentVariables @{ "CLOUDFLARE_API_TOKEN" = $env:CLOUDFLARE_API_TOKEN } `
-        -RedirectStandardOutput $LOG_OUT `
-        -RedirectStandardError  $LOG_ERR `
-        -NoNewWindow
-} else {
-    Write-Host "Using quick tunnel (no API token)"
-    Start-Process -FilePath $RELAY `
-        -WorkingDirectory "C:\mt5system" `
-        -ArgumentList "tunnel --url http://localhost:8082 --no-autoupdate" `
-        -RedirectStandardOutput $LOG_OUT `
-        -RedirectStandardError  $LOG_ERR `
-        -NoNewWindow
-}
+Write-Host "Starting cloudflared tunnel..."
+Start-Process -FilePath $RELAY `
+    -WorkingDirectory "C:\mt5system" `
+    -ArgumentList "tunnel --url http://localhost:8082 --no-autoupdate" `
+    -RedirectStandardOutput $LOG_OUT `
+    -RedirectStandardError  $LOG_ERR `
+    -NoNewWindow
 
 # Wait up to 30s for URL to appear
 Write-Host "Waiting for tunnel URL..."

@@ -1,174 +1,234 @@
-# watchdog_relay.ps1
-# Runs every 60s via Task Scheduler (Windows minimum = 1 min).
-# Checks relay and cloudflared health, restarts either if dead.
-# Logs to logs\watchdog.log (rotates at 500KB).
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
-$VENV_PYTHON   = "C:\mt5system\.venv\Scripts\python.exe"
-$RELAY_SCRIPT  = "C:\mt5system\runtime\price_relay.py"
-$START_CF      = "C:\mt5system\start_cloudflared.ps1"
-$RELAY_URL     = "http://localhost:8082/health"
-$CF_LOG_ERR    = "C:\mt5system\logs\cloudflared_err.log"
-$RAIL_DIR      = "C:\mt5system"
-$LOG           = "C:\mt5system\logs\watchdog.log"
-$LOG_MAX_BYTES = 512000
-$railwayCmd    = Get-Command railway -ErrorAction SilentlyContinue
-$RAILWAY       = if ($railwayCmd) { $railwayCmd.Source } else { $null }
+$mutex = $null
+foreach ($mutexName in @('Global\IFXRelayWatchdogLock', 'Local\IFXRelayWatchdogLock')) {
+    try {
+        $mutex = New-Object System.Threading.Mutex($false, $mutexName)
+        break
+    } catch {
+    }
+}
+
+if ($null -ne $mutex) {
+    if (-not $mutex.WaitOne(0)) {
+        exit 0
+    }
+}
+
+try {
+
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Log = Join-Path $Root 'logs\watchdog.log'
+$LogMaxBytes = 512000
+$RelayHealthUrl = 'http://127.0.0.1:8083/health'
+$RelayPublicHealthUrl = 'https://relay.myifxacademy.com/health'
+$StartRelayScript = Join-Path $Root 'start_relay_agent.ps1'
 
 function Write-Log {
-    param([string]$Msg, [string]$Level = "INFO")
-    $ts   = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    param([string]$Msg, [string]$Level = 'INFO')
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $line = "$ts [$Level] $Msg"
-    Add-Content -Path $LOG -Value $line
+    Add-Content -Path $Log -Value $line
     Write-Host $line
 }
 
-# Rotate log if too large
-if ((Test-Path $LOG) -and (Get-Item $LOG).Length -gt $LOG_MAX_BYTES) {
-    Move-Item $LOG "$LOG.old" -Force
+function Get-DotEnvValues {
+    param([string]$Path)
+
+    $values = @{}
+    if (-not (Test-Path $Path)) {
+        return $values
+    }
+
+    foreach ($line in Get-Content $Path) {
+        if ($line -match '^\s*#' -or $line -notmatch '=') {
+            continue
+        }
+
+        $parts = $line.Split('=', 2)
+        if ($parts.Count -ne 2) {
+            continue
+        }
+
+        $key = $parts[0].Trim()
+        $value = $parts[1].Trim().Trim('"', "'")
+        if ($key) {
+            $values[$key] = $value
+        }
+    }
+
+    return $values
 }
 
-# Ensure log dir exists
-$logDir = Split-Path $LOG
-if (-not (Test-Path $logDir)) {
-    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+function Get-RelayProcesses {
+    Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+        Where-Object {
+            $_.CommandLine -match 'new_price_relay_multitenant\.py|price_relay\.py'
+        }
 }
 
-Write-Log "--- watchdog tick ---"
+function Get-RelayRoots {
+    param([array]$Processes)
 
-function Get-CloudflareTunnelUrl {
-    if (-not (Test-Path $CF_LOG_ERR)) { return $null }
-    $match = Get-Content $CF_LOG_ERR -ErrorAction SilentlyContinue |
-        ForEach-Object { [regex]::Match($_, "https://[^\s]+trycloudflare\.com").Value } |
-        Where-Object { $_ } |
-        Select-Object -Last 1
-    return $match
+    $processIds = @($Processes | ForEach-Object { $_.ProcessId })
+    return @(
+        $Processes | Where-Object {
+            $_.ParentProcessId -notin $processIds
+        }
+    )
 }
 
-function Test-CloudflareTunnelHealth {
-    param([string]$TunnelUrl)
-    if (-not $TunnelUrl) { return $false }
+function Stop-Processes {
+    param(
+        [array]$Processes,
+        [string]$Reason
+    )
+
+    foreach ($proc in ($Processes | Sort-Object ProcessId -Unique)) {
+        try {
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+            Write-Log ("Stopped PID {0} ({1}) - {2}" -f $proc.ProcessId, $proc.Name, $Reason) 'WARN'
+        } catch {
+            Write-Log ("Failed stopping PID {0}: {1}" -f $proc.ProcessId, $_.Exception.Message) 'WARN'
+        }
+    }
+}
+
+function Test-RelayHealth {
     try {
-        $resp = Invoke-RestMethod -Uri ("{0}/health" -f $TunnelUrl.TrimEnd('/')) -TimeoutSec 10 -ErrorAction Stop
-        return ($resp.status -eq "ok")
+        $resp = Invoke-RestMethod -Uri $RelayHealthUrl -TimeoutSec 5 -ErrorAction Stop
+        return ($resp.status -eq 'healthy')
     } catch {
         return $false
     }
 }
 
-function Sync-RailwayTunnelVars {
-    param([string]$TunnelUrl)
-    if (-not $TunnelUrl -or -not $RAILWAY) { return }
-
-    $baseUrl = $TunnelUrl.TrimEnd('/')
-    $streamUrl = "$baseUrl/stream"
-    Push-Location $RAIL_DIR
+function Test-PublicRelayHealth {
     try {
-        $varsRaw = & $RAILWAY variables --json 2>$null
-        if ($LASTEXITCODE -ne 0 -or -not $varsRaw) {
-            Write-Log "Could not read Railway vars for tunnel sync" "WARN"
-            return
-        }
-        $vars = $varsRaw | ConvertFrom-Json
-        $needsUpdate = ($vars.PRICE_RELAY_URL -ne $baseUrl) -or ($vars.RELAY_STREAM_URL -ne $streamUrl) -or ($vars.NEXT_PUBLIC_PRICE_RELAY_URL -ne $baseUrl)
-        if (-not $needsUpdate) { return }
-
-        Write-Log "Railway relay URL mismatch detected - syncing to $baseUrl"
-        & $RAILWAY variables set "RELAY_STREAM_URL=$streamUrl" "PRICE_RELAY_URL=$baseUrl" "NEXT_PUBLIC_PRICE_RELAY_URL=$baseUrl" | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Log "Failed to update Railway relay vars" "WARN"
-            return
-        }
-        & $RAILWAY up --detach | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Log "Railway redeploy triggered after tunnel sync"
-        } else {
-            Write-Log "Railway vars updated but redeploy trigger failed" "WARN"
-        }
+        $resp = Invoke-RestMethod -Uri $RelayPublicHealthUrl -TimeoutSec 10 -ErrorAction Stop
+        return ($resp.status -eq 'healthy')
     } catch {
-        Write-Log "Railway tunnel sync failed: $_" "WARN"
-    } finally {
-        Pop-Location
+        return $false
     }
 }
 
-# ----- 1. Check relay health --------------------------------------------------
-$relayOk = $false
-try {
-    $resp    = Invoke-RestMethod -Uri $RELAY_URL -TimeoutSec 5 -ErrorAction Stop
-    $relayOk = ($resp.status -eq "ok")
-    if ($relayOk) {
-        Write-Log "Relay OK (uptime=$($resp.uptime_s)s ticks=$($resp.tick_batches))"
-    }
-} catch {
-    Write-Log "Relay health check failed: $_" "WARN"
-}
+function Wait-RelayHealthy {
+    param([int]$TimeoutSeconds = 30)
 
-if (-not $relayOk) {
-    Write-Log "Relay is DOWN - killing stale processes and restarting..." "ERROR"
-
-    Get-WmiObject Win32_Process | Where-Object {
-        $_.CommandLine -like "*price_relay.py*"
-    } | ForEach-Object {
-        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-        Write-Log "Killed stale relay PID $($_.ProcessId)"
-    }
-
-    Start-Sleep -Seconds 2
-
-    Start-Process -FilePath $VENV_PYTHON `
-        -ArgumentList $RELAY_SCRIPT `
-        -WorkingDirectory "C:\mt5system" `
-        -WindowStyle Hidden
-
-    Write-Log "Relay restart issued - waiting 6s to verify..."
-    Start-Sleep -Seconds 6
-
-    try {
-        $check   = Invoke-RestMethod -Uri $RELAY_URL -TimeoutSec 5 -ErrorAction Stop
-        $relayOk = ($check.status -eq "ok")
-        if ($relayOk) {
-            Write-Log "Relay recovered successfully"
-        } else {
-            Write-Log "Relay started but returned unexpected status" "WARN"
-        }
-    } catch {
-        Write-Log "Relay still not responding after restart: $_" "ERROR"
-    }
-}
-
-# ----- 2. Check cloudflared ---------------------------------------------------
-$cfProc  = Get-Process cloudflared -ErrorAction SilentlyContinue
-$cfAlive = ($null -ne $cfProc)
-$tunnelUrl = Get-CloudflareTunnelUrl
-$tunnelOk = $false
-if ($cfAlive -and $tunnelUrl) {
-    $tunnelOk = Test-CloudflareTunnelHealth -TunnelUrl $tunnelUrl
-}
-
-if ($cfAlive -and $tunnelOk) {
-    $pids = ($cfProc.Id -join ",")
-    Write-Log "Cloudflared OK (PID=$pids url=$tunnelUrl)"
-    Sync-RailwayTunnelVars -TunnelUrl $tunnelUrl
-} else {
-    if ($cfAlive -and -not $tunnelOk) {
-        Write-Log "Cloudflared process is alive but tunnel is unhealthy (url=$tunnelUrl) - restarting..." "ERROR"
-        $cfProc | ForEach-Object {
-            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-            Write-Log "Killed stale cloudflared PID $($_.Id)"
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-RelayHealth) {
+            return $true
         }
         Start-Sleep -Seconds 2
-    } else {
-        Write-Log "Cloudflared is DOWN - restarting..." "ERROR"
     }
-    if ($relayOk) {
-        Start-Process powershell.exe `
-            -ArgumentList "-NonInteractive -ExecutionPolicy Bypass -File `"$START_CF`"" `
-            -WorkingDirectory "C:\mt5system" `
-            -WindowStyle Hidden
-        Write-Log "start_cloudflared.ps1 launched (Railway env vars will be updated)"
+
+    return $false
+}
+
+function Start-ManagedRelay {
+    $envValues = Get-DotEnvValues -Path (Join-Path $Root '.env')
+    $agentBaseUrl = if ($envValues.ContainsKey('AGENT_BASE_URL')) { $envValues['AGENT_BASE_URL'] } else { 'https://relay.myifxacademy.com' }
+    $controlPlaneUrl = if ($envValues.ContainsKey('CONTROL_PLANE_URL')) { $envValues['CONTROL_PLANE_URL'] } else { 'https://ifx-control-plane-production.up.railway.app' }
+    $redisUrl = if ($envValues.ContainsKey('REDIS_URL')) { $envValues['REDIS_URL'] } elseif ($envValues.ContainsKey('REDIS_PUBLIC_URL')) { $envValues['REDIS_PUBLIC_URL'] } else { '' }
+
+    $args = @(
+        '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass',
+        '-WindowStyle', 'Hidden',
+        '-File', $StartRelayScript,
+        '-AgentBaseUrl', $agentBaseUrl,
+        '-ControlPlaneUrl', $controlPlaneUrl
+    )
+
+    if ($redisUrl) {
+        $args += @('-RedisUrl', $redisUrl)
+    }
+
+    Start-Process powershell.exe -ArgumentList $args -WorkingDirectory $Root | Out-Null
+    Write-Log "Started managed multitenant relay process"
+}
+
+$logDir = Split-Path $Log
+if (-not (Test-Path $logDir)) {
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+}
+
+if ((Test-Path $Log) -and (Get-Item $Log).Length -gt $LogMaxBytes) {
+    Move-Item $Log "$Log.old" -Force
+}
+
+Write-Log '--- watchdog tick ---'
+
+$allRelayProcesses = @(Get-RelayProcesses)
+$legacyRelayProcesses = @($allRelayProcesses | Where-Object { $_.CommandLine -match 'price_relay\.py' })
+$newRelayProcesses = @($allRelayProcesses | Where-Object { $_.CommandLine -match 'new_price_relay_multitenant\.py' })
+$newRelayRoots = @(Get-RelayRoots -Processes $newRelayProcesses)
+
+if ($legacyRelayProcesses.Count -gt 0) {
+    Stop-Processes -Processes $legacyRelayProcesses -Reason 'legacy relay process not allowed'
+}
+
+if ($newRelayRoots.Count -gt 1) {
+    Stop-Processes -Processes $newRelayProcesses -Reason 'duplicate multitenant relay trees detected'
+    Start-Sleep -Seconds 2
+    $newRelayProcesses = @()
+    $newRelayRoots = @()
+}
+
+$relayOk = Test-RelayHealth
+if (-not $relayOk) {
+    if ($newRelayProcesses.Count -gt 0) {
+        Stop-Processes -Processes $newRelayProcesses -Reason 'unhealthy multitenant relay'
+        Start-Sleep -Seconds 2
+    }
+
+    Start-ManagedRelay
+    $relayOk = Wait-RelayHealthy -TimeoutSeconds 30
+}
+
+if ($relayOk) {
+    Write-Log 'Relay OK on http://127.0.0.1:8083/health'
+} else {
+    Write-Log 'Relay failed health check after restart attempt' 'ERROR'
+}
+
+try {
+    $cfService = Get-Service cloudflared -ErrorAction Stop
+    if ($cfService.Status -ne 'Running') {
+        Start-Service cloudflared -ErrorAction Stop
+        Write-Log 'Started cloudflared service'
+        Start-Sleep -Seconds 5
+    }
+} catch {
+    Write-Log ("Cloudflared service check failed: {0}" -f $_.Exception.Message) 'WARN'
+}
+
+if ($relayOk) {
+    $publicRelayOk = Test-PublicRelayHealth
+    if ($publicRelayOk) {
+        Write-Log 'Public relay HTTPS OK on https://relay.myifxacademy.com/health'
     } else {
-        Write-Log "Skipping cloudflared restart - relay still down" "WARN"
+        Write-Log 'Public relay HTTPS failed; restarting cloudflared service' 'WARN'
+        try {
+            Restart-Service cloudflared -Force -ErrorAction Stop
+            Start-Sleep -Seconds 8
+            if (Test-PublicRelayHealth) {
+                Write-Log 'Public relay HTTPS recovered after cloudflared restart'
+            } else {
+                Write-Log 'Public relay HTTPS still failing after cloudflared restart' 'ERROR'
+            }
+        } catch {
+            Write-Log ("Cloudflared restart failed: {0}" -f $_.Exception.Message) 'ERROR'
+        }
     }
 }
 
-Write-Log "--- watchdog done ---"
+Write-Log '--- watchdog done ---'
+} finally {
+    if ($null -ne $mutex) {
+        $mutex.ReleaseMutex() | Out-Null
+        $mutex.Dispose()
+    }
+}

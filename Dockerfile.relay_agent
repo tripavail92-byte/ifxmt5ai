@@ -1,0 +1,28 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    aiohttp \
+    redis \
+    pydantic
+
+# Copy app
+COPY runtime/new_price_relay_multitenant.py .
+COPY runtime/ ./runtime/
+
+# Expose port
+EXPOSE 8083
+
+# Run
+CMD ["python", "new_price_relay_multitenant.py"]
