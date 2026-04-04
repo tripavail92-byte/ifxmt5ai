@@ -18,12 +18,19 @@ export const runtime = "nodejs";
 const PRICE_RELAY_URL = SERVER_PRICE_RELAY_URL;
 const PRICE_RELAY_TIMEOUT_MS = Math.max(
   500,
-  Number.parseInt((process.env.PRICE_RELAY_TIMEOUT_MS ?? "12000").trim(), 10) || 12000
+  Number.parseInt((process.env.PRICE_RELAY_TIMEOUT_MS ?? "30000").trim(), 10) || 30000
 );
 const PRICE_STATE_MAX_AGE_MS = Math.max(
   1000,
   Number.parseInt((process.env.MT5_PRICE_STATE_MAX_AGE_MS ?? "3000").trim(), 10) || 3000
 );
+const RELAY_PRICE_CACHE_MS = Math.max(
+  5000,
+  Number.parseInt((process.env.MT5_RELAY_PRICE_CACHE_MS ?? "60000").trim(), 10) || 60000
+);
+
+let lastRelaySnapshot: Record<string, { bid: number; ask: number; ts_ms: number }> | null = null;
+let lastRelaySnapshotAt = 0;
 
 function newestPriceTs(prices: Record<string, { bid: number; ask: number; ts_ms: number }>): number {
   let newest = 0;
@@ -70,11 +77,24 @@ async function fetchRelayPrices(connId?: string): Promise<Record<string, { bid: 
   const candidates = [...new Set([PRICE_RELAY_URL, PUBLIC_PRICE_RELAY_URL].filter(Boolean))];
   for (const baseUrl of candidates) {
     const first = await fetchRelayPricesFrom(baseUrl, connId);
-    if (first && Object.keys(first).length) return first;
+    if (first && Object.keys(first).length) {
+      lastRelaySnapshot = first;
+      lastRelaySnapshotAt = Date.now();
+      return first;
+    }
 
     const retry = await fetchRelayPricesFrom(baseUrl, connId);
-    if (retry && Object.keys(retry).length) return retry;
+    if (retry && Object.keys(retry).length) {
+      lastRelaySnapshot = retry;
+      lastRelaySnapshotAt = Date.now();
+      return retry;
+    }
   }
+
+  if (!connId && lastRelaySnapshot && (Date.now() - lastRelaySnapshotAt) <= RELAY_PRICE_CACHE_MS) {
+    return lastRelaySnapshot;
+  }
+
   return null;
 }
 
