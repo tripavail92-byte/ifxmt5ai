@@ -18,7 +18,7 @@ export const runtime = "nodejs";
 const PRICE_RELAY_URL = SERVER_PRICE_RELAY_URL;
 const PRICE_RELAY_TIMEOUT_MS = Math.max(
   500,
-  Number.parseInt((process.env.PRICE_RELAY_TIMEOUT_MS ?? "3000").trim(), 10) || 3000
+  Number.parseInt((process.env.PRICE_RELAY_TIMEOUT_MS ?? "12000").trim(), 10) || 12000
 );
 const PRICE_STATE_MAX_AGE_MS = Math.max(
   1000,
