@@ -16,7 +16,6 @@ import {
   type Time,
   type IPriceLine,
 } from "lightweight-charts";
-import { PUBLIC_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
 
 export interface RawCandleBar {
   t: number; o: number; h: number; l: number; c: number; v: number;
@@ -522,33 +521,7 @@ export function CandlestickChart({
         if (ac.signal.aborted) return;
         if (seq !== fetchSeqRef.current) return;
 
-        let bars = Array.isArray(data.bars) ? data.bars : [];
-        const shouldTryPublicRelay = (
-          bars.length < 20 &&
-          data.source === "state" &&
-          !!data.debug?.relay_error &&
-          !!PUBLIC_PRICE_RELAY_URL
-        );
-
-        if (shouldTryPublicRelay) {
-          try {
-            const relayUrl = new URL("/candles", PUBLIC_PRICE_RELAY_URL);
-            relayUrl.searchParams.set("symbol", liveSymbol);
-            relayUrl.searchParams.set("tf", TF_API[activeTf]);
-            relayUrl.searchParams.set("count", String(HISTORY_COUNT));
-            const relayConnId = relayConnectionId(connId);
-            if (relayConnId) relayUrl.searchParams.set("conn_id", relayConnId);
-            const relayResp = await fetch(relayUrl.toString(), { signal: ac.signal, cache: "no-store" });
-            if (relayResp.ok) {
-              const relayData = (await relayResp.json()) as { bars?: RawCandleBar[] };
-              if (Array.isArray(relayData.bars) && relayData.bars.length > bars.length) {
-                bars = relayData.bars;
-              }
-            }
-          } catch {
-            // Keep the server response if the browser fallback also fails.
-          }
-        }
+        const bars = Array.isArray(data.bars) ? data.bars : [];
 
         const normalized = normalizeBars(bars);
         if (!normalized.length) return;

@@ -11,7 +11,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PUBLIC_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
+import { relayConnectionId } from "@/lib/price-relay";
 
 const MAX_SERVER_PRICE_AGE_MS = 2_500;
 const STREAM_STALE_MS = 4_000;
@@ -78,24 +78,6 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     }
     return newest;
   }, []);
-
-  const fetchDirectRelayPrices = useCallback(async () => {
-    if (!PUBLIC_PRICE_RELAY_URL) return null;
-    try {
-      const url = new URL("/prices", PUBLIC_PRICE_RELAY_URL);
-      const relayConnId = relayConnectionId(connId);
-      if (relayConnId) url.searchParams.set("conn_id", relayConnId);
-      const resp = await fetch(url.toString(), { cache: "no-store" });
-      if (!resp.ok) return null;
-      const data = await resp.json() as {
-        prices?: Record<string, PriceSnapshot>;
-        symbols?: string[];
-      };
-      return data;
-    } catch {
-      return null;
-    }
-  }, [connId]);
 
   const acceptsConn = useCallback((eventConnId?: string | null) => {
     if (!connId) return true;
@@ -263,16 +245,8 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       } : null;
 
       let best = data;
-      const hasServerPrices = Boolean(data?.prices && Object.keys(data.prices).length > 0);
       const serverNewest = newestTs(data?.prices);
       const serverIsStale = !serverNewest || (Date.now() - serverNewest) > MAX_SERVER_PRICE_AGE_MS;
-      if (!best?.prices || !Object.keys(best.prices).length || serverIsStale) {
-        const relayData = await fetchDirectRelayPrices();
-        const relayNewest = newestTs(relayData?.prices);
-        if (relayData?.prices && Object.keys(relayData.prices).length && relayNewest >= serverNewest) {
-          best = relayData;
-        }
-      }
 
       if (!mountedRef.current) return;
 
@@ -292,9 +266,6 @@ export function usePriceFeed(connId?: string): PriceFeedState {
 
       const eventAge = Date.now() - lastEventAtRef.current;
       const streamHealthy = esRef.current && eventAge <= STREAM_STALE_MS;
-      const hasAnyPrices = Boolean(best?.prices && Object.keys(best.prices).length > 0)
-        || hasServerPrices
-        || Object.keys(state.prices).length > 0;
       if (streamHealthy) {
         stalePollsRef.current = 0;
       } else {
@@ -305,7 +276,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         }
       }
 
-      schedulePoll(streamHealthy && hasAnyPrices ? HEALTHY_POLL_MS : DEGRADED_POLL_MS, () => {
+      schedulePoll(streamHealthy && !serverIsStale ? HEALTHY_POLL_MS : DEGRADED_POLL_MS, () => {
         void pollPrices();
       });
     } catch {
@@ -317,7 +288,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         void pollPrices();
       });
     }
-  }, [connId, fetchDirectRelayPrices, newestTs, refreshStream, schedulePoll]);
+  }, [connId, newestTs, refreshStream, schedulePoll]);
 
   useEffect(() => {
     setState({
