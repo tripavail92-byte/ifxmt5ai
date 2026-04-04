@@ -10,11 +10,12 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { mt5State } from "@/lib/mt5-state";
+import { SERVER_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
 
-const PRICE_RELAY_URL = (process.env.PRICE_RELAY_URL ?? "").trim();
+const PRICE_RELAY_URL = SERVER_PRICE_RELAY_URL;
 const PRICE_RELAY_TIMEOUT_MS = Math.max(
   500,
   Number.parseInt((process.env.PRICE_RELAY_TIMEOUT_MS ?? "3000").trim(), 10) || 3000
@@ -76,8 +77,9 @@ export async function GET(req: NextRequest) {
   }
 
   const connId = access.connId || undefined;
+  const relayConnId = relayConnectionId(connId);
 
-  const stateAll = mt5State.getPrices(connId);
+  const stateAll = mt5State.getPrices(relayConnId);
   const statePrices = symbol ? (stateAll[symbol] ? { [symbol]: stateAll[symbol] } : {}) : stateAll;
   let all = stateAll;
   let prices = statePrices;
@@ -85,7 +87,7 @@ export async function GET(req: NextRequest) {
 
   // If this instance has cold or stale in-memory state, prefer relay data when available.
   if (!Object.keys(prices).length || !stateIsFresh) {
-    const relayPrices = await fetchRelayPrices(connId);
+    const relayPrices = await fetchRelayPrices(relayConnId);
     if (relayPrices && Object.keys(relayPrices).length) {
       const relayNewest = newestPriceTs(relayPrices);
       const stateNewest = newestPriceTs(stateAll);
@@ -96,7 +98,7 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const stateSymbols = connId ? mt5State.getSymbols(connId) : mt5State.getSymbols();
+  const stateSymbols = relayConnId ? mt5State.getSymbols(relayConnId) : mt5State.getSymbols();
   const symbols = [...new Set([...stateSymbols, ...Object.keys(all)])];
 
   return NextResponse.json(

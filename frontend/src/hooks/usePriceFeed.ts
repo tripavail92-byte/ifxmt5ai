@@ -11,8 +11,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { PUBLIC_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
 
-const PUBLIC_PRICE_RELAY_URL = (process.env.NEXT_PUBLIC_PRICE_RELAY_URL ?? "").trim();
 const MAX_SERVER_PRICE_AGE_MS = 2_500;
 const STREAM_STALE_MS = 4_000;
 const HEALTHY_POLL_MS = 8_000;
@@ -83,7 +83,8 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     if (!PUBLIC_PRICE_RELAY_URL) return null;
     try {
       const url = new URL("/prices", PUBLIC_PRICE_RELAY_URL);
-      if (connId) url.searchParams.set("conn_id", connId);
+      const relayConnId = relayConnectionId(connId);
+      if (relayConnId) url.searchParams.set("conn_id", relayConnId);
       const resp = await fetch(url.toString(), { cache: "no-store" });
       if (!resp.ok) return null;
       const data = await resp.json() as {

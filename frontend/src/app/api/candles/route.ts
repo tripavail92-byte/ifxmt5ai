@@ -13,13 +13,14 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { mt5State, TF_MINUTES } from "@/lib/mt5-state";
+import { SERVER_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
 const MIN_STATE_BARS = 20;
 const INSTANCE_ID = process.env.RAILWAY_REPLICA_ID ?? process.env.HOSTNAME ?? "unknown";
 
-const PRICE_RELAY_URL = (process.env.PRICE_RELAY_URL ?? "").trim();
+const PRICE_RELAY_URL = SERVER_PRICE_RELAY_URL;
 const PRICE_RELAY_TIMEOUT_MS = Math.max(
   500,
   Number.parseInt((process.env.PRICE_RELAY_TIMEOUT_MS ?? "5000").trim(), 10) || 5000
@@ -145,6 +146,7 @@ export async function GET(req: NextRequest) {
   }
 
   const connId = access.connId;
+  const relayConnId = relayConnectionId(connId);
   if (!connId) {
     return NextResponse.json({ error: "conn_id required" }, { status: 400 });
   }
@@ -152,9 +154,9 @@ export async function GET(req: NextRequest) {
   // Fast-path: serve from connection-scoped in-memory state only.
   // Do not merge bars from other connections here; that can leak unrelated
   // symbol streams into the active chart and create visual gaps.
-  const exactStateBars = mt5State.getCandles(connId, symbol, tf, count);
+  const exactStateBars = relayConnId ? mt5State.getCandles(relayConnId, symbol, tf, count) : [];
   const stateBars = exactStateBars;
-  const stateIsFresh = connectionStateIsFresh(connId);
+  const stateIsFresh = relayConnId ? connectionStateIsFresh(relayConnId) : false;
 
   // If state has enough bars, trust it and skip relay fetch.
   if (stateBars.length >= MIN_STATE_BARS && stateIsFresh) {
@@ -193,15 +195,15 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  let relay = await fetchRelayCandles({ symbol, tf, count, connId });
+  let relay = await fetchRelayCandles({ symbol, tf, count, connId: relayConnId });
 
   // If the selected terminal connection is not the VPS relay source connection,
   // retry once using the relay's active/source connection so history is still
   // available in the terminal chart.
-  if (connId && (relay.bars === null || relay.bars.length < MIN_STATE_BARS)) {
+  if (relayConnId && (relay.bars === null || relay.bars.length < MIN_STATE_BARS)) {
     const health = await fetchRelayHealth();
     const fallbackConnId = health?.relay_source_connection_id || health?.active_conn_ids?.[0];
-    if (fallbackConnId && fallbackConnId !== connId) {
+    if (fallbackConnId && fallbackConnId !== relayConnId) {
       const fallbackRelay = await fetchRelayCandles({ symbol, tf, count, connId: fallbackConnId });
       if (fallbackRelay.bars && fallbackRelay.bars.length > (relay.bars?.length ?? 0)) {
         relay = fallbackRelay;
@@ -235,7 +237,7 @@ export async function GET(req: NextRequest) {
   // Seed state from relay history so subsequent calls can hit the fast-path.
   try {
     if (relay.bars.length) {
-      mt5State.applyHistoricalBulk(connId, [{ symbol, bars: relay.bars }]);
+      if (relayConnId) mt5State.applyHistoricalBulk(relayConnId, [{ symbol, bars: relay.bars }]);
     }
   } catch {
     // Best-effort seeding only.

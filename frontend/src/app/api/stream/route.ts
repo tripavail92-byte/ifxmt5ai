@@ -20,6 +20,7 @@
 
 import { NextRequest } from "next/server";
 import { mt5State, type SseSubscriber } from "@/lib/mt5-state";
+import { SERVER_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
@@ -27,7 +28,7 @@ export const dynamic = "force-dynamic";
 
 const encoder = new TextEncoder();
 const RELAY_STREAM_URL = (process.env.RELAY_STREAM_URL ?? "").trim();
-const PRICE_RELAY_URL = (process.env.PRICE_RELAY_URL ?? "").trim();
+const PRICE_RELAY_URL = SERVER_PRICE_RELAY_URL;
 const RELAY_STREAM_TIMEOUT_MS = Math.max(
   1000,
   Number.parseInt((process.env.RELAY_STREAM_TIMEOUT_MS ?? "3000").trim(), 10) || 3000
@@ -173,7 +174,7 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  const connFilter = access.connId || undefined;
+  const connFilter = relayConnectionId(access.connId || undefined);
 
   if (hasWarmState(connFilter)) {
     return streamFromState(req, connFilter);

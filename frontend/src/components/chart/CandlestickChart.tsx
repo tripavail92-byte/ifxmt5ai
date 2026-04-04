@@ -16,6 +16,7 @@ import {
   type Time,
   type IPriceLine,
 } from "lightweight-charts";
+import { PUBLIC_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
 
 export interface RawCandleBar {
   t: number; o: number; h: number; l: number; c: number; v: number;
@@ -54,7 +55,6 @@ const TF_MINUTES: Record<TF, number> = {
   M1: 1, M3: 3, M5: 5, M15: 15, M30: 30, H1: 60,
   H4: 240, D1: 1440, W1: 10080, MN: 43200,
 };
-const PUBLIC_PRICE_RELAY_URL = (process.env.NEXT_PUBLIC_PRICE_RELAY_URL ?? "").trim();
 
 // ── Indicator config ─────────────────────────────────────────────────────────
 export interface IndicatorConfig {
@@ -536,7 +536,8 @@ export function CandlestickChart({
             relayUrl.searchParams.set("symbol", liveSymbol);
             relayUrl.searchParams.set("tf", TF_API[activeTf]);
             relayUrl.searchParams.set("count", String(HISTORY_COUNT));
-            relayUrl.searchParams.set("conn_id", connId);
+            const relayConnId = relayConnectionId(connId);
+            if (relayConnId) relayUrl.searchParams.set("conn_id", relayConnId);
             const relayResp = await fetch(relayUrl.toString(), { signal: ac.signal, cache: "no-store" });
             if (relayResp.ok) {
               const relayData = (await relayResp.json()) as { bars?: RawCandleBar[] };
