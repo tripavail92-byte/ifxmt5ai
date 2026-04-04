@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, useTransition } from "react";
 import {
   AlertTriangle,
@@ -465,7 +466,8 @@ function StatusBadge({ status }: { status?: string | null }) {
   return <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${cls}`}>{normalized}</span>;
 }
 
-export function TerminalWorkspace({ initialConnections, initialSettings }: { initialConnections: Connection[]; initialSettings: PersistedTerminalSettings | null }) {
+export function TerminalWorkspace({ initialConnections, initialSettings, isAuthenticated }: { initialConnections: Connection[]; initialSettings: PersistedTerminalSettings | null; isAuthenticated: boolean }) {
+  const router = useRouter();
   const supabase = createClient();
   const [activeTab, setActiveTab] = useState<TerminalTab>("ai-trading");
   const [connections] = useState<Connection[]>(initialConnections);
@@ -527,6 +529,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   // Mirrors ManualTradeCard hydration guard — prevents chart SSR/client mismatch
   const [hydrated, setHydrated] = useState(false);
   const [pendingFeedSymbol, setPendingFeedSymbol] = useState<string | null>(null);
+  const [authPromptOpen, setAuthPromptOpen] = useState(false);
+  const [authPromptIntent, setAuthPromptIntent] = useState<string>("queue trades");
 
   const {
     prices,
@@ -647,6 +651,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     }).length;
   }, [recentJobs]);
   const executionBlocker = useMemo(() => {
+    if (!isAuthenticated) return "Sign in to queue trades, arm Trade Now, or save monitored setups to your MT5 connection.";
     if (!termsAccepted) return "Accept the current terminal terms before queueing live MT5 execution.";
     if (!(riskAmount > 0)) return "Risk amount must be greater than zero.";
     if (!aiManagedExecution && lotSizing.minLotExceedsRisk) {
@@ -676,7 +681,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
       }
     }
     return null;
-  }, [accountBalance, accountEquity, aiManagedExecution, dailyLossLimitUsd, dailyProfitTargetUsd, lotSizing.actualRisk, lotSizing.minLotExceedsRisk, lotSizing.volumeMin, lotSuggestion, maxDrawdownPercent, maxPositionSizeLots, maxTradesPerDay, openPositions, riskAmount, termsAccepted, todaysTradeCount]);
+  }, [accountBalance, accountEquity, aiManagedExecution, dailyLossLimitUsd, dailyProfitTargetUsd, isAuthenticated, lotSizing.actualRisk, lotSizing.minLotExceedsRisk, lotSizing.volumeMin, lotSuggestion, maxDrawdownPercent, maxPositionSizeLots, maxTradesPerDay, openPositions, riskAmount, termsAccepted, todaysTradeCount]);
 
   useEffect(() => {
     try {
@@ -804,12 +809,17 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   }
 
   useEffect(() => {
+    if (!isAuthenticated) {
+      setNewsEvents([]);
+      setNewsEventsStatus("idle");
+      return;
+    }
     void fetchNewsEvents();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
-    if (!settingsLoaded) return;
+    if (!isAuthenticated || !settingsLoaded) return;
     const timeout = window.setTimeout(() => {
       setSettingsSyncState("saving");
       void saveTerminalSettings({
@@ -865,6 +875,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     showEntryZones,
     showTPZones,
     stopMode,
+    isAuthenticated,
     termsAccepted,
   ]);
 
@@ -872,6 +883,16 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     if (!selectedConnectionId) {
       setSymbols([]);
       setSelectedSymbol("");
+      setAccountHeartbeat(null);
+      setRecentJobs([]);
+      setSetupsBySymbol({});
+      setSetupIdsBySymbol({});
+      setTradeNowBySymbol({});
+      setActiveSetupState(null);
+      return;
+    }
+    if (!isAuthenticated) {
+      setSymbols([]);
       setAccountHeartbeat(null);
       setRecentJobs([]);
       setSetupsBySymbol({});
@@ -930,7 +951,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     return () => {
       cancelled = true;
     };
-  }, [selectedConnectionId, supabase]);
+  }, [isAuthenticated, selectedConnectionId, supabase]);
 
   useEffect(() => {
     if (!selectedConnectionId) return;
@@ -1129,6 +1150,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
   }, [aiSensitivity, pivotWindow, riskRewardRatio, selectedConnectionId, selectedSymbol, side, stopMode, validEntry, parsedEntry]);
 
   useEffect(() => {
+    if (!isAuthenticated) return;
     if (!selectedConnectionId) return;
     const channel = supabase
       .channel(`terminal-live-${selectedConnectionId}`)
@@ -1191,10 +1213,22 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [selectedConnectionId, selectedSymbol, supabase]);
+  }, [isAuthenticated, selectedConnectionId, selectedSymbol, supabase]);
+
+  function promptAuthentication(intent: string) {
+    setAuthPromptIntent(intent);
+    setAuthPromptOpen(true);
+  }
+
+  function requireAuthenticated(intent: string) {
+    if (isAuthenticated) return true;
+    promptAuthentication(intent);
+    return false;
+  }
 
   async function handleMonitorSetup() {
     if (!selectedConnectionId || !selectedSymbol || !validEntry) return;
+    if (!requireAuthenticated("save this monitored setup")) return;
     setSetupSaving(true);
     setSetupResult(null);
     try {
@@ -1251,6 +1285,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
 
   async function handleTradeNow() {
     if (!selectedConnectionId || !selectedSymbol || !validEntry) return;
+    if (!requireAuthenticated("arm Trade Now")) return;
     if (!termsAccepted) {
       setTermsOpen(true);
       return;
@@ -1304,6 +1339,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
 
   function handlePlaceTrade() {
     if (!selectedConnectionId || !selectedSymbol) return;
+    if (!requireAuthenticated("queue a trade")) return;
     if (!termsAccepted) {
       setTermsOpen(true);
       return;
@@ -1399,7 +1435,9 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     ? "This setup is DEAD after an H1 close beyond the loss edge. Press Monitor Zone to reset it before arming Trade Now."
     : null;
   const tradeNowPrereqMsg = !currentSetupId
-    ? "Press Monitor Zone first so the runtime starts tracking state."
+    ? isAuthenticated
+      ? "Press Monitor Zone first so the runtime starts tracking state."
+      : "Sign in first, then monitor the setup or connect your MT5 account before arming Trade Now."
     : tradeNowStateBlocker
       ? tradeNowStateBlocker
     : aiManagedExecution
@@ -1427,6 +1465,9 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
     && !tradeNowStateBlocker
     && !executionBlocker
   );
+  const tradeNowButtonEnabled = isAuthenticated
+    ? tradeNowCanArm
+    : Boolean(selectedConnectionId && selectedSymbol);
   const dbSymbols = [...new Set(symbols.map((row) => row.symbol).filter(Boolean))];
   const liveSelectableSymbols = [...new Set(liveQuoteSymbols.filter(Boolean))];
   const streamSelectableSymbols = [...new Set((liveSymbols ?? []).filter(Boolean))];
@@ -1486,6 +1527,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                 <select
                   value={selectedConnectionId}
                   onChange={(e) => setSelectedConnectionId(e.target.value)}
+                  disabled={!isAuthenticated}
                   className="h-10 w-full rounded-lg border border-[#2b2b2b] bg-[#0f0f0f] px-3 text-sm text-white outline-none focus:border-blue-500/50"
                 >
                   {connections.map((conn) => (
@@ -1648,6 +1690,20 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
 
         <section className="order-1 space-y-4 rounded-xl border border-[#1f1f1f] bg-[#0c0c0c] p-4 lg:order-none lg:rounded-none lg:border-y-0 lg:border-l-0 lg:border-r-0 lg:px-5 lg:py-4">
           <div className="sticky top-0 z-20 -mx-4 space-y-4 border-b border-[#1a1a1a] bg-[#090909]/98 px-4 pb-4 backdrop-blur-sm lg:static lg:mx-0 lg:border-b-0 lg:bg-transparent lg:px-0 lg:pb-0 lg:backdrop-blur-0">
+            {!isAuthenticated ? (
+              <div className="rounded-xl border border-blue-500/20 bg-blue-500/10 px-4 py-3 text-sm text-blue-100">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="font-semibold text-white">Guest preview mode</div>
+                    <div className="text-xs text-blue-100/80">Live prices and charts are visible without login. Sign in before using Monitor Zone, Trade Now, or trade execution.</div>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button type="button" onClick={() => router.push("/login?next=%2Fterminal")} className="bg-blue-600 text-white hover:bg-blue-500">Sign In</Button>
+                    <Button type="button" variant="outline" onClick={() => router.push("/login?next=%2Fconnections")} className="border-blue-400/30 bg-transparent text-blue-100 hover:bg-blue-500/10">Connect Account</Button>
+                  </div>
+                </div>
+              </div>
+            ) : null}
             {/* ── Account / status strip ── */}
             <div className="grid gap-3 xl:grid-cols-[1fr_auto] xl:items-center">
               <div className="flex flex-wrap items-center gap-2">
@@ -2023,8 +2079,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
                   </div>
                   <Button
                     onClick={handleTradeNow}
-                    disabled={!tradeNowCanArm}
-                    className={`h-10 w-full ${tradeNowArmed ? "bg-orange-500/20 text-orange-300 hover:bg-orange-500/20" : tradeNowCanArm ? "bg-orange-600 text-white hover:bg-orange-500" : "bg-[#1a1a1a] text-gray-500 hover:bg-[#1a1a1a]"}`}
+                    disabled={!tradeNowButtonEnabled}
+                    className={`h-10 w-full ${tradeNowArmed ? "bg-orange-500/20 text-orange-300 hover:bg-orange-500/20" : tradeNowButtonEnabled ? "bg-orange-600 text-white hover:bg-orange-500" : "bg-[#1a1a1a] text-gray-500 hover:bg-[#1a1a1a]"}`}
                   >
                     {tradeNowSaving ? "Arming…" : tradeNowArmed ? "ARMED" : "TRADE NOW"}
                   </Button>
@@ -2176,6 +2232,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
 
   async function handleClosePosition(pos: MT5Position) {
     if (!selectedConnectionId) return;
+    if (!requireAuthenticated("queue a close order")) return;
     setClosingTickets((prev) => new Set(prev).add(pos.ticket));
     try {
       const result = await closeTradeJob({
@@ -2617,6 +2674,25 @@ export function TerminalWorkspace({ initialConnections, initialSettings }: { ini
           <DialogFooter>
             <Button variant="outline" onClick={() => setTermsOpen(false)} className="border-[#2a2a2a] bg-[#161616] text-gray-200 hover:bg-[#1b1b1b]">Close</Button>
             <Button onClick={() => { setTermsAccepted(true); setTermsOpen(false); }} className="bg-blue-600 text-white hover:bg-blue-500">Accept current version</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={authPromptOpen} onOpenChange={setAuthPromptOpen}>
+        <DialogContent className="max-w-md border-[#2a2a2a] bg-[#111] text-white">
+          <DialogHeader>
+            <DialogTitle>Sign in required</DialogTitle>
+            <DialogDescription>
+              You can view the terminal anonymously, but you must sign in before you {authPromptIntent}.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] p-4 text-sm text-gray-300">
+            Sign in with your account to load your own MT5 prices, save monitored setups, and route execution to your personal connection. If you do not have a connection yet, continue to the connection page after signing in.
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAuthPromptOpen(false)} className="border-[#2a2a2a] bg-[#161616] text-gray-200 hover:bg-[#1b1b1b]">Not now</Button>
+            <Button variant="outline" onClick={() => router.push("/login?next=%2Fconnections")} className="border-[#2a2a2a] bg-[#161616] text-gray-200 hover:bg-[#1b1b1b]">Go to Connections</Button>
+            <Button onClick={() => router.push("/login?next=%2Fterminal")} className="bg-blue-600 text-white hover:bg-blue-500">Sign In</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

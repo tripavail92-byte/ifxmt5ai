@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
 
@@ -11,16 +12,23 @@ const PRICE_RELAY_TIMEOUT_MS = Math.max(
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const symbol = (searchParams.get("symbol") ?? "").trim();
-  const connId = (searchParams.get("conn_id") ?? "").trim();
+  const requestedConnId = (searchParams.get("conn_id") ?? "").trim();
 
   if (!symbol) {
     return NextResponse.json({ error: "symbol required" }, { status: 400 });
   }
-  if (!connId) {
-    return NextResponse.json({ error: "conn_id required" }, { status: 400 });
-  }
   if (!PRICE_RELAY_URL) {
     return NextResponse.json({ error: "PRICE_RELAY_URL not configured" }, { status: 503 });
+  }
+
+  const access = await resolveTerminalAccess(requestedConnId || undefined);
+  if (!access.authorized) {
+    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  }
+
+  const connId = access.connId;
+  if (!connId) {
+    return NextResponse.json({ error: "conn_id required" }, { status: 400 });
   }
 
   const url = new URL("/symbol-spec", PRICE_RELAY_URL);

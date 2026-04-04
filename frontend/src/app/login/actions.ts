@@ -6,6 +6,7 @@ import { createClient } from "@/utils/supabase/server";
 
 export async function login(formData: FormData) {
   const supabase = await createClient();
+  const next = ((formData.get("next") as string | null) ?? "/").trim() || "/";
 
   const data = {
     email: formData.get("email") as string,
@@ -15,9 +16,9 @@ export async function login(formData: FormData) {
   const { error } = await supabase.auth.signInWithPassword(data);
 
   if (error) {
-    return redirect("/login?message=" + encodeURIComponent(error.message));
+    return redirect("/login?message=" + encodeURIComponent(error.message) + "&next=" + encodeURIComponent(next));
   }
 
   revalidatePath("/", "layout");
-  redirect("/");
+  redirect(next);
 }

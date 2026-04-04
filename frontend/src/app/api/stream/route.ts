@@ -20,6 +20,7 @@
 
 import { NextRequest } from "next/server";
 import { mt5State, type SseSubscriber } from "@/lib/mt5-state";
+import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -162,7 +163,17 @@ async function proxyRelayStream(req: NextRequest, connFilter?: string): Promise<
 }
 
 export async function GET(req: NextRequest) {
-  const connFilter = req.nextUrl.searchParams.get("conn_id") ?? undefined;
+  const requestedConnId = req.nextUrl.searchParams.get("conn_id") ?? undefined;
+  const access = await resolveTerminalAccess(requestedConnId ?? undefined);
+
+  if (!access.authorized) {
+    return new Response(JSON.stringify({ error: "forbidden" }), {
+      status: 403,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const connFilter = access.connId || undefined;
 
   if (hasWarmState(connFilter)) {
     return streamFromState(req, connFilter);

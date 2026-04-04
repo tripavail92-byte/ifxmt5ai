@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
-export function LoginForm({ initialMessage = "" }: { initialMessage?: string }) {
+export function LoginForm({ initialMessage = "", next = "/" }: { initialMessage?: string; next?: string }) {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -33,7 +33,7 @@ export function LoginForm({ initialMessage = "" }: { initialMessage?: string }) 
     }
 
     startTransition(() => {
-      router.replace("/");
+      router.replace(next || "/");
       router.refresh();
     });
   };

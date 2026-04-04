@@ -388,9 +388,6 @@ def _direct_price_forward_loop() -> None:
         try:
             conn_ids = _list_direct_price_connections()
             for conn_id in conn_ids:
-                if RELAY_SOURCE_CONNECTION_ID and conn_id == RELAY_SOURCE_CONNECTION_ID:
-                    continue
-
                 prices = _refresh_direct_prices(conn_id)
                 if not prices:
                     continue
@@ -735,6 +732,7 @@ def _push_history_to_railway() -> None:
     for conn_id, sym_map in snapshot.items():
         if not sym_map:
             continue
+        target_conn_id = RELAY_SOURCE_CONNECTION_ID or conn_id
         symbols_data = [
             {"symbol": sym, "bars": list(bars)}
             for sym, bars in sym_map.items() if bars
@@ -744,7 +742,7 @@ def _push_history_to_railway() -> None:
         total_bars = sum(len(e["bars"]) for e in symbols_data)
         payload = {
             "type":         "historical_bulk",
-            "connection_id": conn_id,
+            "connection_id": target_conn_id,
             "symbols":      [e["symbol"] for e in symbols_data],
             "total_bars":   total_bars,
             "symbols_data": symbols_data,
@@ -754,7 +752,7 @@ def _push_history_to_railway() -> None:
             if resp.status_code < 300:
                 total_sent += total_bars
                 log.info(f"push-history: sent {len(symbols_data)} symbols / {total_bars} bars "
-                         f"for conn {conn_id[:8]}")
+                         f"for conn {target_conn_id[:8]}")
             else:
                 log.warning(f"push-history: Railway responded {resp.status_code}: {resp.text[:80]}")
         except Exception as exc:

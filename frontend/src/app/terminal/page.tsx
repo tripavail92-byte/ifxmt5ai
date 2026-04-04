@@ -1,8 +1,6 @@
-import { redirect } from "next/navigation";
-
 import { getTerminalSettings } from "@/app/terminal/actions";
 import { TerminalWorkspace } from "@/app/terminal/TerminalWorkspace";
-import { createClient } from "@/utils/supabase/server";
+import { PUBLIC_TERMINAL_CONNECTION, resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -16,22 +14,17 @@ type ConnectionRow = {
 };
 
 export default async function TerminalPage() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const viewer = await resolveTerminalAccess();
+  const initialSettings = viewer.isAuthenticated ? await getTerminalSettings() : null;
+  const initialConnections = viewer.isAuthenticated
+    ? (viewer.connections as ConnectionRow[])
+    : ([PUBLIC_TERMINAL_CONNECTION] as ConnectionRow[]);
 
-  if (!user) {
-    redirect("/login");
-  }
-
-  const { data: connections } = await supabase
-    .from("mt5_user_connections")
-    .select("id, broker_server, account_login, status, is_active")
-    .eq("is_active", true)
-    .order("created_at", { ascending: true });
-
-  const initialSettings = await getTerminalSettings();
-
-  return <TerminalWorkspace initialConnections={(connections ?? []) as ConnectionRow[]} initialSettings={initialSettings} />;
+  return (
+    <TerminalWorkspace
+      initialConnections={initialConnections}
+      initialSettings={initialSettings}
+      isAuthenticated={viewer.isAuthenticated}
+    />
+  );
 }

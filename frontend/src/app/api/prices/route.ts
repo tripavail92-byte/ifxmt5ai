@@ -10,6 +10,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { mt5State } from "@/lib/mt5-state";
+import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
 
@@ -66,8 +67,15 @@ async function fetchRelayPrices(connId?: string): Promise<Record<string, { bid: 
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
-  const connId = searchParams.get("conn_id") ?? undefined;
+  const requestedConnId = searchParams.get("conn_id") ?? undefined;
   const symbol = searchParams.get("symbol")  ?? undefined;
+  const access = await resolveTerminalAccess(requestedConnId ?? undefined);
+
+  if (!access.authorized) {
+    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  }
+
+  const connId = access.connId || undefined;
 
   const stateAll = mt5State.getPrices(connId);
   const statePrices = symbol ? (stateAll[symbol] ? { [symbol]: stateAll[symbol] } : {}) : stateAll;

@@ -13,6 +13,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { mt5State, TF_MINUTES } from "@/lib/mt5-state";
+import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
 const MIN_STATE_BARS = 20;
@@ -126,19 +127,26 @@ export async function GET(req: NextRequest) {
   const symbol = searchParams.get("symbol") ?? "";
   const tf     = searchParams.get("tf")     ?? "1m";
   const count  = Math.min(parseInt(searchParams.get("count") ?? "300", 10), 1500);
-  const connId = searchParams.get("conn_id") ?? "";
+  const requestedConnId = searchParams.get("conn_id") ?? "";
 
   if (!symbol) {
     return NextResponse.json({ error: "symbol required" }, { status: 400 });
-  }
-  if (!connId) {
-    return NextResponse.json({ error: "conn_id required" }, { status: 400 });
   }
   if (!TF_MINUTES[tf]) {
     return NextResponse.json(
       { error: `tf must be one of: ${Object.keys(TF_MINUTES).join(", ")}` },
       { status: 400 }
     );
+  }
+
+  const access = await resolveTerminalAccess(requestedConnId || undefined);
+  if (!access.authorized) {
+    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  }
+
+  const connId = access.connId;
+  if (!connId) {
+    return NextResponse.json({ error: "conn_id required" }, { status: 400 });
   }
 
   // Fast-path: serve from connection-scoped in-memory state only.
