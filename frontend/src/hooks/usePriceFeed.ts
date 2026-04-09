@@ -13,11 +13,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { relayConnectionId } from "@/lib/price-relay";
 
-const MAX_SERVER_PRICE_AGE_MS = 2_500;
-const STREAM_STALE_MS = 4_000;
-const HEALTHY_POLL_MS = 8_000;
-const DEGRADED_POLL_MS = 1_000;
-const RECONNECT_GRACE_MS = 1_500;
+const MAX_SERVER_PRICE_AGE_MS = 2_000;
+const STREAM_STALE_MS = 3_500;
+const HEALTHY_POLL_MS = 3_000;
+const DEGRADED_POLL_MS = 500;
+const RECONNECT_GRACE_MS = 750;
 
 // ─── Types (mirror CandleBar / PriceSnapshot from mt5-state.ts) ───────────────
 
@@ -77,6 +77,24 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       if (snap?.ts_ms && snap.ts_ms > newest) newest = snap.ts_ms;
     }
     return newest;
+  }, []);
+
+  const mergeFresherPrices = useCallback((
+    current: Record<string, PriceSnapshot>,
+    incoming?: Record<string, PriceSnapshot>
+  ) => {
+    if (!incoming) return current;
+    const merged = { ...current };
+    for (const [symbol, nextSnap] of Object.entries(incoming)) {
+      if (!nextSnap) continue;
+      const prevSnap = merged[symbol];
+      const prevTs = prevSnap?.ts_ms ?? 0;
+      const nextTs = nextSnap.ts_ms ?? 0;
+      if (!prevSnap || nextTs >= prevTs) {
+        merged[symbol] = nextSnap;
+      }
+    }
+    return merged;
   }, []);
 
   const acceptsConn = useCallback((eventConnId?: string | null) => {
@@ -153,7 +171,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
           ...s,
           isConnected: true,
           transportMode: "sse",
-          prices:  d.prices  ?? s.prices,
+          prices:  mergeFresherPrices(s.prices, d.prices),
           forming: d.forming ?? s.forming,
           symbols: d.symbols?.length ? d.symbols : s.symbols,
         }));
@@ -170,7 +188,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
           ...s,
           isConnected: true,
           transportMode: "sse",
-          prices: { ...s.prices, ...d.prices },
+          prices: mergeFresherPrices(s.prices, d.prices),
         }));
       } catch { /* ignore */ }
     });
@@ -247,6 +265,8 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       let best = data;
       const serverNewest = newestTs(data?.prices);
       const serverIsStale = !serverNewest || (Date.now() - serverNewest) > MAX_SERVER_PRICE_AGE_MS;
+      const eventAge = Date.now() - lastEventAtRef.current;
+      const streamHealthy = Boolean(esRef.current) && eventAge <= STREAM_STALE_MS;
 
       if (!mountedRef.current) return;
 
@@ -257,15 +277,13 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         }
         setState(s => ({
           ...s,
-          prices: { ...s.prices, ...best.prices },
+          prices: mergeFresherPrices(s.prices, best.prices),
           symbols: best.symbols?.length ? best.symbols : s.symbols,
           isConnected: true,
           transportMode: streamHealthy ? "sse" : "polling",
         }));
       }
 
-      const eventAge = Date.now() - lastEventAtRef.current;
-      const streamHealthy = esRef.current && eventAge <= STREAM_STALE_MS;
       if (streamHealthy) {
         stalePollsRef.current = 0;
       } else {
@@ -288,7 +306,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         void pollPrices();
       });
     }
-  }, [connId, newestTs, refreshStream, schedulePoll]);
+  }, [connId, mergeFresherPrices, newestTs, refreshStream, schedulePoll]);
 
   useEffect(() => {
     setState({

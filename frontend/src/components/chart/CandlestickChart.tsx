@@ -16,6 +16,7 @@ import {
   type Time,
   type IPriceLine,
 } from "lightweight-charts";
+import { useMemo } from "react";
 
 export interface RawCandleBar {
   t: number; o: number; h: number; l: number; c: number; v: number;
@@ -42,17 +43,17 @@ export interface CandlestickChartProps {
   prices?: Record<string, LivePriceSnapshot>;
 }
 
-const TIMEFRAMES = ["M1", "M3", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN"] as const;
+const TIMEFRAMES = ["M1", "M3", "M5", "M15", "M30", "H1", "H4", "D1"] as const;
 type TF = (typeof TIMEFRAMES)[number];
 
 const TF_API: Record<TF, string> = {
   M1: "1m", M3: "3m", M5: "5m", M15: "15m", M30: "30m",
-  H1: "1h", H4: "4h", D1: "1d", W1: "1w", MN: "1mo",
+  H1: "1h", H4: "4h", D1: "1d",
 };
 
 const TF_MINUTES: Record<TF, number> = {
   M1: 1, M3: 3, M5: 5, M15: 15, M30: 30, H1: 60,
-  H4: 240, D1: 1440, W1: 10080, MN: 43200,
+  H4: 240, D1: 1440,
 };
 
 // ── Indicator config ─────────────────────────────────────────────────────────
@@ -100,22 +101,23 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+function stripBrokerSuffix(symbol?: string | null) {
+  return String(symbol ?? "")
+    .trim()
+    .replace(/[._-]?(micro|mini)$/i, "")
+    .replace(/m$/i, "")
+    .toUpperCase();
+}
+
+function resolveLiveSymbolMatch(target: string | undefined, candidates: string[]) {
+  const normalizedTarget = stripBrokerSuffix(target);
+  if (!normalizedTarget) return target;
+  const exact = candidates.find((sym) => sym === target);
+  if (exact) return exact;
+  return candidates.find((sym) => stripBrokerSuffix(sym) === normalizedTarget) ?? target;
+}
+
 function toTfSlot(epochSec: number, tf: TF): number {
-  // Weekly: round down to Monday 00:00 UTC
-  if (tf === "W1") {
-    const d = new Date(epochSec * 1000);
-    const day = d.getUTCDay(); // 0=Sun
-    const daysToMon = day === 0 ? -6 : 1 - day;
-    const mon = new Date(d);
-    mon.setUTCDate(d.getUTCDate() + daysToMon);
-    mon.setUTCHours(0, 0, 0, 0);
-    return Math.floor(mon.getTime() / 1000);
-  }
-  // Monthly: round down to 1st of month 00:00 UTC
-  if (tf === "MN") {
-    const d = new Date(epochSec * 1000);
-    return Math.floor(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / 1000);
-  }
   const slot = TF_MINUTES[tf] * 60;
   return Math.floor(epochSec / slot) * slot;
 }
@@ -255,6 +257,16 @@ export function CandlestickChart({
     1500,
     Math.max(300, Number.parseInt(process.env.NEXT_PUBLIC_CHART_HISTORY_COUNT ?? "1200", 10) || 1200)
   );
+
+  const effectiveLiveSymbol = useMemo(() => {
+    const candidates = [
+      ...Object.keys(prices ?? {}),
+      ...Object.keys(forming ?? {}),
+      ...(liveSymbol ? [liveSymbol] : []),
+      symbol,
+    ].filter(Boolean) as string[];
+    return resolveLiveSymbolMatch(liveSymbol ?? symbol, [...new Set(candidates)]) ?? liveSymbol ?? symbol;
+  }, [forming, liveSymbol, prices, symbol]);
 
   // Load a full set of bars into the chart (history fetch or TF switch).
   // Preserves the current forming bar if newer than the last fetched bar.
@@ -433,7 +445,7 @@ export function CandlestickChart({
       borderDownColor: COLORS.down,
       wickUpColor: COLORS.up,
       wickDownColor: COLORS.down,
-      priceFormat: priceFormat(liveSymbol ?? symbol),
+      priceFormat: priceFormat(effectiveLiveSymbol ?? symbol),
     });
 
     chartRef.current = chart;
@@ -481,14 +493,14 @@ export function CandlestickChart({
       bbMidSeriesRef.current = null;
       bbLowerSeriesRef.current = null;
     };
-  }, []);
+  }, [effectiveLiveSymbol, symbol]);
 
   useEffect(() => {
-    seriesRef.current?.applyOptions({ priceFormat: priceFormat(liveSymbol ?? symbol) });
-  }, [liveSymbol, symbol]);
+    seriesRef.current?.applyOptions({ priceFormat: priceFormat(effectiveLiveSymbol ?? symbol) });
+  }, [effectiveLiveSymbol, symbol]);
 
   useEffect(() => {
-    const feedKey = `${connId ?? ""}::${liveSymbol ?? symbol}`;
+    const feedKey = `${connId ?? ""}::${effectiveLiveSymbol ?? symbol}`;
     if (feedKey === lastFeedKeyRef.current) return;
 
     lastFeedKeyRef.current = feedKey;
@@ -497,18 +509,18 @@ export function CandlestickChart({
     hasHistoryRef.current = false;
     fitOnNextLoadRef.current = true;
     setHistoryVersion((v) => v + 1);
-  }, [connId, liveSymbol, symbol]);
+  }, [connId, effectiveLiveSymbol, symbol]);
 
   // Fetch history once on symbol/TF change. No periodic re-poll —
   // SSE (candle_update + candle_close) drives all live updates.
   useEffect(() => {
-    if (!liveSymbol || !connId) return;
+    if (!effectiveLiveSymbol) return;
     if (!seriesRef.current) return;
 
     const ac = new AbortController();
     const seq = ++fetchSeqRef.current;
-    const connQ = `&conn_id=${encodeURIComponent(connId)}`;
-    const url = `/api/candles?symbol=${encodeURIComponent(liveSymbol)}&tf=${TF_API[activeTf]}&count=${HISTORY_COUNT}${connQ}`;
+    const connQ = connId ? `&conn_id=${encodeURIComponent(connId)}` : "";
+    const url = `/api/candles?symbol=${encodeURIComponent(effectiveLiveSymbol)}&tf=${TF_API[activeTf]}&count=${HISTORY_COUNT}${connQ}`;
 
     const load = async () => {
       try {
@@ -540,31 +552,31 @@ export function CandlestickChart({
     return () => ac.abort();
   // fetchTick intentionally removed — no periodic re-poll needed with SSE
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveSymbol, connId, activeTf, HISTORY_COUNT]);
+  }, [effectiveLiveSymbol, connId, activeTf, HISTORY_COUNT]);
 
   useEffect(() => {
-    if (!liveSymbol || !forming) return;
-    const current = forming[liveSymbol];
+    if (!effectiveLiveSymbol || !forming) return;
+    const current = forming[effectiveLiveSymbol];
     if (!current) return;
     upsertLiveBar(current);
     setIsLive(true);
-  }, [forming, liveSymbol, activeTf]);
+  }, [forming, effectiveLiveSymbol, activeTf]);
 
   useEffect(() => {
-    if (!liveSymbol || !lastClose) return;
-    if (lastClose.symbol !== liveSymbol) return;
+    if (!effectiveLiveSymbol || !lastClose) return;
+    if (lastClose.symbol !== effectiveLiveSymbol) return;
     upsertLiveBar(lastClose.bar);
     setIsLive(true);
-  }, [lastClose, liveSymbol, activeTf]);
+  }, [lastClose, effectiveLiveSymbol, activeTf]);
 
   useEffect(() => {
-    if (!liveSymbol || !prices) return;
-    if (forming?.[liveSymbol]) return;
-    const snapshot = prices[liveSymbol];
+    if (!effectiveLiveSymbol || !prices) return;
+    if (forming?.[effectiveLiveSymbol]) return;
+    const snapshot = prices[effectiveLiveSymbol];
     if (!snapshot?.ts_ms) return;
     upsertPriceBar(snapshot);
     setIsLive(true);
-  }, [prices, forming, liveSymbol, activeTf]);
+  }, [prices, forming, effectiveLiveSymbol, activeTf]);
 
   // ── Draw / refresh indicators whenever candles or toggle state changes ──
   useEffect(() => {
@@ -725,10 +737,10 @@ export function CandlestickChart({
         {/* Row 1: symbol + timeframes */}
         <div className="flex items-center justify-between px-3 py-1.5">
           <span className="font-mono font-semibold text-sm text-white tracking-wide">
-            {liveSymbol ?? symbol}
+            {effectiveLiveSymbol ?? symbol}
             {isLive ? (
               <span className="ml-2 text-xs font-normal text-emerald-500 animate-pulse">● LIVE</span>
-            ) : liveSymbol ? (
+            ) : effectiveLiveSymbol ? (
               <span className="ml-2 text-xs font-normal text-yellow-500">⟳ loading…</span>
             ) : null}
           </span>

@@ -1,7 +1,11 @@
 # Python
 .venv/
+.venv-no-docker/
 __pycache__/
 *.pyc
+
+# Cloudflared config (may contain sensitive tokens)
+.cloudflared/
 
 # Environment Variables (CRUCIAL - DO NOT COMMIT)
 .env

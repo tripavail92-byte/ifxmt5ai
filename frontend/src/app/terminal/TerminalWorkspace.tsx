@@ -133,6 +133,11 @@ type RuntimeEventRow = {
   } | null;
 };
 
+const SUBSCRIBED_DEFAULT_SYMBOLS = [
+  "EURUSDm", "BTCUSDm", "ETHUSDm", "GBPUSDm", "USDJPYm", "XAUUSDm",
+  "USDCADm", "AUDUSDm", "NZDUSDm", "USDCHFm", "EURGBPm", "USOILm",
+];
+
 type SetupDraft = {
   entryPrice?: string;
   zonePercent?: number;
@@ -417,6 +422,22 @@ function fmtPrice(value: number, symbol: string) {
   return value.toFixed(getDecimals(symbol));
 }
 
+function stripBrokerSuffix(symbol?: string | null) {
+  return String(symbol ?? "")
+    .trim()
+    .replace(/[._-]?(micro|mini)$/i, "")
+    .replace(/m$/i, "")
+    .toUpperCase();
+}
+
+function resolveLiveSymbolMatch(target: string | undefined, candidates: string[]) {
+  const normalizedTarget = stripBrokerSuffix(target);
+  if (!normalizedTarget) return target;
+  const exact = candidates.find((sym) => sym === target);
+  if (exact) return exact;
+  return candidates.find((sym) => stripBrokerSuffix(sym) === normalizedTarget) ?? target;
+}
+
 function fmtCurrency(value: number | undefined | null) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value ?? 0);
 }
@@ -473,7 +494,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
   const [connections] = useState<Connection[]>(initialConnections);
   const [selectedConnectionId, setSelectedConnectionId] = useState<string>(initialConnections[0]?.id ?? "");
   const [symbols, setSymbols] = useState<SymbolRow[]>([]);
-  const [selectedSymbol, setSelectedSymbol] = useState<string>("");
+  const [selectedSymbol, setSelectedSymbol] = useState<string>(isAuthenticated ? "" : SUBSCRIBED_DEFAULT_SYMBOLS[0]);
   const [side, setSide] = useState<"buy" | "sell">("buy");
   const [entryPrice, setEntryPrice] = useState<string>("");
   const [zonePercent, setZonePercent] = useState<number>(ZONE_DEFAULT_FALLBACK);
@@ -532,6 +553,12 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
   const [authPromptOpen, setAuthPromptOpen] = useState(false);
   const [authPromptIntent, setAuthPromptIntent] = useState<string>("queue trades");
 
+  useEffect(() => {
+    if (selectedConnectionId) return;
+    if (!connections.length) return;
+    setSelectedConnectionId(connections[0].id);
+  }, [connections, selectedConnectionId]);
+
   const {
     prices,
     forming,
@@ -549,15 +576,19 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     () => Object.keys(prices).filter((sym) => Boolean(prices[sym])),
     [prices]
   );
-  const livePrice = selectedSymbol ? prices[selectedSymbol] : undefined;
+  const resolvedSelectedSymbol = useMemo(
+    () => resolveLiveSymbolMatch(selectedSymbol || undefined, [...liveQuoteSymbols, ...(liveSymbols ?? [])]),
+    [selectedSymbol, liveQuoteSymbols, liveSymbols]
+  );
+  const livePrice = resolvedSelectedSymbol ? prices[resolvedSelectedSymbol] : undefined;
   const parsedEntry = parseFloat(entryPrice);
   const validEntry = Number.isFinite(parsedEntry) && parsedEntry > 0;
   const zone = useMemo(
     () => (validEntry ? calcZone(parsedEntry, zonePercent) : null),
     [parsedEntry, validEntry, zonePercent]
   );
-  const displaySymbol = selectedSymbol || liveQuoteSymbols[0] || liveSymbols[0] || symbols[0]?.symbol || "EURUSD";
-  const activeSymbol = selectedSymbol || displaySymbol;
+  const displaySymbol = resolvedSelectedSymbol || liveQuoteSymbols[0] || liveSymbols[0] || SUBSCRIBED_DEFAULT_SYMBOLS[0];
+  const activeSymbol = resolvedSelectedSymbol || displaySymbol;
   const aiManagedExecution = stopMode === "ai_dynamic";
   const effectiveStop = useMemo(() => {
     if (!selectedSymbol) return 0;
@@ -958,12 +989,16 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     const liveAvailable = [...new Set(liveQuoteSymbols.filter(Boolean))];
     const streamAvailable = [...new Set((liveSymbols ?? []).filter(Boolean))];
     const dbAvailable = [...new Set(symbols.map((row) => row.symbol).filter(Boolean))];
-    const available = liveAvailable.length > 0 ? liveAvailable : streamAvailable.length > 0 ? streamAvailable : dbAvailable;
+    const defaultAvailable = !isAuthenticated ? SUBSCRIBED_DEFAULT_SYMBOLS : dbAvailable;
+    const available = liveAvailable.length > 0 ? liveAvailable : streamAvailable.length > 0 ? streamAvailable : defaultAvailable;
     if (!available.length) return;
+    const resolved = resolveLiveSymbolMatch(selectedSymbol || undefined, available);
     if (!selectedSymbol || !available.includes(selectedSymbol)) {
-      setSelectedSymbol(available[0]);
+      setSelectedSymbol(resolved && available.includes(resolved) ? resolved : available[0]);
+    } else if (resolved && resolved !== selectedSymbol && available.includes(resolved)) {
+      setSelectedSymbol(resolved);
     }
-  }, [selectedConnectionId, symbols, liveSymbols, liveQuoteSymbols, selectedSymbol]);
+  }, [isAuthenticated, selectedConnectionId, symbols, liveSymbols, liveQuoteSymbols, selectedSymbol]);
 
   useEffect(() => {
     if (!selectedSymbol) return;
@@ -1021,14 +1056,15 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
 
   useEffect(() => {
     if (!pendingFeedSymbol || pendingFeedSymbol !== selectedSymbol) return;
+    const hasResolvedLiveQuote = Boolean(resolvedSelectedSymbol && prices[resolvedSelectedSymbol]);
     const freshQuoteReady = Boolean(
       livePrice
       && livePrice.ts_ms
-      && (Date.now() - livePrice.ts_ms) <= 3_000
+      && (Date.now() - livePrice.ts_ms) <= 15_000
     );
-    if (!freshQuoteReady) return;
+    if (!freshQuoteReady && !hasResolvedLiveQuote) return;
     setPendingFeedSymbol(null);
-  }, [livePrice, pendingFeedSymbol, selectedSymbol]);
+  }, [livePrice, pendingFeedSymbol, prices, resolvedSelectedSymbol, selectedSymbol]);
   useEffect(() => {
     if (!selectedConnectionId || !selectedSymbol) {
       setSymbolTradeSpec(null);
@@ -1471,8 +1507,12 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
   const dbSymbols = [...new Set(symbols.map((row) => row.symbol).filter(Boolean))];
   const liveSelectableSymbols = [...new Set(liveQuoteSymbols.filter(Boolean))];
   const streamSelectableSymbols = [...new Set((liveSymbols ?? []).filter(Boolean))];
-  const availableSymbols = liveSelectableSymbols.length > 0 ? liveSelectableSymbols : streamSelectableSymbols.length > 0 ? streamSelectableSymbols : dbSymbols;
-  const hasLiveQuoteForSelected = selectedSymbol ? Boolean(prices[selectedSymbol]) : false;
+  const availableSymbols = liveSelectableSymbols.length > 0
+    ? liveSelectableSymbols
+    : streamSelectableSymbols.length > 0
+      ? streamSelectableSymbols
+      : (isAuthenticated ? dbSymbols : SUBSCRIBED_DEFAULT_SYMBOLS);
+  const hasLiveQuoteForSelected = resolvedSelectedSymbol ? Boolean(prices[resolvedSelectedSymbol]) : false;
   const quoteSymbol = activeSymbol;
   const quoteDigits = getDecimals(quoteSymbol);
   const quoteBid = livePrice ? livePrice.bid.toFixed(quoteDigits) : "—";
@@ -1483,7 +1523,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     selectedConnectionId
     && selectedSymbol
     && pendingFeedSymbol === selectedSymbol
-    && !hasFreshSelectedQuote
+    && !hasLiveQuoteForSelected
   );
   const feedStatus = transportMode === "sse"
     ? {
@@ -1506,8 +1546,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
           detail: "Waiting for live feed",
         };
   // Fallback symbol list while SSE connects — same as ManualTradeCard SUBSCRIBED list
-  const SUBSCRIBED_DEFAULT = ["BTCUSDm","ETHUSDm","EURUSDm","GBPUSDm","USDJPYm","XAUUSDm","USDCADm","AUDUSDm","NZDUSDm","USDCHFm","EURGBPm","USOILm"];
-  const rawTabSymbols = liveSelectableSymbols.length > 0 ? liveSelectableSymbols : availableSymbols.length > 0 ? availableSymbols : SUBSCRIBED_DEFAULT;
+  const rawTabSymbols = liveSelectableSymbols.length > 0 ? liveSelectableSymbols : availableSymbols.length > 0 ? availableSymbols : SUBSCRIBED_DEFAULT_SYMBOLS;
   const tabSymbols = [
     ...(displaySymbol ? [displaySymbol] : []),
     ...rawTabSymbols,
@@ -1813,7 +1852,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
               </div>
             </div>
 
-            {hydrated && selectedConnectionId ? (
+            {hydrated && (selectedConnectionId || !isAuthenticated) ? (
               <div className="relative">
                 <CandlestickChart
                   symbol={displaySymbol}
@@ -1829,17 +1868,6 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                   lastClose={lastClose}
                   className="w-full"
                 />
-                {isPairSwitchLoading ? (
-                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-xl bg-[#050505]/72 backdrop-blur-[1px]">
-                    <div className="flex items-center gap-3 rounded-full border border-white/10 bg-black/70 px-4 py-2 text-sm text-white shadow-lg">
-                      <RefreshCw className="size-4 animate-spin text-orange-400" />
-                      <div>
-                        <div className="font-medium">Loading {selectedSymbol} live feed…</div>
-                        <div className="text-[11px] text-gray-400">Waiting for fresh prices to stabilize</div>
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
               </div>
             ) : hydrated ? (
               <div className="flex min-h-[320px] items-center justify-center rounded-lg border border-[#2a2a2a] bg-[#0c0c0c] px-6 py-10 text-center text-sm text-gray-500">

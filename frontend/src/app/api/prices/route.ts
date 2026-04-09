@@ -24,13 +24,7 @@ const PRICE_STATE_MAX_AGE_MS = Math.max(
   1000,
   Number.parseInt((process.env.MT5_PRICE_STATE_MAX_AGE_MS ?? "3000").trim(), 10) || 3000
 );
-const RELAY_PRICE_CACHE_MS = Math.max(
-  5000,
-  Number.parseInt((process.env.MT5_RELAY_PRICE_CACHE_MS ?? "60000").trim(), 10) || 60000
-);
-
 let lastRelaySnapshot: Record<string, { bid: number; ask: number; ts_ms: number }> | null = null;
-let lastRelaySnapshotAt = 0;
 
 function newestPriceTs(prices: Record<string, { bid: number; ask: number; ts_ms: number }>): number {
   let newest = 0;
@@ -79,19 +73,17 @@ async function fetchRelayPrices(connId?: string): Promise<Record<string, { bid: 
     const first = await fetchRelayPricesFrom(baseUrl, connId);
     if (first && Object.keys(first).length) {
       lastRelaySnapshot = first;
-      lastRelaySnapshotAt = Date.now();
       return first;
     }
 
     const retry = await fetchRelayPricesFrom(baseUrl, connId);
     if (retry && Object.keys(retry).length) {
       lastRelaySnapshot = retry;
-      lastRelaySnapshotAt = Date.now();
       return retry;
     }
   }
 
-  if (!connId && lastRelaySnapshot && (Date.now() - lastRelaySnapshotAt) <= RELAY_PRICE_CACHE_MS) {
+  if (!connId && lastRelaySnapshot && hasFreshPrices(lastRelaySnapshot)) {
     return lastRelaySnapshot;
   }
 

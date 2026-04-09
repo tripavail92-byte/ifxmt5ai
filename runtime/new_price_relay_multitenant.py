@@ -63,6 +63,11 @@ LOCAL_MARKETDATA_URL = (os.getenv("LOCAL_MARKETDATA_URL", "http://127.0.0.1:8082
 BUFFER_FILE = Path(os.getenv("PRICE_RELAY_BUFFER_FILE", str(Path(__file__).resolve().parent / "logs" / "candle_buffer.json")))
 
 
+def _fetch_local_health() -> Optional[dict]:
+    payload = _fetch_local_json("/health", {})
+    return payload if isinstance(payload, dict) else None
+
+
 def _discover_terminal_connection_ids() -> list[str]:
     ids: list[str] = []
     try:
@@ -481,13 +486,17 @@ class RelayHandler(BaseHTTPRequestHandler):
     def _handle_health(self):
         """Health check endpoint."""
         active_conn_ids = _discover_terminal_connection_ids()
+        local_marketdata = _fetch_local_health()
+        local_marketdata_ok = bool(local_marketdata) and local_marketdata.get("status") in {"healthy", "ok"}
         status = {
-            "status": "healthy",
+            "status": "healthy" if local_marketdata_ok else "degraded",
             "agent_id": AGENT_ID,
             "active_connections": len(mt5_connections),
             "capacity": AGENT_CAPACITY,
             "relay_source_connection_id": RELAY_SOURCE_CONNECTION_ID or None,
             "active_conn_ids": active_conn_ids,
+            "local_marketdata_ok": local_marketdata_ok,
+            "local_marketdata": local_marketdata,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
         self._send_json(200, status)

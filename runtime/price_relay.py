@@ -282,9 +282,9 @@ _pending_broadcast: dict = {}           # conn_id -> {symbol -> {bid,ask,ts_ms}}
 _pending_forming: dict  = {}           # conn_id -> {symbol -> {t,o,h,l,c,v}}
 _pending_lock = threading.Lock()
 
-SSE_INTERVAL_S = float(os.getenv("SSE_INTERVAL_MS", "100")) / 1000  # default 100ms
-DIRECT_PRICE_MAX_AGE_MS = max(750, int(os.getenv("DIRECT_PRICE_MAX_AGE_MS", "1500") or "1500"))
-DIRECT_PRICE_POLL_SECONDS = max(0.25, float(os.getenv("DIRECT_PRICE_POLL_SECONDS", "0.25") or "0.25"))
+SSE_INTERVAL_S = max(0.05, float(os.getenv("SSE_INTERVAL_MS", "50")) / 1000)  # default 50ms
+DIRECT_PRICE_MAX_AGE_MS = max(500, int(os.getenv("DIRECT_PRICE_MAX_AGE_MS", "1000") or "1000"))
+DIRECT_PRICE_POLL_SECONDS = max(0.1, float(os.getenv("DIRECT_PRICE_POLL_SECONDS", "0.10") or "0.10"))
 DEFAULT_DIRECT_SYMBOLS = [
     "BTCUSDm", "ETHUSDm", "EURUSDm", "GBPUSDm", "USDJPYm", "XAUUSDm",
     "USDCADm", "AUDUSDm", "NZDUSDm", "USDCHFm", "EURGBPm", "USOILm",
@@ -342,6 +342,9 @@ def _refresh_direct_prices(conn_id: str) -> dict:
 
 def _list_direct_price_connections() -> list[str]:
     global _direct_conn_cache
+
+    if RELAY_SOURCE_CONNECTION_ID:
+        return [RELAY_SOURCE_CONNECTION_ID]
 
     cached_at, cached_conn_ids = _direct_conn_cache
     now = time.time()
@@ -582,12 +585,12 @@ def _buffer_autosave_loop() -> None:
 #  HTTP handlers call enqueue_fwd(msg_dict) which is thread-safe.
 #  When RAILWAY_INGEST_URL is blank, messages are discarded after logging.
 
-_fwd_queue: queue.Queue = queue.Queue(maxsize=2000)
+_fwd_queue: queue.Queue = queue.Queue(maxsize=5000)
 _fwd_tick_lock = threading.Lock()
 _fwd_tick_batches: dict[str, dict] = {}
 TICK_FORWARD_INTERVAL_S = max(
     0.05,
-    float(os.getenv("RAILWAY_TICK_FORWARD_INTERVAL_SECONDS", "0.1") or "0.1"),
+    float(os.getenv("RAILWAY_TICK_FORWARD_INTERVAL_SECONDS", "0.05") or "0.05"),
 )
 
 
@@ -1168,7 +1171,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
 
-        client_q: queue.Queue = queue.Queue(maxsize=30)
+        client_q: queue.Queue = queue.Queue(maxsize=100)
         with _sse_lock:
             _sse_clients.append({"queue": client_q, "conn_id": conn_id})
         stats["sse_active"] = stats.get("sse_active", 0) + 1

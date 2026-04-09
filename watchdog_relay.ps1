@@ -20,6 +20,9 @@ try {
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Log = Join-Path $Root 'logs\watchdog.log'
+$RuntimeLogDir = Join-Path $Root 'runtime\logs'
+$VenvPython = Join-Path $Root '.venv\Scripts\python.exe'
+$MarketDataHealthUrl = 'http://127.0.0.1:8082/health'
 $LogMaxBytes = 512000
 $RelayHealthUrl = 'http://127.0.0.1:8083/health'
 $RelayPublicHealthUrl = 'https://relay.myifxacademy.com/health'
@@ -64,7 +67,14 @@ function Get-DotEnvValues {
 function Get-RelayProcesses {
     Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
         Where-Object {
-            $_.CommandLine -match 'new_price_relay_multitenant\.py|price_relay\.py'
+            $_.CommandLine -match 'new_price_relay_multitenant\.py'
+        }
+}
+
+function Get-MarketDataProcesses {
+    Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+        Where-Object {
+            $_.CommandLine -match 'runtime\\price_relay\.py|price_relay\.py'
         }
 }
 
@@ -104,6 +114,15 @@ function Test-RelayHealth {
     }
 }
 
+function Test-MarketDataHealth {
+    try {
+        $resp = Invoke-RestMethod -Uri $MarketDataHealthUrl -TimeoutSec 5 -ErrorAction Stop
+        return (@('healthy', 'ok') -contains $resp.status)
+    } catch {
+        return $false
+    }
+}
+
 function Test-PublicRelayHealth {
     try {
         $resp = Invoke-RestMethod -Uri $RelayPublicHealthUrl -TimeoutSec 10 -ErrorAction Stop
@@ -125,6 +144,42 @@ function Wait-RelayHealthy {
     }
 
     return $false
+}
+
+function Wait-MarketDataHealthy {
+    param([int]$TimeoutSeconds = 30)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-MarketDataHealth) {
+            return $true
+        }
+        Start-Sleep -Seconds 2
+    }
+
+    return $false
+}
+
+function Start-MarketDataRelay {
+    if (-not (Test-Path $VenvPython)) {
+        throw "Venv python not found: $VenvPython"
+    }
+
+    if (-not (Test-Path $RuntimeLogDir)) {
+        New-Item -ItemType Directory -Path $RuntimeLogDir -Force | Out-Null
+    }
+
+    $stdoutLog = Join-Path $RuntimeLogDir 'watchdog_marketdata_stdout.log'
+    $stderrLog = Join-Path $RuntimeLogDir 'watchdog_marketdata_stderr.log'
+
+    Start-Process -FilePath $VenvPython `
+        -WorkingDirectory $Root `
+        -ArgumentList 'runtime\price_relay.py' `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $stdoutLog `
+        -RedirectStandardError $stderrLog | Out-Null
+
+    Write-Log 'Started local market-data relay process'
 }
 
 function Start-ManagedRelay {
@@ -162,12 +217,16 @@ if ((Test-Path $Log) -and (Get-Item $Log).Length -gt $LogMaxBytes) {
 Write-Log '--- watchdog tick ---'
 
 $allRelayProcesses = @(Get-RelayProcesses)
-$legacyRelayProcesses = @($allRelayProcesses | Where-Object { $_.CommandLine -match 'price_relay\.py' })
+$marketDataProcesses = @(Get-MarketDataProcesses)
+$marketDataRoots = @(Get-RelayRoots -Processes $marketDataProcesses)
 $newRelayProcesses = @($allRelayProcesses | Where-Object { $_.CommandLine -match 'new_price_relay_multitenant\.py' })
 $newRelayRoots = @(Get-RelayRoots -Processes $newRelayProcesses)
 
-if ($legacyRelayProcesses.Count -gt 0) {
-    Stop-Processes -Processes $legacyRelayProcesses -Reason 'legacy relay process not allowed'
+if ($marketDataRoots.Count -gt 1) {
+    Stop-Processes -Processes $marketDataProcesses -Reason 'duplicate local market-data relay trees detected'
+    Start-Sleep -Seconds 2
+    $marketDataProcesses = @()
+    $marketDataRoots = @()
 }
 
 if ($newRelayRoots.Count -gt 1) {
@@ -175,6 +234,23 @@ if ($newRelayRoots.Count -gt 1) {
     Start-Sleep -Seconds 2
     $newRelayProcesses = @()
     $newRelayRoots = @()
+}
+
+$marketDataOk = Test-MarketDataHealth
+if (-not $marketDataOk) {
+    if ($marketDataProcesses.Count -gt 0) {
+        Stop-Processes -Processes $marketDataProcesses -Reason 'unhealthy local market-data relay'
+        Start-Sleep -Seconds 2
+    }
+
+    Start-MarketDataRelay
+    $marketDataOk = Wait-MarketDataHealthy -TimeoutSeconds 30
+}
+
+if ($marketDataOk) {
+    Write-Log 'Local market-data relay OK on http://127.0.0.1:8082/health'
+} else {
+    Write-Log 'Local market-data relay failed health check after restart attempt' 'ERROR'
 }
 
 $relayOk = Test-RelayHealth
@@ -188,8 +264,10 @@ if (-not $relayOk) {
     $relayOk = Wait-RelayHealthy -TimeoutSeconds 30
 }
 
-if ($relayOk) {
+if ($relayOk -and $marketDataOk) {
     Write-Log 'Relay OK on http://127.0.0.1:8083/health'
+} elseif ($relayOk) {
+    Write-Log 'Multitenant relay is up, but local market-data relay is unavailable' 'ERROR'
 } else {
     Write-Log 'Relay failed health check after restart attempt' 'ERROR'
 }
@@ -205,7 +283,7 @@ try {
     Write-Log ("Cloudflared service check failed: {0}" -f $_.Exception.Message) 'WARN'
 }
 
-if ($relayOk) {
+if ($relayOk -and $marketDataOk) {
     $publicRelayOk = Test-PublicRelayHealth
     if ($publicRelayOk) {
         Write-Log 'Public relay HTTPS OK on https://relay.myifxacademy.com/health'
