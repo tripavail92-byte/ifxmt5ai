@@ -1,9 +1,9 @@
 "use client";
 
 /**
- * usePriceFeed — SSE hook for live MT5 price and candle data  (Sprint 5)
+ * usePriceFeed — WebSocket hook for live MT5 price and candle data.
  *
- * Connects to GET /api/stream (Server-Sent Events).
+ * Connects to GET /ws/stream via the custom Node server WebSocket bridge.
  * Reconnects automatically with exponential back-off on disconnect.
  *
  * Usage:
@@ -11,7 +11,6 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { relayConnectionId } from "@/lib/price-relay";
 
 const MAX_SERVER_PRICE_AGE_MS = 2_000;
 const STREAM_STALE_MS = 3_500;
@@ -47,7 +46,7 @@ export interface PriceFeedState {
   lastClose:   ClosedBar | null;                // most recently closed bar
   symbols:     string[];                        // symbols known to the relay
   isConnected: boolean;
-  transportMode: "connecting" | "sse" | "polling";
+  transportMode: "connecting" | "ws" | "polling";
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
@@ -62,10 +61,13 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     transportMode: "connecting",
   });
 
-  const esRef      = useRef<EventSource | null>(null);
+  const wsRef      = useRef<WebSocket | null>(null);
   const backoffRef = useRef<number>(1_000);
   const timerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pingRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const connectRef = useRef<() => void>(() => {});
+  const pollPricesRef = useRef<() => Promise<void>>(async () => {});
   const lastEventAtRef = useRef<number>(0);
   const mountedRef = useRef(true);
   const reconnectSeqRef = useRef(0);
@@ -117,6 +119,13 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     }
   }, []);
 
+  const clearPingTimer = useCallback(() => {
+    if (pingRef.current) {
+      clearInterval(pingRef.current);
+      pingRef.current = null;
+    }
+  }, []);
+
   const schedulePoll = useCallback((delay: number, poller: () => void) => {
     clearPollTimer();
     pollRef.current = setTimeout(poller, delay);
@@ -125,23 +134,30 @@ export function usePriceFeed(connId?: string): PriceFeedState {
   const connect = useCallback(() => {
     if (!mountedRef.current) return;
 
-    const qs  = connId ? `?conn_id=${encodeURIComponent(connId)}` : "";
-    const nonce = `stream_seq=${reconnectSeqRef.current}`;
-    const url = `/api/stream${qs ? `${qs}&${nonce}` : `?${nonce}`}`;
-    const es  = new EventSource(url);
-    esRef.current = es;
+    const search = new URLSearchParams();
+    if (connId) search.set("conn_id", connId);
+    search.set("stream_seq", String(reconnectSeqRef.current));
+    const proto = window.location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${window.location.host}/ws/stream?${search.toString()}`);
+    wsRef.current = ws;
 
-    es.onopen = () => {
+    ws.onopen = () => {
       if (!mountedRef.current) return;
       backoffRef.current = 1_000;
       stalePollsRef.current = 0;
       lastEventAtRef.current = Date.now();
-      setState(s => ({ ...s, isConnected: true, transportMode: "sse" }));
+      setState(s => ({ ...s, isConnected: true, transportMode: "ws" }));
+      clearPingTimer();
+      pingRef.current = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "ping" }));
+        }
+      }, 30_000);
     };
 
-    es.onerror = () => {
-      es.close();
-      esRef.current = null;
+    const scheduleReconnect = () => {
+      clearPingTimer();
+      wsRef.current = null;
       if (!mountedRef.current) return;
       setState(s => ({
         ...s,
@@ -151,99 +167,96 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       const delay = backoffRef.current;
       backoffRef.current = Math.min(delay * 2, 30_000);
       clearReconnectTimer();
-      timerRef.current = setTimeout(connect, delay);
+      timerRef.current = setTimeout(() => {
+        connectRef.current();
+      }, delay);
     };
 
-    // ── SSE event handlers ──────────────────────────────────────────────────
+    ws.onerror = () => {
+      try { ws.close(); } catch { /* ignore */ }
+    };
 
-    es.addEventListener("init", (e: MessageEvent) => {
+    ws.onclose = () => {
+      scheduleReconnect();
+    };
+
+    ws.onmessage = (event) => {
       if (!mountedRef.current) return;
       try {
-        lastEventAtRef.current = Date.now();
-        const d = JSON.parse(e.data) as {
+        const d = JSON.parse(event.data as string) as {
+          type?: string;
           connection_id?: string;
           prices?: Record<string, PriceSnapshot>;
           forming?: Record<string, CandleBar>;
           symbols?: string[];
+          symbol?: string;
+          bar?: CandleBar;
         };
-        if (!acceptsConn(d.connection_id)) return;
-        setState(s => ({
-          ...s,
-          isConnected: true,
-          transportMode: "sse",
-          prices:  mergeFresherPrices(s.prices, d.prices),
-          forming: d.forming ?? s.forming,
-          symbols: d.symbols?.length ? d.symbols : s.symbols,
-        }));
-      } catch { /* ignore malformed */ }
-    });
 
-    es.addEventListener("prices", (e: MessageEvent) => {
-      if (!mountedRef.current) return;
-      try {
+        if (d.type !== "pong" && !acceptsConn(d.connection_id)) return;
         lastEventAtRef.current = Date.now();
-        const d = JSON.parse(e.data) as { connection_id?: string; prices: Record<string, PriceSnapshot> };
-        if (!acceptsConn(d.connection_id)) return;
-        setState(s => ({
-          ...s,
-          isConnected: true,
-          transportMode: "sse",
-          prices: mergeFresherPrices(s.prices, d.prices),
-        }));
-      } catch { /* ignore */ }
-    });
 
-    es.addEventListener("candle_update", (e: MessageEvent) => {
-      if (!mountedRef.current) return;
-      try {
-        lastEventAtRef.current = Date.now();
-        const d = JSON.parse(e.data) as { connection_id?: string; forming: Record<string, CandleBar> };
-        if (!acceptsConn(d.connection_id)) return;
-        setState(s => ({
-          ...s,
-          isConnected: true,
-          transportMode: "sse",
-          forming: { ...s.forming, ...d.forming },
-        }));
-      } catch { /* ignore */ }
-    });
-
-    es.addEventListener("candle_close", (e: MessageEvent) => {
-      if (!mountedRef.current) return;
-      try {
-        lastEventAtRef.current = Date.now();
-        const d = JSON.parse(e.data) as { connection_id?: string; symbol: string; bar: CandleBar };
-        if (!acceptsConn(d.connection_id)) return;
-        if (d.symbol && d.bar) {
-          setState(s => ({ ...s, isConnected: true, transportMode: "sse", lastClose: { symbol: d.symbol, bar: d.bar } }));
+        if (d.type === "init") {
+          setState(s => ({
+            ...s,
+            isConnected: true,
+            transportMode: "ws",
+            prices: mergeFresherPrices(s.prices, d.prices),
+            forming: d.forming ?? s.forming,
+            symbols: d.symbols?.length ? d.symbols : s.symbols,
+          }));
+          return;
         }
-      } catch { /* ignore */ }
-    });
 
-    es.addEventListener("connected", (e: MessageEvent) => {
-      if (!mountedRef.current) return;
-      try {
-        lastEventAtRef.current = Date.now();
-        const d = JSON.parse(e.data) as { connection_id?: string; symbols?: string[] };
-        if (!acceptsConn(d.connection_id)) return;
-        if (d.symbols?.length) {
-          setState(s => ({ ...s, isConnected: true, transportMode: "sse", symbols: d.symbols! }));
+        if (d.type === "prices") {
+          setState(s => ({
+            ...s,
+            isConnected: true,
+            transportMode: "ws",
+            prices: mergeFresherPrices(s.prices, d.prices),
+          }));
+          return;
         }
-      } catch { /* ignore */ }
-    });
 
-    es.addEventListener("heartbeat", () => {
-      lastEventAtRef.current = Date.now();
-      if (!mountedRef.current) return;
-      setState(s => ({ ...s, isConnected: true, transportMode: "sse" }));
-    });
+        if (d.type === "candle_update") {
+          setState(s => ({
+            ...s,
+            isConnected: true,
+            transportMode: "ws",
+            forming: { ...s.forming, ...(d.forming ?? {}) },
+          }));
+          return;
+        }
 
-  }, [acceptsConn, clearReconnectTimer, connId]);
+        if (d.type === "candle_close") {
+          if (d.symbol && d.bar) {
+            setState(s => ({ ...s, isConnected: true, transportMode: "ws", lastClose: { symbol: d.symbol!, bar: d.bar! } }));
+          }
+          return;
+        }
+
+        if (d.type === "connected") {
+          if (d.symbols?.length) {
+            setState(s => ({ ...s, isConnected: true, transportMode: "ws", symbols: d.symbols! }));
+          }
+          return;
+        }
+
+        if (d.type === "heartbeat" || d.type === "pong") {
+          setState(s => ({ ...s, isConnected: true, transportMode: "ws" }));
+        }
+      } catch {
+        // Ignore malformed messages and keep the polling fallback alive.
+      }
+    };
+
+  }, [acceptsConn, clearPingTimer, clearReconnectTimer, connId, mergeFresherPrices]);
 
   const refreshStream = useCallback(() => {
     clearReconnectTimer();
-    esRef.current?.close();
-    esRef.current = null;
+    clearPingTimer();
+    wsRef.current?.close();
+    wsRef.current = null;
     if (!mountedRef.current) return;
     setState(s => ({ ...s, isConnected: false, transportMode: Object.keys(s.prices).length > 0 ? "polling" : "connecting" }));
     reconnectSeqRef.current += 1;
@@ -251,7 +264,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       if (!mountedRef.current) return;
       connect();
     }, RECONNECT_GRACE_MS);
-  }, [clearReconnectTimer, connect]);
+  }, [clearPingTimer, clearReconnectTimer, connect]);
 
   const pollPrices = useCallback(async () => {
     try {
@@ -262,25 +275,24 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         symbols?: string[];
       } : null;
 
-      let best = data;
       const serverNewest = newestTs(data?.prices);
       const serverIsStale = !serverNewest || (Date.now() - serverNewest) > MAX_SERVER_PRICE_AGE_MS;
       const eventAge = Date.now() - lastEventAtRef.current;
-      const streamHealthy = Boolean(esRef.current) && eventAge <= STREAM_STALE_MS;
+      const streamHealthy = Boolean(wsRef.current && wsRef.current.readyState === WebSocket.OPEN) && eventAge <= STREAM_STALE_MS;
 
       if (!mountedRef.current) return;
 
-      if (best?.prices && Object.keys(best.prices).length > 0) {
-        const newest = newestTs(best.prices);
+      if (data?.prices && Object.keys(data.prices).length > 0) {
+        const newest = newestTs(data.prices);
         if (newest > 0) {
           lastEventAtRef.current = Math.max(lastEventAtRef.current, newest);
         }
         setState(s => ({
           ...s,
-          prices: mergeFresherPrices(s.prices, best.prices),
-          symbols: best.symbols?.length ? best.symbols : s.symbols,
+          prices: mergeFresherPrices(s.prices, data.prices),
+          symbols: data.symbols?.length ? data.symbols : s.symbols,
           isConnected: true,
-          transportMode: streamHealthy ? "sse" : "polling",
+          transportMode: streamHealthy ? "ws" : "polling",
         }));
       }
 
@@ -295,7 +307,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       }
 
       schedulePoll(streamHealthy && !serverIsStale ? HEALTHY_POLL_MS : DEGRADED_POLL_MS, () => {
-        void pollPrices();
+        void pollPricesRef.current();
       });
     } catch {
       const eventAge = Date.now() - lastEventAtRef.current;
@@ -303,10 +315,18 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         refreshStream();
       }
       schedulePoll(DEGRADED_POLL_MS, () => {
-        void pollPrices();
+        void pollPricesRef.current();
       });
     }
   }, [connId, mergeFresherPrices, newestTs, refreshStream, schedulePoll]);
+
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
+
+  useEffect(() => {
+    pollPricesRef.current = pollPrices;
+  }, [pollPrices]);
 
   useEffect(() => {
     setState({
@@ -330,12 +350,13 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     });
     return () => {
       mountedRef.current = false;
-      esRef.current?.close();
-      esRef.current = null;
+      clearPingTimer();
+      wsRef.current?.close();
+      wsRef.current = null;
       clearReconnectTimer();
       clearPollTimer();
     };
-  }, [clearPollTimer, clearReconnectTimer, connect, pollPrices, schedulePoll]);
+  }, [clearPingTimer, clearPollTimer, clearReconnectTimer, connect, pollPrices, schedulePoll]);
 
   useEffect(() => {
     const onVisible = () => {

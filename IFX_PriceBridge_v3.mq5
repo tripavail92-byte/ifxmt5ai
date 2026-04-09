@@ -18,7 +18,10 @@
 input string  BackendRelayUrl      = "http://127.0.0.1:8082";   // Relay URL (NOT Railway direct)
 input string  ConnectionId         = "<connection_id>";          // Your MT5 connection UUID
 input string  SigningSecret        = "<signing_secret>";         // HMAC-SHA256 key
-input int     TickBatchMs          = 150;                        // Tick flush interval (ms)
+input int     TickBatchMs          = 250;                        // Active symbol snapshot flush interval (ms)
+input int     WatchlistTickBatchMs = 1000;                       // Watchlist symbol snapshot flush interval (ms)
+input string  ActiveSymbolsCsv     = "";                         // Optional extra active symbols; attached chart symbol is always active
+input bool    LatestTickOnlyPerFlush = true;                    // Keep only the newest tick per symbol in each flush window
 input int     HistoricalBarsOnInit = 500;                        // 1m bars to push on startup
 input int     ConfigRefreshSec     = 60;                         // Symbol list refresh interval
 
@@ -34,19 +37,40 @@ datetime g_sym_last_bar[];      // Last completed 1m bar open-time
 
 int      g_sym_count     = 0;
 ulong    g_last_flush_ms = 0;
+ulong    g_last_watchlist_flush_ms = 0;
 ulong    g_last_config_ms= 0;
 ulong    g_last_health_ms = 0;  // Last /health check timestamp
 int      g_relay_uptime_prev = -2; // -2=first-run  -1=was-down  >=0=last-uptime
 bool     g_historical_seeded = false; // true once /historical-bulk succeeds
 
-// Tick batch accumulator (plain arrays, flushed every TickBatchMs)
-// Max 2000 ticks per batch (at 50ms polling × 20 symbols × flood = safe ceiling)
-#define MAX_BATCH 2000
-string  g_tick_sym[MAX_BATCH];
-double  g_tick_bid[MAX_BATCH];
-double  g_tick_ask[MAX_BATCH];
-long    g_tick_msc[MAX_BATCH];
-int     g_batch_count = 0;
+// Pending per-symbol snapshots let us emit active-chart symbols more often
+// than watchlist symbols while still sending only the latest price per symbol.
+double  g_pending_bid[];
+double  g_pending_ask[];
+long    g_pending_msc[];
+bool    g_pending_dirty[];
+
+bool CsvContainsSymbol(const string csv, const string sym)
+{
+   string cleaned = csv;
+   StringReplace(cleaned, " ", "");
+   if(StringLen(cleaned) == 0)
+      return false;
+
+   string parts[];
+   int count = StringSplit(cleaned, ',', parts);
+   for(int i = 0; i < count; i++)
+      if(parts[i] == sym)
+         return true;
+   return false;
+}
+
+bool IsActiveSymbol(const string sym)
+{
+   if(sym == _Symbol)
+      return true;
+   return CsvContainsSymbol(ActiveSymbolsCsv, sym);
+}
 
 //==========================================================================
 // SECTION 3 — INIT / DEINIT
@@ -69,6 +93,7 @@ int OnInit()
    EventSetMillisecondTimer(50);
 
    g_last_flush_ms  = GetTickCount64();
+   g_last_watchlist_flush_ms = g_last_flush_ms;
    g_last_config_ms = GetTickCount64();
    g_last_health_ms = GetTickCount64();
 
@@ -133,15 +158,10 @@ void PollAllSymbols()
 
       g_sym_last_tick_msc[i] = tick.time_msc;
 
-      // Add to batch buffer (guard against overflow)
-      if(g_batch_count < MAX_BATCH)
-      {
-         g_tick_sym[g_batch_count] = g_sym_names[i];
-         g_tick_bid[g_batch_count] = tick.bid;
-         g_tick_ask[g_batch_count] = tick.ask;
-         g_tick_msc[g_batch_count] = tick.time_msc;
-         g_batch_count++;
-      }
+      g_pending_bid[i] = tick.bid;
+      g_pending_ask[i] = tick.ask;
+      g_pending_msc[i] = tick.time_msc;
+      g_pending_dirty[i] = true;
 
       // Bar detection: has a new 1m candle opened since we last checked?
       // iTime(sym, PERIOD_M1, 0) = open time of the CURRENT (forming) bar
@@ -157,38 +177,57 @@ void PollAllSymbols()
          g_sym_last_bar[i] = current_bar;
    }
 
-   // Flush tick batch + forming candles every TickBatchMs milliseconds
-   if(now_ms - g_last_flush_ms >= (ulong)TickBatchMs)
+   // Flush active symbols more frequently than the broader watchlist.
+   if(now_ms - g_last_flush_ms >= (ulong)MathMax(TickBatchMs, 50))
    {
-      FlushTickBatch(now_ms);
+      FlushTickBatch(now_ms, true);
       g_last_flush_ms = now_ms;
+   }
+
+   if(now_ms - g_last_watchlist_flush_ms >= (ulong)MathMax(WatchlistTickBatchMs, TickBatchMs))
+   {
+      FlushTickBatch(now_ms, false);
+      g_last_watchlist_flush_ms = now_ms;
    }
 }
 
 //==========================================================================
 // SECTION 6 — FLUSH: BUILD JSON AND POST TO RELAY
 //==========================================================================
-void FlushTickBatch(ulong now_ms)
+void FlushTickBatch(ulong now_ms, bool activeSymbols)
 {
-   // Build JSON: ticks array + forming_candles array
-   // sent as POST /tick-batch to localhost:8082
+   // Build JSON: ticks array + forming_candles array for either the active
+   // chart symbols or the lower-priority watchlist symbols.
 
    string json = "{";
    json += "\"connection_id\":\"" + ConnectionId + "\",";
    json += "\"ts_ms\":" + IntegerToString((long)now_ms) + ",";
 
+   int sentIdx[];
+   int sentCount = 0;
+
    // --- ticks ---
    json += "\"ticks\":[";
-   for(int i = 0; i < g_batch_count; i++)
+   int tickCount = 0;
+   for(int i = 0; i < g_sym_count; i++)
    {
-      if(i > 0) json += ",";
-      int d = FindDigits(g_tick_sym[i]);
+      if(IsActiveSymbol(g_sym_names[i]) != activeSymbols)
+         continue;
+      if(!g_pending_dirty[i])
+         continue;
+
+      if(tickCount > 0) json += ",";
+      int d = g_sym_digits[i];
       json += "{";
-      json += "\"symbol\":\"" + g_tick_sym[i] + "\",";
-      json += "\"bid\":"     + DoubleToString(g_tick_bid[i], d) + ",";
-      json += "\"ask\":"     + DoubleToString(g_tick_ask[i], d) + ",";
-      json += "\"ts_ms\":"   + IntegerToString(g_tick_msc[i]);
+      json += "\"symbol\":\"" + g_sym_names[i] + "\",";
+      json += "\"bid\":"     + DoubleToString(g_pending_bid[i], d) + ",";
+      json += "\"ask\":"     + DoubleToString(g_pending_ask[i], d) + ",";
+      json += "\"ts_ms\":"   + IntegerToString(g_pending_msc[i]);
       json += "}";
+
+      ArrayResize(sentIdx, sentCount + 1);
+      sentIdx[sentCount++] = i;
+      tickCount++;
    }
    json += "],";
 
@@ -198,6 +237,9 @@ void FlushTickBatch(ulong now_ms)
    int added = 0;
    for(int i = 0; i < g_sym_count; i++)
    {
+      if(IsActiveSymbol(g_sym_names[i]) != activeSymbols)
+         continue;
+
       MqlRates r[];
       ArraySetAsSeries(r, true);
       if(CopyRates(g_sym_names[i], PERIOD_M1, 0, 1, r) <= 0)
@@ -218,14 +260,15 @@ void FlushTickBatch(ulong now_ms)
    }
    json += "]}";
 
-   // Reset batch
-   g_batch_count = 0;
-
-   // Only POST if we have something to send
+   // Only POST if there are symbols in this group.
    if(added == 0)
       return;
 
-   SignedPost("/tick-batch", json, 3000);
+   if(SignedPost("/tick-batch", json, 3000))
+   {
+      for(int i = 0; i < sentCount; i++)
+         g_pending_dirty[sentIdx[i]] = false;
+   }
 }
 
 // Send a single completed bar (called immediately when bar closes)
@@ -508,6 +551,10 @@ void ApplySymbolList(const string &syms[], int count)
    ArrayResize(g_sym_digits,         count);
    ArrayResize(g_sym_last_tick_msc,  count);
    ArrayResize(g_sym_last_bar,       count);
+   ArrayResize(g_pending_bid,        count);
+   ArrayResize(g_pending_ask,        count);
+   ArrayResize(g_pending_msc,        count);
+   ArrayResize(g_pending_dirty,      count);
 
    int valid = 0;
    for(int i = 0; i < count; i++)
@@ -530,10 +577,19 @@ void ApplySymbolList(const string &syms[], int count)
    ArrayResize(g_sym_digits,        valid);
    ArrayResize(g_sym_last_tick_msc, valid);
    ArrayResize(g_sym_last_bar,      valid);
+   ArrayResize(g_pending_bid,       valid);
+   ArrayResize(g_pending_ask,       valid);
+   ArrayResize(g_pending_msc,       valid);
+   ArrayResize(g_pending_dirty,     valid);
    g_sym_count = valid;
 
-   // Reset batch
-   g_batch_count = 0;
+   for(int i = 0; i < valid; i++)
+   {
+      g_pending_bid[i] = 0.0;
+      g_pending_ask[i] = 0.0;
+      g_pending_msc[i] = 0;
+      g_pending_dirty[i] = false;
+   }
 }
 
 // Helper: find digits for a symbol by name (used in flush loop)

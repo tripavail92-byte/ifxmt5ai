@@ -1525,10 +1525,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     && pendingFeedSymbol === selectedSymbol
     && !hasLiveQuoteForSelected
   );
-  const feedStatus = transportMode === "sse"
+  const feedStatus = transportMode === "ws"
     ? {
         dot: "bg-emerald-400 animate-pulse",
-        label: "SSE live",
+        label: "WebSocket live",
         tone: "text-emerald-300",
         detail: "Primary stream active",
       }
