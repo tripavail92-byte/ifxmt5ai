@@ -24,6 +24,7 @@ const PRICE_STATE_MAX_AGE_MS = Math.max(
   1000,
   Number.parseInt((process.env.MT5_PRICE_STATE_MAX_AGE_MS ?? "3000").trim(), 10) || 3000
 );
+const INSTANCE_ID = process.env.RAILWAY_REPLICA_ID ?? process.env.HOSTNAME ?? "unknown";
 let lastRelaySnapshot: Record<string, { bid: number; ask: number; ts_ms: number }> | null = null;
 
 function newestPriceTs(prices: Record<string, { bid: number; ask: number; ts_ms: number }>): number {
@@ -94,6 +95,7 @@ export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const requestedConnId = searchParams.get("conn_id") ?? undefined;
   const symbol = searchParams.get("symbol")  ?? undefined;
+  const debug = searchParams.get("debug") === "1";
   const access = await resolveTerminalAccess(requestedConnId ?? undefined);
 
   if (!access.authorized) {
@@ -108,16 +110,20 @@ export async function GET(req: NextRequest) {
   let all = stateAll;
   let prices = statePrices;
   const stateIsFresh = hasFreshPrices(stateAll);
+  const stateNewestBeforeFallback = newestPriceTs(stateAll);
+  let relayNewest = 0;
+  let selectedSource: "state" | "relay" = "state";
 
   // If this instance has cold or stale in-memory state, prefer relay data when available.
   if (!Object.keys(prices).length || !stateIsFresh) {
     const relayPrices = await fetchRelayPrices(relayConnId);
     if (relayPrices && Object.keys(relayPrices).length) {
-      const relayNewest = newestPriceTs(relayPrices);
+      relayNewest = newestPriceTs(relayPrices);
       const stateNewest = newestPriceTs(stateAll);
       if (!stateNewest || relayNewest >= stateNewest || !stateIsFresh) {
         all = relayPrices;
         prices = symbol ? (all[symbol] ? { [symbol]: all[symbol] } : {}) : all;
+        selectedSource = "relay";
       }
     }
   }
@@ -126,7 +132,22 @@ export async function GET(req: NextRequest) {
   const symbols = [...new Set([...stateSymbols, ...Object.keys(all)])];
 
   return NextResponse.json(
-    { prices, symbols },
+    debug
+      ? {
+          prices,
+          symbols,
+          debug: {
+            instance: INSTANCE_ID,
+            source: selectedSource,
+            state_conn_id: stateConnId,
+            relay_conn_id: relayConnId,
+            state_is_fresh: stateIsFresh,
+            state_newest_ts_ms: stateNewestBeforeFallback,
+            relay_newest_ts_ms: relayNewest,
+            selected_newest_ts_ms: newestPriceTs(prices),
+          },
+        }
+      : { prices, symbols },
     {
       headers: { "Cache-Control": "no-store" },
     }
