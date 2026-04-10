@@ -100,10 +100,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
 
-  const connId = access.connId || undefined;
-  const relayConnId = relayConnectionId(connId);
+  const stateConnId = access.connId || undefined;
+  const relayConnId = relayConnectionId(stateConnId);
 
-  const stateAll = mt5State.getPrices(relayConnId);
+  const stateAll = mt5State.getPrices(stateConnId);
   const statePrices = symbol ? (stateAll[symbol] ? { [symbol]: stateAll[symbol] } : {}) : stateAll;
   let all = stateAll;
   let prices = statePrices;
@@ -122,7 +122,7 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const stateSymbols = relayConnId ? mt5State.getSymbols(relayConnId) : mt5State.getSymbols();
+  const stateSymbols = stateConnId ? mt5State.getSymbols(stateConnId) : mt5State.getSymbols();
   const symbols = [...new Set([...stateSymbols, ...Object.keys(all)])];
 
   return NextResponse.json(

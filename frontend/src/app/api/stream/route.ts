@@ -174,26 +174,27 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  const connFilter = !access.isAuthenticated
-    ? (access.connId || undefined)
-    : relayConnectionId(access.connId || undefined);
+  const stateConnFilter = access.connId || undefined;
+  const relayConnFilter = !access.isAuthenticated
+    ? stateConnFilter
+    : relayConnectionId(stateConnFilter);
 
   // Guest preview mode must prefer the upstream relay stream directly.
   // If a Railway replica has only a cached snapshot in local state, serving the
   // in-memory fallback here can make quotes appear online but never advance.
   if (!access.isAuthenticated && (RELAY_STREAM_URL || PRICE_RELAY_URL)) {
-    return proxyRelayStream(req, connFilter);
+    return proxyRelayStream(req, relayConnFilter);
   }
 
-  if (hasWarmState(connFilter)) {
-    return streamFromState(req, connFilter);
+  if (hasWarmState(stateConnFilter)) {
+    return streamFromState(req, stateConnFilter);
   }
 
   if (RELAY_STREAM_URL || PRICE_RELAY_URL) {
-    const proxied = await proxyRelayStream(req, connFilter);
+    const proxied = await proxyRelayStream(req, relayConnFilter);
     if (proxied.ok) return proxied;
   }
 
-  return streamFromState(req, connFilter);
+  return streamFromState(req, stateConnFilter);
 }
 

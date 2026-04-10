@@ -145,18 +145,18 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
 
-  const connId = access.connId;
-  const relayConnId = relayConnectionId(connId);
-  if (!connId) {
+  const stateConnId = access.connId;
+  const relayConnId = relayConnectionId(stateConnId);
+  if (!stateConnId) {
     return NextResponse.json({ error: "conn_id required" }, { status: 400 });
   }
 
   // Fast-path: serve from connection-scoped in-memory state only.
   // Do not merge bars from other connections here; that can leak unrelated
   // symbol streams into the active chart and create visual gaps.
-  const exactStateBars = relayConnId ? mt5State.getCandles(relayConnId, symbol, tf, count) : [];
+  const exactStateBars = mt5State.getCandles(stateConnId, symbol, tf, count);
   const stateBars = exactStateBars;
-  const stateIsFresh = relayConnId ? connectionStateIsFresh(relayConnId) : false;
+  const stateIsFresh = connectionStateIsFresh(stateConnId);
 
   // If state has enough bars, trust it and skip relay fetch.
   if (stateBars.length >= MIN_STATE_BARS && stateIsFresh) {
@@ -237,7 +237,7 @@ export async function GET(req: NextRequest) {
   // Seed state from relay history so subsequent calls can hit the fast-path.
   try {
     if (relay.bars.length) {
-      if (relayConnId) mt5State.applyHistoricalBulk(relayConnId, [{ symbol, bars: relay.bars }]);
+      mt5State.applyHistoricalBulk(stateConnId, [{ symbol, bars: relay.bars }]);
     }
   } catch {
     // Best-effort seeding only.
