@@ -195,7 +195,13 @@ export async function writeHistoricalBulkToRedis(
     seenSymbols.add(entry.symbol);
     const key = candlesKey(connId, entry.symbol);
     if (entry.bars.length) {
-      multi.del(key);
+      const times = entry.bars
+        .map((bar) => Number(bar?.t ?? 0))
+        .filter((value) => Number.isFinite(value) && value > 0)
+        .sort((a, b) => a - b);
+      if (!times.length) continue;
+
+      multi.zRemRangeByScore(key, times[0], times[times.length - 1]);
       multi.zAdd(
         key,
         entry.bars.map((bar) => ({ score: bar.t, value: JSON.stringify(bar) }))
