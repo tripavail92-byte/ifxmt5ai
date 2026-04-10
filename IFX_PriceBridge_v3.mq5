@@ -2,28 +2,32 @@
 //|  IFX_PriceBridge_v3.mq5                                         |
 //|  Industrial-grade multi-symbol tick bridge for IFX terminal      |
 //|  Architecture: OnTick() + EventSetMillisecondTimer(50)           |
-//|  Target: 127.0.0.1:8082 relay (NOT directly to Railway)           |
+//|  Target: Railway cloud ingest (/api/mt5)                         |
 //|                                                                  |
-//|  SETUP: In MT5 → Tools → Options → Expert Advisors              |
-//|    Add  http://127.0.0.1:8082  to "Allow WebRequest for listed   |
-//|    URL" list — required for the relay connection to work.        |
+//|  SETUP: In MT5 -> Tools -> Options -> Expert Advisors            |
+//|    Add https://ifx-mt5-ingest-production.up.railway.app to the   |
+//|    "Allow WebRequest for listed URL" list.                      |
+//|    BackendRelayUrl should point to the /api/mt5 base path.       |
 //+------------------------------------------------------------------+
 #property strict
 #property version   "3.0"
-#property description "IFX Price Bridge v3 — Multi-symbol tick relay → localhost"
+#property description "IFX Price Bridge v3 - Multi-symbol tick relay -> Railway cloud ingest"
 
 //==========================================================================
 // SECTION 1 — INPUTS
 //==========================================================================
-input string  BackendRelayUrl      = "http://127.0.0.1:8082";   // Relay URL (NOT Railway direct)
-input string  ConnectionId         = "<connection_id>";          // Your MT5 connection UUID
-input string  SigningSecret        = "<signing_secret>";         // HMAC-SHA256 key
+input string  BackendRelayUrl      = "https://ifx-mt5-ingest-production.up.railway.app/api/mt5"; // Railway ingest base URL
+input string  ConnectionId         = "200beae4-553b-4607-8653-8a15e5699865"; // Your MT5 connection UUID
+input string  SigningSecret        = "ZoySwg4Mbjc+QtqnNEJc0QuUzaPWoYsgiUBJUji4gJ4="; // Must match Railway RELAY_SECRET
 input int     TickBatchMs          = 250;                        // Active symbol snapshot flush interval (ms)
-input int     WatchlistTickBatchMs = 1000;                       // Watchlist symbol snapshot flush interval (ms)
-input string  ActiveSymbolsCsv     = "";                         // Optional extra active symbols; attached chart symbol is always active
+input int     WatchlistTickBatchMs = 500;                        // Watchlist symbol snapshot flush interval (ms)
+input string  ActiveSymbolsCsv     = "EURUSDm,XAUUSDm,USDJPYm,AUDUSDm,USOILm,GBPUSDm,BTCUSDm,ETHUSDm,USDCHFm,USDCADm,NZDUSDm,EURGBPm"; // Preferred high-rate symbols (max 12); attached chart symbol is always active
 input bool    LatestTickOnlyPerFlush = true;                    // Keep only the newest tick per symbol in each flush window
 input int     HistoricalBarsOnInit = 500;                        // 1m bars to push on startup
 input int     ConfigRefreshSec     = 60;                         // Symbol list refresh interval
+input int     HistoryRepairBars    = 240;                        // Recent 1m bars to re-push when candle-close uploads stall
+input int     HistoryRepairCooldownSec = 120;                    // Minimum delay between per-symbol repair attempts
+input int     HistoryRepairTriggerMissedBars = 3;                // Re-push history after this many closed bars are missing
 
 //==========================================================================
 // SECTION 2 — GLOBALS
@@ -34,6 +38,8 @@ string   g_sym_names[];         // Symbol names
 int      g_sym_digits[];        // Decimal places
 long     g_sym_last_tick_msc[]; // Last tick time_msc (ms precision)
 datetime g_sym_last_bar[];      // Last completed 1m bar open-time
+datetime g_sym_last_uploaded_close[]; // Last closed 1m bar confirmed sent to relay
+ulong    g_sym_last_repair_ms[];      // Last per-symbol history repair attempt timestamp
 
 int      g_sym_count     = 0;
 ulong    g_last_flush_ms = 0;
@@ -43,6 +49,11 @@ ulong    g_last_health_ms = 0;  // Last /health check timestamp
 int      g_relay_uptime_prev = -2; // -2=first-run  -1=was-down  >=0=last-uptime
 bool     g_historical_seeded = false; // true once /historical-bulk succeeds
 
+#define MAX_ACTIVE_SYMBOLS 12
+
+string   g_active_symbols[];
+int      g_active_symbol_count = 0;
+
 // Pending per-symbol snapshots let us emit active-chart symbols more often
 // than watchlist symbols while still sending only the latest price per symbol.
 double  g_pending_bid[];
@@ -50,26 +61,82 @@ double  g_pending_ask[];
 long    g_pending_msc[];
 bool    g_pending_dirty[];
 
-bool CsvContainsSymbol(const string csv, const string sym)
+string TrimSpaces(const string value)
 {
-   string cleaned = csv;
-   StringReplace(cleaned, " ", "");
+   string trimmed = value;
+   StringReplace(trimmed, " ", "");
+   return trimmed;
+}
+
+bool ActiveArrayContains(const string sym)
+{
+   for(int i = 0; i < g_active_symbol_count; i++)
+      if(g_active_symbols[i] == sym)
+         return true;
+   return false;
+}
+
+void LoadPreferredActiveSymbols()
+{
+   string cleaned = TrimSpaces(ActiveSymbolsCsv);
+   ArrayResize(g_active_symbols, 0);
+   g_active_symbol_count = 0;
+
    if(StringLen(cleaned) == 0)
-      return false;
+   {
+      Print("ℹ️ [ACTIVE] no preferred symbols configured; chart symbol stays high-rate");
+      return;
+   }
 
    string parts[];
    int count = StringSplit(cleaned, ',', parts);
    for(int i = 0; i < count; i++)
-      if(parts[i] == sym)
-         return true;
-   return false;
+   {
+      string sym = TrimSpaces(parts[i]);
+      if(StringLen(sym) == 0)
+         continue;
+      if(ActiveArrayContains(sym))
+         continue;
+      if(g_active_symbol_count >= MAX_ACTIVE_SYMBOLS)
+      {
+         Print("⚠️ [ACTIVE] max preferred symbols is ", MAX_ACTIVE_SYMBOLS, "; ignoring extra symbol ", sym);
+         continue;
+      }
+
+      ArrayResize(g_active_symbols, g_active_symbol_count + 1);
+      g_active_symbols[g_active_symbol_count++] = sym;
+   }
+
+   if(g_active_symbol_count == 0)
+   {
+      Print("ℹ️ [ACTIVE] no valid preferred symbols configured; chart symbol stays high-rate");
+      return;
+   }
+
+   string finalCsv = "";
+   for(int i = 0; i < g_active_symbol_count; i++)
+   {
+      if(i > 0) finalCsv += ",";
+      finalCsv += g_active_symbols[i];
+   }
+   Print("✅ [ACTIVE] preferred high-rate symbols (", g_active_symbol_count, "/", MAX_ACTIVE_SYMBOLS, "): ", finalCsv);
 }
 
 bool IsActiveSymbol(const string sym)
 {
    if(sym == _Symbol)
       return true;
-   return CsvContainsSymbol(ActiveSymbolsCsv, sym);
+   return ActiveArrayContains(sym);
+}
+
+int RepairBarsToSend()
+{
+   int requested = HistoryRepairBars;
+   if(requested <= 0)
+      requested = HistoricalBarsOnInit;
+   if(requested <= 0)
+      requested = 120;
+   return requested;
 }
 
 //==========================================================================
@@ -78,8 +145,9 @@ bool IsActiveSymbol(const string sym)
 int OnInit()
 {
    Print("=== IFX Price Bridge v3.0 ===");
-   Print("Relay: ", BackendRelayUrl, " (must be whitelisted in MT5 Options → Expert Advisors)");
+   Print("Relay: ", BackendRelayUrl, " (must be whitelisted in MT5 Options -> Expert Advisors)");
    Print("ConnectionId: ", ConnectionId);
+   LoadPreferredActiveSymbols();
 
    // Fetch symbol list from relay (GET /config)
    // Falls back to hardcoded defaults if relay not yet running
@@ -163,18 +231,46 @@ void PollAllSymbols()
       g_pending_msc[i] = tick.time_msc;
       g_pending_dirty[i] = true;
 
-      // Bar detection: has a new 1m candle opened since we last checked?
-      // iTime(sym, PERIOD_M1, 0) = open time of the CURRENT (forming) bar
-      // When it advances, the previous bar is now complete
-      datetime current_bar = iTime(g_sym_names[i], PERIOD_M1, 0);
-      if(current_bar > 0 && g_sym_last_bar[i] > 0 && current_bar > g_sym_last_bar[i])
+      // Bar detection uses CopyRates directly so off-chart symbols rely on the
+      // same synchronized series source as the forming candle snapshots.
+      MqlRates live_rates[];
+      ArraySetAsSeries(live_rates, true);
+      int live_copied = CopyRates(g_sym_names[i], PERIOD_M1, 0, 2, live_rates);
+      if(live_copied > 0)
       {
-         // The old bar just closed — send it
-         // CopyRates(..., 1, 1) = bar at index 1 = the bar that just closed
-         SendCandleClose(g_sym_names[i], i);
+         datetime current_bar = live_rates[0].time;
+         datetime latest_closed_bar = (live_copied > 1) ? live_rates[1].time : 0;
+         if(g_sym_last_bar[i] == 0)
+         {
+            g_sym_last_bar[i] = current_bar;
+         }
+         else if(current_bar > g_sym_last_bar[i])
+         {
+            if(live_copied > 1)
+               SendCandleCloseBar(g_sym_names[i], i, live_rates[1]);
+            g_sym_last_bar[i] = current_bar;
+         }
+
+         if(latest_closed_bar > 0
+            && HistoryRepairTriggerMissedBars > 0
+            && HistoryRepairCooldownSec > 0
+            && RepairBarsToSend() > 0)
+         {
+            datetime last_uploaded = g_sym_last_uploaded_close[i];
+            int missingBars = (last_uploaded > 0) ? (int)((latest_closed_bar - last_uploaded) / 60) : HistoryRepairTriggerMissedBars;
+            if(missingBars >= HistoryRepairTriggerMissedBars)
+            {
+               ulong cooldown_ms = (ulong)HistoryRepairCooldownSec * 1000;
+               if(now_ms - g_sym_last_repair_ms[i] >= cooldown_ms)
+               {
+                  g_sym_last_repair_ms[i] = now_ms;
+                  Print("🔄 [REPAIR] ", g_sym_names[i], " missing ", missingBars, " closed bars — re-pushing recent history");
+                  if(PushHistoricalBulkSymbol(i, RepairBarsToSend()))
+                     g_historical_seeded = true;
+               }
+            }
+         }
       }
-      if(current_bar > 0)
-         g_sym_last_bar[i] = current_bar;
    }
 
    // Flush active symbols more frequently than the broader watchlist.
@@ -272,6 +368,31 @@ void FlushTickBatch(ulong now_ms, bool activeSymbols)
 }
 
 // Send a single completed bar (called immediately when bar closes)
+void SendCandleCloseBar(const string symbol, int sym_idx, const MqlRates &bar)
+{
+   int d = g_sym_digits[sym_idx];
+   string json = "{";
+   json += "\"connection_id\":\"" + ConnectionId + "\",";
+   json += "\"symbol\":\""        + symbol                        + "\",";
+   json += "\"timeframe\":\"1m\",";
+   json += "\"time\":"            + IntegerToString((long)bar.time) + ",";
+   json += "\"open\":"            + DoubleToString(bar.open,  d)    + ",";
+   json += "\"high\":"            + DoubleToString(bar.high,  d)    + ",";
+   json += "\"low\":"             + DoubleToString(bar.low,   d)    + ",";
+   json += "\"close\":"           + DoubleToString(bar.close, d)    + ",";
+   json += "\"tick_vol\":"        + IntegerToString(bar.tick_volume);
+   json += "}";
+
+   if(SignedPost("/candle-close", json, 3000))
+   {
+      g_sym_last_uploaded_close[sym_idx] = bar.time;
+      Print("✅ [", symbol, "] candle-close T=", TimeToString(bar.time));
+   }
+   else
+      Print("⚠️ [", symbol, "] candle-close POST failed");
+}
+
+// Send a single completed bar (fallback helper)
 void SendCandleClose(const string symbol, int sym_idx)
 {
    MqlRates r[];
@@ -280,28 +401,66 @@ void SendCandleClose(const string symbol, int sym_idx)
    if(CopyRates(symbol, PERIOD_M1, 1, 1, r) <= 0)
       return;
 
-   int d = g_sym_digits[sym_idx];
-   string json = "{";
-   json += "\"connection_id\":\"" + ConnectionId + "\",";
-   json += "\"symbol\":\""        + symbol                           + "\",";
-   json += "\"timeframe\":\"1m\",";
-   json += "\"time\":"            + IntegerToString((long)r[0].time) + ",";
-   json += "\"open\":"            + DoubleToString(r[0].open,  d)   + ",";
-   json += "\"high\":"            + DoubleToString(r[0].high,  d)   + ",";
-   json += "\"low\":"             + DoubleToString(r[0].low,   d)   + ",";
-   json += "\"close\":"           + DoubleToString(r[0].close, d)   + ",";
-   json += "\"tick_vol\":"        + IntegerToString(r[0].tick_volume);
-   json += "}";
-
-   if(SignedPost("/candle-close", json, 3000))
-      Print("✅ [", symbol, "] candle-close T=", TimeToString(r[0].time));
-   else
-      Print("⚠️ [", symbol, "] candle-close POST failed");
+   SendCandleCloseBar(symbol, sym_idx, r[0]);
 }
 
 //==========================================================================
 // SECTION 7 — HISTORICAL BULK PUSH (called once from OnInit)
 //==========================================================================
+bool PushHistoricalBulkSymbol(const int sym_idx, int barsRequested)
+{
+   if(sym_idx < 0 || sym_idx >= g_sym_count)
+      return false;
+
+   if(barsRequested <= 0)
+      barsRequested = HistoricalBarsOnInit;
+   if(barsRequested <= 0)
+      return false;
+
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   int copied = CopyRates(g_sym_names[sym_idx], PERIOD_M1, 1, barsRequested, r);
+   if(copied <= 0)
+   {
+      Print("⚠️ [", g_sym_names[sym_idx], "] CopyRates returned 0 bars, skipping");
+      return false;
+   }
+
+   int d = g_sym_digits[sym_idx];
+   string json = "{";
+   json += "\"connection_id\":\"" + ConnectionId + "\",";
+   json += "\"bars_requested\":"  + IntegerToString(barsRequested) + ",";
+   json += "\"symbols\":[{";
+   json += "\"symbol\":\"" + g_sym_names[sym_idx] + "\",\"bars\":[";
+
+   for(int j = copied - 1; j >= 0; j--)
+   {
+      if(j < copied - 1) json += ",";
+      json += "{";
+      json += "\"t\":"  + IntegerToString((long)r[j].time)     + ",";
+      json += "\"o\":"  + DoubleToString(r[j].open,  d)         + ",";
+      json += "\"h\":"  + DoubleToString(r[j].high,  d)         + ",";
+      json += "\"l\":"  + DoubleToString(r[j].low,   d)         + ",";
+      json += "\"c\":"  + DoubleToString(r[j].close, d)         + ",";
+      json += "\"v\":"  + IntegerToString(r[j].tick_volume);
+      json += "}";
+   }
+   json += "]}]}";
+
+   Print("  [", g_sym_names[sym_idx], "] ", copied, " bars ready");
+
+   if(SignedPost("/historical-bulk", json, 15000))
+   {
+      g_sym_last_uploaded_close[sym_idx] = r[0].time;
+      g_sym_last_repair_ms[sym_idx] = GetTickCount64();
+      Print("✅ [", g_sym_names[sym_idx], "] historical bulk pushed");
+      return true;
+   }
+
+   Print("⚠️ [", g_sym_names[sym_idx], "] historical bulk POST failed");
+   return false;
+}
+
 void PushHistoricalBulk()
 {
    if(g_sym_count == 0)
@@ -312,49 +471,14 @@ void PushHistoricalBulk()
 
    Print("📦 Pushing ", HistoricalBarsOnInit, " × 1m historical bars for ", g_sym_count, " symbols...");
 
-   // Build one large batch payload covering all symbols
-   string json = "{";
-   json += "\"connection_id\":\"" + ConnectionId + "\",";
-   json += "\"bars_requested\":"  + IntegerToString(HistoricalBarsOnInit) + ",";
-   json += "\"symbols\":[";
-
    int sym_added = 0;
+   int sym_succeeded = 0;
    for(int i = 0; i < g_sym_count; i++)
    {
-      MqlRates r[];
-      ArraySetAsSeries(r, true);
-      // Request HistoricalBarsOnInit bars starting from bar index 1
-      // (bar 0 = forming, bars 1..N = completed history)
-      int copied = CopyRates(g_sym_names[i], PERIOD_M1, 1, HistoricalBarsOnInit, r);
-      if(copied <= 0)
-      {
-         Print("⚠️ [", g_sym_names[i], "] CopyRates returned 0 bars, skipping");
-         continue;
-      }
-
-      int d = g_sym_digits[i];
-      if(sym_added > 0) json += ",";
-      json += "{\"symbol\":\"" + g_sym_names[i] + "\",\"bars\":[";
-
-      // Bars come back newest-first (series order), reverse to send oldest-first
-      for(int j = copied - 1; j >= 0; j--)
-      {
-         if(j < copied - 1) json += ",";
-         json += "{";
-         json += "\"t\":"  + IntegerToString((long)r[j].time)     + ",";
-         json += "\"o\":"  + DoubleToString(r[j].open,  d)         + ",";
-         json += "\"h\":"  + DoubleToString(r[j].high,  d)         + ",";
-         json += "\"l\":"  + DoubleToString(r[j].low,   d)         + ",";
-         json += "\"c\":"  + DoubleToString(r[j].close, d)         + ",";
-         json += "\"v\":"  + IntegerToString(r[j].tick_volume);
-         json += "}";
-      }
-      json += "]}";
       sym_added++;
-
-      Print("  [", g_sym_names[i], "] ", copied, " bars ready");
+      if(PushHistoricalBulkSymbol(i, HistoricalBarsOnInit))
+         sym_succeeded++;
    }
-   json += "]}";
 
    if(sym_added == 0)
    {
@@ -363,15 +487,15 @@ void PushHistoricalBulk()
       return;
    }
 
-   if(SignedPost("/historical-bulk", json, 15000))
+   if(sym_succeeded == sym_added)
    {
       g_historical_seeded = true;
-      Print("✅ Historical bulk pushed: ", sym_added, " symbols");
+      Print("✅ Historical bulk pushed: ", sym_succeeded, "/", sym_added, " symbols");
    }
    else
    {
       g_historical_seeded = false;
-      Print("❌ Historical bulk POST failed — relay may not be running yet");
+      Print("❌ Historical bulk incomplete: ", sym_succeeded, "/", sym_added, " symbols pushed");
    }
 }
 
@@ -452,6 +576,11 @@ void CheckRelayRestart()
    else
    {
       g_relay_uptime_prev = uptime;
+      if(!g_historical_seeded)
+      {
+         Print("🔄 [HEALTH] history still not seeded — retrying historical push");
+         PushHistoricalBulk();
+      }
    }
 }
 
@@ -547,14 +676,53 @@ void InitDefaultSymbols()
 
 void ApplySymbolList(const string &syms[], int count)
 {
+   string   prev_names[];
+   int      prev_digits[];
+   long     prev_last_tick_msc[];
+   datetime prev_last_bar[];
+   datetime prev_last_uploaded_close[];
+   double   prev_pending_bid[];
+   double   prev_pending_ask[];
+   long     prev_pending_msc[];
+   bool     prev_pending_dirty[];
+   ulong    prev_last_repair_ms[];
+   int      prev_count = g_sym_count;
+
+   ArrayResize(prev_names, prev_count);
+   ArrayResize(prev_digits, prev_count);
+   ArrayResize(prev_last_tick_msc, prev_count);
+   ArrayResize(prev_last_bar, prev_count);
+   ArrayResize(prev_last_uploaded_close, prev_count);
+   ArrayResize(prev_pending_bid, prev_count);
+   ArrayResize(prev_pending_ask, prev_count);
+   ArrayResize(prev_pending_msc, prev_count);
+   ArrayResize(prev_pending_dirty, prev_count);
+   ArrayResize(prev_last_repair_ms, prev_count);
+
+   for(int i = 0; i < prev_count; i++)
+   {
+      prev_names[i] = g_sym_names[i];
+      prev_digits[i] = g_sym_digits[i];
+      prev_last_tick_msc[i] = g_sym_last_tick_msc[i];
+      prev_last_bar[i] = g_sym_last_bar[i];
+      prev_last_uploaded_close[i] = g_sym_last_uploaded_close[i];
+      prev_pending_bid[i] = g_pending_bid[i];
+      prev_pending_ask[i] = g_pending_ask[i];
+      prev_pending_msc[i] = g_pending_msc[i];
+      prev_pending_dirty[i] = g_pending_dirty[i];
+      prev_last_repair_ms[i] = g_sym_last_repair_ms[i];
+   }
+
    ArrayResize(g_sym_names,          count);
    ArrayResize(g_sym_digits,         count);
    ArrayResize(g_sym_last_tick_msc,  count);
    ArrayResize(g_sym_last_bar,       count);
+   ArrayResize(g_sym_last_uploaded_close, count);
    ArrayResize(g_pending_bid,        count);
    ArrayResize(g_pending_ask,        count);
    ArrayResize(g_pending_msc,        count);
    ArrayResize(g_pending_dirty,      count);
+   ArrayResize(g_sym_last_repair_ms, count);
 
    int valid = 0;
    for(int i = 0; i < count; i++)
@@ -565,10 +733,27 @@ void ApplySymbolList(const string &syms[], int count)
          Print("⚠️ [CONFIG] symbol not available: ", s);
          continue;
       }
+
+      int prev_idx = -1;
+      for(int j = 0; j < prev_count; j++)
+      {
+         if(prev_names[j] == s)
+         {
+            prev_idx = j;
+            break;
+         }
+      }
+
       g_sym_names[valid]         = s;
       g_sym_digits[valid]        = (int)SymbolInfoInteger(s, SYMBOL_DIGITS);
-      g_sym_last_tick_msc[valid] = 0;
-      g_sym_last_bar[valid]      = 0;
+      g_sym_last_tick_msc[valid] = (prev_idx >= 0) ? prev_last_tick_msc[prev_idx] : 0;
+      g_sym_last_bar[valid]      = (prev_idx >= 0) ? prev_last_bar[prev_idx] : 0;
+      g_sym_last_uploaded_close[valid] = (prev_idx >= 0) ? prev_last_uploaded_close[prev_idx] : 0;
+      g_pending_bid[valid]       = (prev_idx >= 0) ? prev_pending_bid[prev_idx] : 0.0;
+      g_pending_ask[valid]       = (prev_idx >= 0) ? prev_pending_ask[prev_idx] : 0.0;
+      g_pending_msc[valid]       = (prev_idx >= 0) ? prev_pending_msc[prev_idx] : 0;
+      g_pending_dirty[valid]     = (prev_idx >= 0) ? prev_pending_dirty[prev_idx] : false;
+      g_sym_last_repair_ms[valid] = (prev_idx >= 0) ? prev_last_repair_ms[prev_idx] : 0;
       valid++;
    }
 
@@ -577,19 +762,14 @@ void ApplySymbolList(const string &syms[], int count)
    ArrayResize(g_sym_digits,        valid);
    ArrayResize(g_sym_last_tick_msc, valid);
    ArrayResize(g_sym_last_bar,      valid);
+   ArrayResize(g_sym_last_uploaded_close, valid);
    ArrayResize(g_pending_bid,       valid);
    ArrayResize(g_pending_ask,       valid);
    ArrayResize(g_pending_msc,       valid);
    ArrayResize(g_pending_dirty,     valid);
+   ArrayResize(g_sym_last_repair_ms, valid);
    g_sym_count = valid;
 
-   for(int i = 0; i < valid; i++)
-   {
-      g_pending_bid[i] = 0.0;
-      g_pending_ask[i] = 0.0;
-      g_pending_msc[i] = 0;
-      g_pending_dirty[i] = false;
-   }
 }
 
 // Helper: find digits for a symbol by name (used in flush loop)
