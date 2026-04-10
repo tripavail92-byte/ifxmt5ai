@@ -1,4 +1,4 @@
-const DEFAULT_PUBLIC_PRICE_RELAY_URL = "https://relay.myifxacademy.com";
+const DEFAULT_PUBLIC_PRICE_RELAY_URL = "";
 const DEFAULT_PUBLIC_TERMINAL_CONN_ID = "200beae4-553b-4607-8653-8a15e5699865";
 
 function normalizeUrl(value: string | undefined | null) {

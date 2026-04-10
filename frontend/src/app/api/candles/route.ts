@@ -1,7 +1,7 @@
 /**
  * GET /api/candles
  *
- * Returns broker-native OHLCV bars from the MT5 terminal via price_relay /candles.
+ * Returns broker-native OHLCV bars from the direct MT5 -> Railway ingest -> Redis pipeline.
  * Single source of truth: do not synthesize candles in the frontend.
  *
  * Query params:
@@ -13,8 +13,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { mt5State, TF_MINUTES } from "@/lib/mt5-state";
-import { SERVER_PRICE_RELAY_URL } from "@/lib/price-relay";
-import { getRedisCandles, getRedisForming, writeHistoricalBulkToRedis } from "@/lib/mt5-redis";
+import { getRedisCandles, getRedisForming } from "@/lib/mt5-redis";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
@@ -22,119 +21,10 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 const MIN_STATE_BARS = 20;
 const INSTANCE_ID = process.env.RAILWAY_REPLICA_ID ?? process.env.HOSTNAME ?? "unknown";
-
-const PRICE_RELAY_URL = SERVER_PRICE_RELAY_URL;
-const RELAY_URL_CANDIDATES = [
-  PRICE_RELAY_URL,
-  process.env.NEXT_PUBLIC_PRICE_RELAY_URL,
-  "https://api.myifxacademy.com",
-  "https://relay.myifxacademy.com",
-]
-  .map((value) => (value ?? "").trim().replace(/\/$/, ""))
-  .filter((value, index, arr): value is string => value.length > 0 && arr.indexOf(value) === index);
-const PRICE_RELAY_TIMEOUT_MS = Math.max(
-  500,
-  Number.parseInt((process.env.PRICE_RELAY_TIMEOUT_MS ?? "5000").trim(), 10) || 5000
-);
 const CANDLE_STATE_MAX_AGE_MS = Math.max(
   1000,
   Number.parseInt((process.env.MT5_CANDLE_STATE_MAX_AGE_MS ?? "15000").trim(), 10) || 15000
 );
-
-type RelayFetchResult = {
-  bars: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }> | null;
-  error?: string;
-};
-
-type RelayHealth = {
-  relay_source_connection_id?: string;
-  active_conn_ids?: string[];
-};
-
-async function fetchRelayCandles(opts: {
-  baseUrl: string;
-  symbol: string;
-  tf: string;
-  count: number;
-  connId?: string;
-}): Promise<RelayFetchResult> {
-  if (!opts.baseUrl) return { bars: null, error: "PRICE_RELAY_URL not configured" };
-
-  const url = new URL("/candles", opts.baseUrl);
-  url.searchParams.set("symbol", opts.symbol);
-  url.searchParams.set("tf", opts.tf);
-  url.searchParams.set("count", String(opts.count));
-  if (opts.connId) url.searchParams.set("conn_id", opts.connId);
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PRICE_RELAY_TIMEOUT_MS);
-  try {
-    const resp = await fetch(url.toString(), {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-      cache: "no-store",
-    });
-    if (!resp.ok) {
-      return { bars: null, error: `relay returned ${resp.status}` };
-    }
-    const data = (await resp.json()) as { bars?: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }> };
-    if (!data?.bars?.length) return { bars: [] };
-    return { bars: data.bars };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const isAbort = msg.toLowerCase().includes("abort");
-    if (isAbort) {
-      return { bars: null, error: `relay timeout after ${PRICE_RELAY_TIMEOUT_MS}ms` };
-    }
-    return { bars: null, error: `relay fetch failed: ${msg}` };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function fetchRelayHealth(): Promise<RelayHealth | null> {
-  for (const baseUrl of RELAY_URL_CANDIDATES) {
-    const url = new URL("/health", baseUrl);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), PRICE_RELAY_TIMEOUT_MS);
-    try {
-      const resp = await fetch(url.toString(), {
-        method: "GET",
-        headers: { Accept: "application/json" },
-        signal: controller.signal,
-        cache: "no-store",
-      });
-      if (!resp.ok) continue;
-      return (await resp.json()) as RelayHealth;
-    } catch {
-      continue;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  return null;
-}
-
-async function fetchBestRelayCandles(opts: {
-  symbol: string;
-  tf: string;
-  count: number;
-  connId?: string;
-}) {
-  let lastError = "PRICE_RELAY_URL not configured";
-
-  for (const baseUrl of RELAY_URL_CANDIDATES) {
-    const result = await fetchRelayCandles({ ...opts, baseUrl });
-    if (result.bars !== null) {
-      return { ...result, baseUrl };
-    }
-    lastError = result.error ?? lastError;
-  }
-
-  return { bars: null as RelayFetchResult["bars"], error: lastError, baseUrl: null as string | null };
-}
 
 function connectionStateIsFresh(connId: string): boolean {
   const now = Date.now();
@@ -178,6 +68,26 @@ function hasTimeGap(
   }
 
   return false;
+}
+
+function takeTrailingContiguousBars(
+  bars: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }>,
+  tfMin: number,
+  count: number
+) {
+  if (bars.length <= 1) return bars;
+
+  const expectedDelta = tfMin * 60;
+  let startIndex = Math.max(0, bars.length - count);
+
+  for (let index = bars.length - 1; index > 0; index -= 1) {
+    if (bars[index].t - bars[index - 1].t > expectedDelta) {
+      startIndex = Math.max(startIndex, index);
+      break;
+    }
+  }
+
+  return bars.slice(startIndex);
 }
 
 function aggregateBars(
@@ -256,123 +166,27 @@ export async function GET(req: NextRequest) {
   const redisBars1m = await getRedisCandles(stateConnId, symbol, Math.max(count, MIN_STATE_BARS) * tfMin);
   const redisForming = await getRedisForming(stateConnId);
   const aggregatedRedisBars = sortAndDedupeBars(appendFormingBar(aggregateBars(redisBars1m, tfMin), redisForming[symbol], tfMin));
-  const exactStateBars = aggregatedRedisBars.length
-    ? (count < aggregatedRedisBars.length ? aggregatedRedisBars.slice(-count) : aggregatedRedisBars)
+  const rawStateBars = aggregatedRedisBars.length
+    ? aggregatedRedisBars
     : mt5State.getCandles(stateConnId, symbol, tf, count);
-  const stateBars = exactStateBars;
+  const exactStateBars = takeTrailingContiguousBars(rawStateBars, tfMin, count);
+  const stateBars = exactStateBars.length > count ? exactStateBars.slice(-count) : exactStateBars;
   const stateIsFresh = connectionStateIsFresh(stateConnId);
   const stateHasGap = hasTimeGap(stateBars, tfMin);
-
-  const requiredStateBars = Math.max(1, count);
-
-  // Only skip relay history when this instance has both fresh state and enough
-  // bars to satisfy the requested chart depth. Otherwise a fresh-but-shallow
-  // Railway instance can wipe older chart history after redeploys.
-  if (stateBars.length >= requiredStateBars && stateIsFresh && !stateHasGap) {
-    return NextResponse.json(
-      {
-        symbol,
-        tf,
-        count: stateBars.length,
-        source: "state",
-        bars: stateBars,
-        debug: {
-          exact_state_count: exactStateBars.length,
-          redis_count: aggregatedRedisBars.length,
-          state_has_gap: stateHasGap,
-          instance: INSTANCE_ID,
-        },
-      },
-      { headers: { "Cache-Control": "no-store" } }
-    );
-  }
-
-  if (!RELAY_URL_CANDIDATES.length) {
-    // No relay configured; return whatever state has (possibly empty).
-    return NextResponse.json(
-      {
-        symbol,
-        tf,
-        count: stateBars.length,
-        source: "state",
-        bars: stateBars,
-        debug: {
-          exact_state_count: exactStateBars.length,
-          redis_count: aggregatedRedisBars.length,
-          state_has_gap: stateHasGap,
-          relay_error: "PRICE_RELAY_URL not configured",
-          instance: INSTANCE_ID,
-        },
-      },
-      { headers: { "Cache-Control": "no-store" } }
-    );
-  }
-
-  let relay = await fetchBestRelayCandles({ symbol, tf, count, connId: stateConnId });
-
-  // If the selected terminal connection is not the VPS relay source connection,
-  // retry once using the relay's active/source connection so history is still
-  // available in the terminal chart.
-  if (relay.bars === null || relay.bars.length < MIN_STATE_BARS) {
-    const health = await fetchRelayHealth();
-    const fallbackConnId = health?.relay_source_connection_id || health?.active_conn_ids?.[0];
-    if (fallbackConnId && fallbackConnId !== stateConnId) {
-      const fallbackRelay = await fetchBestRelayCandles({ symbol, tf, count, connId: fallbackConnId });
-      if (fallbackRelay.bars && fallbackRelay.bars.length > (relay.bars?.length ?? 0)) {
-        relay = fallbackRelay;
-      }
-    }
-  }
-
-  if (relay.bars === null) {
-    // Relay unavailable; return current state bars (possibly empty) so UI keeps
-    // running and can fill via SSE/state later.
-    return NextResponse.json(
-      {
-        symbol,
-        tf,
-        count: stateBars.length,
-        source: "state",
-        bars: stateBars,
-        debug: {
-          exact_state_count: exactStateBars.length,
-          redis_count: aggregatedRedisBars.length,
-          state_has_gap: stateHasGap,
-          relay_error: relay.error ?? null,
-          relay_base_url: relay.baseUrl,
-          instance: INSTANCE_ID,
-        },
-      },
-      { headers: { "Cache-Control": "no-store" } }
-    );
-  }
-
-  const bestBars = !stateIsFresh || stateHasGap || relay.bars.length >= stateBars.length ? relay.bars : stateBars;
-  const source = bestBars === relay.bars ? "relay" : "state";
-
-  // Seed state from relay history so subsequent calls can hit the fast-path.
-  try {
-    if (relay.bars.length) {
-      mt5State.applyHistoricalBulk(stateConnId, [{ symbol, bars: relay.bars }]);
-      await writeHistoricalBulkToRedis(stateConnId, [{ symbol, bars: relay.bars }], [symbol]);
-    }
-  } catch {
-    // Best-effort seeding only.
-  }
 
   return NextResponse.json(
     {
       symbol,
       tf,
-      count: bestBars.length,
-      source,
-      bars: bestBars,
+      count: stateBars.length,
+      source: "state",
+      bars: stateBars,
       debug: {
         exact_state_count: exactStateBars.length,
         redis_count: aggregatedRedisBars.length,
         state_has_gap: stateHasGap,
-        relay_count: relay.bars.length,
-        relay_base_url: relay.baseUrl,
+        state_is_fresh: stateIsFresh,
+        direct_only: true,
         instance: INSTANCE_ID,
       },
     },
