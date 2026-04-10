@@ -13,7 +13,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { mt5State, TF_MINUTES } from "@/lib/mt5-state";
-import { SERVER_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
+import { SERVER_PRICE_RELAY_URL } from "@/lib/price-relay";
 import { getRedisCandles, getRedisForming, writeHistoricalBulkToRedis } from "@/lib/mt5-redis";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
 
@@ -164,6 +164,22 @@ function sortAndDedupeBars(bars: Array<{ t: number; o: number; h: number; l: num
   return [...byTime.values()].sort((a, b) => a.t - b.t);
 }
 
+function hasTimeGap(
+  bars: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }>,
+  tfMin: number
+) {
+  if (bars.length < 2) return false;
+
+  const expectedDelta = tfMin * 60;
+  for (let index = 1; index < bars.length; index += 1) {
+    if (bars[index].t - bars[index - 1].t > expectedDelta) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function aggregateBars(
   bars1m: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }>,
   tfMin: number
@@ -229,7 +245,6 @@ export async function GET(req: NextRequest) {
   }
 
   const stateConnId = access.connId;
-  const relayConnId = relayConnectionId(stateConnId);
   if (!stateConnId) {
     return NextResponse.json({ error: "conn_id required" }, { status: 400 });
   }
@@ -246,13 +261,14 @@ export async function GET(req: NextRequest) {
     : mt5State.getCandles(stateConnId, symbol, tf, count);
   const stateBars = exactStateBars;
   const stateIsFresh = connectionStateIsFresh(stateConnId);
+  const stateHasGap = hasTimeGap(stateBars, tfMin);
 
   const requiredStateBars = Math.max(1, count);
 
   // Only skip relay history when this instance has both fresh state and enough
   // bars to satisfy the requested chart depth. Otherwise a fresh-but-shallow
   // Railway instance can wipe older chart history after redeploys.
-  if (stateBars.length >= requiredStateBars && stateIsFresh) {
+  if (stateBars.length >= requiredStateBars && stateIsFresh && !stateHasGap) {
     return NextResponse.json(
       {
         symbol,
@@ -263,6 +279,7 @@ export async function GET(req: NextRequest) {
         debug: {
           exact_state_count: exactStateBars.length,
           redis_count: aggregatedRedisBars.length,
+          state_has_gap: stateHasGap,
           instance: INSTANCE_ID,
         },
       },
@@ -282,6 +299,7 @@ export async function GET(req: NextRequest) {
         debug: {
           exact_state_count: exactStateBars.length,
           redis_count: aggregatedRedisBars.length,
+          state_has_gap: stateHasGap,
           relay_error: "PRICE_RELAY_URL not configured",
           instance: INSTANCE_ID,
         },
@@ -290,15 +308,15 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  let relay = await fetchBestRelayCandles({ symbol, tf, count, connId: relayConnId });
+  let relay = await fetchBestRelayCandles({ symbol, tf, count, connId: stateConnId });
 
   // If the selected terminal connection is not the VPS relay source connection,
   // retry once using the relay's active/source connection so history is still
   // available in the terminal chart.
-  if (relayConnId && (relay.bars === null || relay.bars.length < MIN_STATE_BARS)) {
+  if (relay.bars === null || relay.bars.length < MIN_STATE_BARS) {
     const health = await fetchRelayHealth();
     const fallbackConnId = health?.relay_source_connection_id || health?.active_conn_ids?.[0];
-    if (fallbackConnId && fallbackConnId !== relayConnId) {
+    if (fallbackConnId && fallbackConnId !== stateConnId) {
       const fallbackRelay = await fetchBestRelayCandles({ symbol, tf, count, connId: fallbackConnId });
       if (fallbackRelay.bars && fallbackRelay.bars.length > (relay.bars?.length ?? 0)) {
         relay = fallbackRelay;
@@ -319,6 +337,7 @@ export async function GET(req: NextRequest) {
         debug: {
           exact_state_count: exactStateBars.length,
           redis_count: aggregatedRedisBars.length,
+          state_has_gap: stateHasGap,
           relay_error: relay.error ?? null,
           relay_base_url: relay.baseUrl,
           instance: INSTANCE_ID,
@@ -328,7 +347,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const bestBars = !stateIsFresh || relay.bars.length >= stateBars.length ? relay.bars : stateBars;
+  const bestBars = !stateIsFresh || stateHasGap || relay.bars.length >= stateBars.length ? relay.bars : stateBars;
   const source = bestBars === relay.bars ? "relay" : "state";
 
   // Seed state from relay history so subsequent calls can hit the fast-path.
@@ -351,6 +370,7 @@ export async function GET(req: NextRequest) {
       debug: {
         exact_state_count: exactStateBars.length,
         redis_count: aggregatedRedisBars.length,
+        state_has_gap: stateHasGap,
         relay_count: relay.bars.length,
         relay_base_url: relay.baseUrl,
         instance: INSTANCE_ID,
