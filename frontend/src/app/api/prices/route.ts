@@ -40,6 +40,37 @@ function hasFreshPrices(prices: Record<string, { bid: number; ask: number; ts_ms
   return newest > 0 && (Date.now() - newest) <= PRICE_STATE_MAX_AGE_MS;
 }
 
+function reconcilePricesFromForming(
+  prices: Record<string, { bid: number; ask: number; ts_ms: number }>,
+  forming: Record<string, { t: number; o: number; h: number; l: number; c: number; v: number }>
+) {
+  const merged = { ...prices };
+  let updatedCount = 0;
+
+  for (const [symbol, bar] of Object.entries(forming)) {
+    const formingTsMs = Number(bar?.t ?? 0) * 1000;
+    const close = Number(bar?.c ?? 0);
+    if (!formingTsMs || !Number.isFinite(close) || close <= 0) continue;
+
+    const prev = merged[symbol];
+    const prevTsMs = Number(prev?.ts_ms ?? 0);
+    if (prevTsMs >= formingTsMs) continue;
+
+    const spread = prev && Number.isFinite(prev.ask - prev.bid) && (prev.ask - prev.bid) >= 0
+      ? prev.ask - prev.bid
+      : 0;
+
+    merged[symbol] = {
+      bid: close,
+      ask: close + spread,
+      ts_ms: formingTsMs,
+    };
+    updatedCount += 1;
+  }
+
+  return { prices: merged, updatedCount };
+}
+
 async function fetchRelayPricesFrom(baseUrl: string, connId?: string): Promise<Record<string, { bid: number; ask: number; ts_ms: number }> | null> {
   if (!baseUrl) return null;
 
@@ -105,7 +136,9 @@ export async function GET(req: NextRequest) {
   const stateConnId = access.connId || undefined;
   const relayConnId = relayConnectionId(stateConnId);
 
-  const stateAll = mt5State.getPrices(stateConnId);
+  const formingAll = mt5State.getForming(stateConnId);
+  const reconciledState = reconcilePricesFromForming(mt5State.getPrices(stateConnId), formingAll);
+  const stateAll = reconciledState.prices;
   const statePrices = symbol ? (stateAll[symbol] ? { [symbol]: stateAll[symbol] } : {}) : stateAll;
   let all = stateAll;
   let prices = statePrices;
@@ -142,6 +175,7 @@ export async function GET(req: NextRequest) {
             state_conn_id: stateConnId,
             relay_conn_id: relayConnId,
             state_is_fresh: stateIsFresh,
+            forming_price_repairs: reconciledState.updatedCount,
             state_newest_ts_ms: stateNewestBeforeFallback,
             relay_newest_ts_ms: relayNewest,
             selected_newest_ts_ms: newestPriceTs(prices),
