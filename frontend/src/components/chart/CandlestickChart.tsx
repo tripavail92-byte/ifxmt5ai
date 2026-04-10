@@ -290,6 +290,37 @@ export function CandlestickChart({
     if (fit) resetViewport(chartRef.current, merged.length);
   };
 
+  const mergeRecentBars = (bars: CandlestickData[]) => {
+    const series = seriesRef.current;
+    if (!series || !bars.length) return;
+
+    const current = historyRef.current;
+    const byTime = new Map<number, CandlestickData>();
+    for (const bar of current) byTime.set(Number(bar.time), bar);
+
+    let changed = false;
+    for (const bar of bars) {
+      const key = Number(bar.time);
+      const prev = byTime.get(key);
+      if (!prev
+        || prev.open !== bar.open
+        || prev.high !== bar.high
+        || prev.low !== bar.low
+        || prev.close !== bar.close) {
+        byTime.set(key, bar);
+        changed = true;
+      }
+    }
+
+    if (!changed) return;
+
+    const merged = [...byTime.values()].sort((a, b) => Number(a.time) - Number(b.time));
+    series.setData(merged);
+    historyRef.current = merged;
+    hasHistoryRef.current = merged.length > 0;
+    setHistoryVersion((v) => v + 1);
+  };
+
   // Incrementally update or append a single bar using series.update().
   // This avoids replacing the entire dataset and prevents flicker.
   const upsertLiveBar = (raw: RawCandleBar) => {
@@ -555,6 +586,37 @@ export function CandlestickChart({
   // fetchTick intentionally removed — no periodic re-poll needed with SSE
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveLiveSymbol, connId, activeTf, HISTORY_COUNT]);
+
+  useEffect(() => {
+    if (!effectiveLiveSymbol || !connId) return;
+
+    const ac = new AbortController();
+    const run = async () => {
+      try {
+        const url = `/api/candles?symbol=${encodeURIComponent(effectiveLiveSymbol)}&tf=${TF_API[activeTf]}&count=3&conn_id=${encodeURIComponent(connId)}`;
+        const resp = await fetch(url, { signal: ac.signal, cache: "no-store" });
+        const data = (await resp.json()) as { bars?: RawCandleBar[] };
+        if (ac.signal.aborted) return;
+        const bars = Array.isArray(data.bars) ? data.bars : [];
+        const normalized = normalizeBars(bars);
+        if (normalized.length) mergeRecentBars(normalized);
+      } catch (err) {
+        if ((err as Error)?.name !== "AbortError") {
+          console.warn("[CandlestickChart] live sync failed", err);
+        }
+      }
+    };
+
+    void run();
+    const timer = window.setInterval(() => {
+      void run();
+    }, 1000);
+
+    return () => {
+      ac.abort();
+      window.clearInterval(timer);
+    };
+  }, [activeTf, connId, effectiveLiveSymbol]);
 
   useEffect(() => {
     if (!effectiveLiveSymbol || !forming) return;
