@@ -28,6 +28,7 @@ input int     ConfigRefreshSec     = 60;                         // Symbol list 
 input int     HistoryRepairBars    = 240;                        // Recent 1m bars to re-push when candle-close uploads stall
 input int     HistoryRepairCooldownSec = 120;                    // Minimum delay between per-symbol repair attempts
 input int     HistoryRepairTriggerMissedBars = 3;                // Re-push history after this many closed bars are missing
+input int     HistoryRefreshWindowSec = 300;                     // Periodically re-push a recent 1m window even when close uploads look healthy
 
 //==========================================================================
 // SECTION 2 — GLOBALS
@@ -305,6 +306,25 @@ void PollAllSymbols()
                }
             }
          }
+
+         if(latest_closed_bar > 0
+            && HistoryRefreshWindowSec > 0
+            && RepairBarsToSend() > 0
+            && now_ms - g_sym_last_reseed_ms[i] >= (ulong)HistoryRefreshWindowSec * 1000)
+         {
+            datetime last_uploaded = g_sym_last_uploaded_close[i];
+            string refresh_reason = "periodic sliding-window refresh";
+            if(last_uploaded <= 0)
+               refresh_reason = "symbol history not seeded yet";
+            else if(latest_closed_bar > last_uploaded)
+               refresh_reason = IntegerToString((int)((latest_closed_bar - last_uploaded) / 60)) + " closed bars behind";
+
+            g_sym_last_reseed_ms[i] = now_ms;
+            Print("🔄 [SYNC] ", g_sym_names[i], " ", refresh_reason,
+                  " — re-pushing last ", RepairBarsToSend(), " bars");
+            if(PushHistoricalBulkSymbol(i, RepairBarsToSend()))
+               g_historical_seeded = true;
+         }
       }
    }
 
@@ -493,6 +513,7 @@ bool PushHistoricalBulkSymbol(const int sym_idx, int barsRequested)
    {
       g_sym_last_uploaded_close[sym_idx] = r[0].time;
       g_sym_last_repair_ms[sym_idx] = GetTickCount64();
+      g_sym_last_reseed_ms[sym_idx] = g_sym_last_repair_ms[sym_idx];
       Print("✅ [", g_sym_names[sym_idx], "] historical bulk pushed");
       return true;
    }
