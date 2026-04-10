@@ -4,8 +4,8 @@
  * Server-Sent Events stream for live MT5 price data.
  *
  * Two modes:
- *  1. Warm Railway state     → stream directly from in-memory `mt5State`
- *  2. Cold Railway state     → proxy relay SSE, then fall back to `mt5State` on timeout/error
+ *  1. Warm Redis state       → stream directly from Redis pubsub/state
+ *  2. Warm Railway state     → stream directly from in-memory `mt5State`
  *
  * Events emitted:
  *   connected     — {type, connection_id, symbols[]}
@@ -26,19 +26,12 @@ import {
   getRedisPrices,
   getRedisSymbols,
 } from "@/lib/mt5-redis";
-import { SERVER_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const encoder = new TextEncoder();
-const RELAY_STREAM_URL = (process.env.RELAY_STREAM_URL ?? "").trim();
-const PRICE_RELAY_URL = SERVER_PRICE_RELAY_URL;
-const RELAY_STREAM_TIMEOUT_MS = Math.max(
-  1000,
-  Number.parseInt((process.env.RELAY_STREAM_TIMEOUT_MS ?? "10000").trim(), 10) || 10000
-);
 const WARM_STATE_MAX_AGE_MS = Math.max(
   1000,
   Number.parseInt((process.env.MT5_STREAM_WARM_MAX_AGE_MS ?? "3000").trim(), 10) || 3000
@@ -277,52 +270,6 @@ function streamFromState(req: NextRequest, connFilter?: string): Response {
   });
 }
 
-/** Primary: proxy relay SSE via Cloudflare Tunnel */
-async function proxyRelayStream(req: NextRequest, connFilter?: string): Promise<Response> {
-  const relayBaseUrl = RELAY_STREAM_URL
-    ? new URL(RELAY_STREAM_URL)
-    : PRICE_RELAY_URL
-      ? new URL("/stream", PRICE_RELAY_URL)
-      : null;
-
-  if (!relayBaseUrl) {
-    return streamFromState(req, connFilter);
-  }
-
-  const upstreamUrl = new URL(relayBaseUrl.toString());
-  if (connFilter) upstreamUrl.searchParams.set("conn_id", connFilter);
-
-  const abortCtrl = new AbortController();
-  const timeout = setTimeout(() => abortCtrl.abort(), RELAY_STREAM_TIMEOUT_MS);
-  req.signal.addEventListener("abort", () => abortCtrl.abort());
-
-  try {
-    const upstream = await fetch(upstreamUrl.toString(), {
-      signal:  abortCtrl.signal,
-      cache:   "no-store",
-      headers: { Accept: "text/event-stream", "Cache-Control": "no-cache" },
-    });
-
-    if (!upstream.ok || !upstream.body) {
-      return streamFromState(req, connFilter);
-    }
-
-    return new Response(upstream.body, {
-      status: 200,
-      headers: {
-        "Content-Type":      "text/event-stream; charset=utf-8",
-        "Cache-Control":     "no-cache, no-transform",
-        "Connection":        "keep-alive",
-        "X-Accel-Buffering": "no",
-      },
-    });
-  } catch {
-    return streamFromState(req, connFilter);
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 export async function GET(req: NextRequest) {
   const requestedConnId = req.nextUrl.searchParams.get("conn_id") ?? undefined;
   const access = await resolveTerminalAccess(requestedConnId ?? undefined);
@@ -335,9 +282,6 @@ export async function GET(req: NextRequest) {
   }
 
   const stateConnFilter = access.connId || undefined;
-  const relayConnFilter = !access.isAuthenticated
-    ? stateConnFilter
-    : relayConnectionId(stateConnFilter);
 
   if (await hasWarmRedisState(stateConnFilter)) {
     const redisStream = await streamFromRedis(req, stateConnFilter);
@@ -346,11 +290,6 @@ export async function GET(req: NextRequest) {
 
   if (hasWarmState(stateConnFilter)) {
     return streamFromState(req, stateConnFilter);
-  }
-
-  if (RELAY_STREAM_URL || PRICE_RELAY_URL) {
-    const proxied = await proxyRelayStream(req, relayConnFilter);
-    if (proxied.ok) return proxied;
   }
 
   const redisStream = await streamFromRedis(req, stateConnFilter);
