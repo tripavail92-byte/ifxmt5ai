@@ -40,6 +40,7 @@ long     g_sym_last_tick_msc[]; // Last tick time_msc (ms precision)
 datetime g_sym_last_bar[];      // Last completed 1m bar open-time
 datetime g_sym_last_uploaded_close[]; // Last closed 1m bar confirmed sent to relay
 ulong    g_sym_last_repair_ms[];      // Last per-symbol history repair attempt timestamp
+ulong    g_sym_last_reseed_ms[];      // Last per-symbol sliding-window reseed timestamp
 
 int      g_sym_count     = 0;
 ulong    g_last_flush_ms = 0;
@@ -50,6 +51,7 @@ int      g_relay_uptime_prev = -2; // -2=first-run  -1=was-down  >=0=last-uptime
 bool     g_historical_seeded = false; // true once /historical-bulk succeeds
 
 #define CLOSE_REPAIR_RETRY_MS 5000
+#define CLOSE_DISCONTINUITY_RESEED_MS 30000
 
 #define MAX_ACTIVE_SYMBOLS 12
 
@@ -249,11 +251,24 @@ void PollAllSymbols()
          else if(current_bar > g_sym_last_bar[i])
          {
             bool advanced_bar = false;
+            datetime last_uploaded_before = g_sym_last_uploaded_close[i];
             if(live_copied > 1)
             {
                if(SendCandleCloseBar(g_sym_names[i], i, live_rates[1]))
                {
                   advanced_bar = true;
+
+                  if(last_uploaded_before > 0
+                     && (live_rates[1].time - last_uploaded_before) > 60
+                     && now_ms - g_sym_last_reseed_ms[i] >= CLOSE_DISCONTINUITY_RESEED_MS)
+                  {
+                     g_sym_last_reseed_ms[i] = now_ms;
+                     Print("🔄 [RESEED] ", g_sym_names[i], " close stream resumed after ",
+                           (int)((live_rates[1].time - last_uploaded_before) / 60),
+                           " missed minutes — pushing recent history window");
+                     if(PushHistoricalBulkSymbol(i, RepairBarsToSend()))
+                        g_historical_seeded = true;
+                  }
                }
                else if(now_ms - g_sym_last_repair_ms[i] >= CLOSE_REPAIR_RETRY_MS)
                {
@@ -711,6 +726,7 @@ void ApplySymbolList(const string &syms[], int count)
    long     prev_pending_msc[];
    bool     prev_pending_dirty[];
    ulong    prev_last_repair_ms[];
+   ulong    prev_last_reseed_ms[];
    int      prev_count = g_sym_count;
 
    ArrayResize(prev_names, prev_count);
@@ -723,6 +739,7 @@ void ApplySymbolList(const string &syms[], int count)
    ArrayResize(prev_pending_msc, prev_count);
    ArrayResize(prev_pending_dirty, prev_count);
    ArrayResize(prev_last_repair_ms, prev_count);
+   ArrayResize(prev_last_reseed_ms, prev_count);
 
    for(int i = 0; i < prev_count; i++)
    {
@@ -736,6 +753,7 @@ void ApplySymbolList(const string &syms[], int count)
       prev_pending_msc[i] = g_pending_msc[i];
       prev_pending_dirty[i] = g_pending_dirty[i];
       prev_last_repair_ms[i] = g_sym_last_repair_ms[i];
+      prev_last_reseed_ms[i] = g_sym_last_reseed_ms[i];
    }
 
    ArrayResize(g_sym_names,          count);
@@ -748,6 +766,7 @@ void ApplySymbolList(const string &syms[], int count)
    ArrayResize(g_pending_msc,        count);
    ArrayResize(g_pending_dirty,      count);
    ArrayResize(g_sym_last_repair_ms, count);
+   ArrayResize(g_sym_last_reseed_ms, count);
 
    int valid = 0;
    for(int i = 0; i < count; i++)
@@ -779,6 +798,7 @@ void ApplySymbolList(const string &syms[], int count)
       g_pending_msc[valid]       = (prev_idx >= 0) ? prev_pending_msc[prev_idx] : 0;
       g_pending_dirty[valid]     = (prev_idx >= 0) ? prev_pending_dirty[prev_idx] : false;
       g_sym_last_repair_ms[valid] = (prev_idx >= 0) ? prev_last_repair_ms[prev_idx] : 0;
+      g_sym_last_reseed_ms[valid] = (prev_idx >= 0) ? prev_last_reseed_ms[prev_idx] : 0;
       valid++;
    }
 
@@ -793,6 +813,7 @@ void ApplySymbolList(const string &syms[], int count)
    ArrayResize(g_pending_msc,       valid);
    ArrayResize(g_pending_dirty,     valid);
    ArrayResize(g_sym_last_repair_ms, valid);
+   ArrayResize(g_sym_last_reseed_ms, valid);
    g_sym_count = valid;
 
 }
