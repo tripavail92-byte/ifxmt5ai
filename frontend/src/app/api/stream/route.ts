@@ -86,7 +86,8 @@ function streamFromState(req: NextRequest, connFilter?: string): Response {
 
       const symbols = mt5State.getSymbols(connFilter);
       const prices  = mt5State.getPrices(connFilter);
-      controller.enqueue(sseMessage({ type: "init", symbols, prices, subscribers: mt5State.subscriberCount }));
+      const forming = mt5State.getForming(connFilter);
+      controller.enqueue(sseMessage({ type: "init", symbols, prices, forming, subscribers: mt5State.subscriberCount }));
 
       // Send frequent heartbeats to prevent frontend from detecting the stream as dead.
       // Frontend considers stream stale after 4s without events, so heartbeat every 2.5s.

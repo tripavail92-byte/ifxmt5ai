@@ -53,6 +53,15 @@ function parseMaxBars(raw: string | undefined, fallback: number): number {
   return Math.max(300, Math.min(n, 50_000));
 }
 
+function sortAndDedupeBars(bars: CandleBar[]): CandleBar[] {
+  const byTime = new Map<number, CandleBar>();
+  for (const bar of bars) {
+    if (!bar?.t) continue;
+    byTime.set(bar.t, bar);
+  }
+  return [...byTime.values()].sort((a, b) => a.t - b.t);
+}
+
 // Default to ~7 days of 1m data per symbol. Override via MT5_CANDLE_MAXBARS.
 const CANDLE_MAXBARS = parseMaxBars(process.env.MT5_CANDLE_MAXBARS, 10_000);
 
@@ -217,7 +226,7 @@ class Mt5State {
       bars1m = [...merged.values()].sort((a, b) => a.t - b.t);
     }
 
-    const aggregated = this.aggregate(bars1m, tfMin);
+    const aggregated = sortAndDedupeBars(this.aggregate(bars1m, tfMin));
 
     // Append forming candle (if it belongs to this TF's current slot)
     const formingBar = this.getFormingBar(connId, symbol, tfMin);
@@ -230,7 +239,8 @@ class Mt5State {
       }
     }
 
-    return count < aggregated.length ? aggregated.slice(-count) : aggregated;
+    const normalized = sortAndDedupeBars(aggregated);
+    return count < normalized.length ? normalized.slice(-count) : normalized;
   }
 
   private getFormingBar(connId: string, symbol: string, tfMin: number): CandleBar | null {
@@ -278,6 +288,17 @@ class Mt5State {
       if (m) m.forEach((v, k) => { out[k] = v; });
     } else {
       this.prices.forEach(m => m.forEach((v, k) => { out[k] = v; }));
+    }
+    return out;
+  }
+
+  getForming(connId?: string): Record<string, CandleBar> {
+    const out: Record<string, CandleBar> = {};
+    if (connId) {
+      const m = this.forming.get(connId);
+      if (m) m.forEach((v, k) => { out[k] = v; });
+    } else {
+      this.forming.forEach(m => m.forEach((v, k) => { out[k] = v; }));
     }
     return out;
   }
