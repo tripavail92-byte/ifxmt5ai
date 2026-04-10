@@ -10,6 +10,29 @@ const PRICE_RELAY_TIMEOUT_MS = Math.max(
   Number.parseInt((process.env.PRICE_RELAY_TIMEOUT_MS ?? "5000").trim(), 10) || 5000
 );
 
+function inferDigits(symbol: string): number {
+  if (/JPY/i.test(symbol)) return 3;
+  if (/XAU|XAG/i.test(symbol)) return 3;
+  if (/BTC|ETH|OIL/i.test(symbol)) return 2;
+  return 5;
+}
+
+function fallbackSpec(symbol: string) {
+  const digits = inferDigits(symbol);
+  const point = 1 / 10 ** digits;
+  return {
+    symbol,
+    digits,
+    point,
+    trade_tick_size: point,
+    trade_tick_value: 0,
+    volume_min: 0.01,
+    volume_max: 100,
+    volume_step: 0.01,
+    source: "fallback",
+  };
+}
+
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const symbol = (searchParams.get("symbol") ?? "").trim();
@@ -27,14 +50,16 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
 
-  const connId = relayConnectionId(access.connId);
-  if (!access.connId) {
+  const stateConnId = access.connId;
+  const relayConnId = relayConnectionId(stateConnId);
+  const effectiveConnId = relayConnId || stateConnId || "";
+  if (!stateConnId) {
     return NextResponse.json({ error: "conn_id required" }, { status: 400 });
   }
 
   const url = new URL("/symbol-spec", PRICE_RELAY_URL);
   url.searchParams.set("symbol", symbol);
-  if (connId) url.searchParams.set("conn_id", connId);
+  if (effectiveConnId) url.searchParams.set("conn_id", effectiveConnId);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PRICE_RELAY_TIMEOUT_MS);
@@ -52,8 +77,9 @@ export async function GET(req: NextRequest) {
       headers: { "Cache-Control": "no-store" },
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: message }, { status: 502 });
+    return NextResponse.json(fallbackSpec(symbol), {
+      headers: { "Cache-Control": "no-store" },
+    });
   } finally {
     clearTimeout(timeout);
   }
