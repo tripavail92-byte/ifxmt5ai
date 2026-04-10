@@ -24,6 +24,14 @@ const MIN_STATE_BARS = 20;
 const INSTANCE_ID = process.env.RAILWAY_REPLICA_ID ?? process.env.HOSTNAME ?? "unknown";
 
 const PRICE_RELAY_URL = SERVER_PRICE_RELAY_URL;
+const RELAY_URL_CANDIDATES = [
+  PRICE_RELAY_URL,
+  process.env.NEXT_PUBLIC_PRICE_RELAY_URL,
+  "https://api.myifxacademy.com",
+  "https://relay.myifxacademy.com",
+]
+  .map((value) => (value ?? "").trim().replace(/\/$/, ""))
+  .filter((value, index, arr): value is string => value.length > 0 && arr.indexOf(value) === index);
 const PRICE_RELAY_TIMEOUT_MS = Math.max(
   500,
   Number.parseInt((process.env.PRICE_RELAY_TIMEOUT_MS ?? "5000").trim(), 10) || 5000
@@ -44,14 +52,15 @@ type RelayHealth = {
 };
 
 async function fetchRelayCandles(opts: {
+  baseUrl: string;
   symbol: string;
   tf: string;
   count: number;
   connId?: string;
 }): Promise<RelayFetchResult> {
-  if (!PRICE_RELAY_URL) return { bars: null, error: "PRICE_RELAY_URL not configured" };
+  if (!opts.baseUrl) return { bars: null, error: "PRICE_RELAY_URL not configured" };
 
-  const url = new URL("/candles", PRICE_RELAY_URL);
+  const url = new URL("/candles", opts.baseUrl);
   url.searchParams.set("symbol", opts.symbol);
   url.searchParams.set("tf", opts.tf);
   url.searchParams.set("count", String(opts.count));
@@ -85,25 +94,46 @@ async function fetchRelayCandles(opts: {
 }
 
 async function fetchRelayHealth(): Promise<RelayHealth | null> {
-  if (!PRICE_RELAY_URL) return null;
-
-  const url = new URL("/health", PRICE_RELAY_URL);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PRICE_RELAY_TIMEOUT_MS);
-  try {
-    const resp = await fetch(url.toString(), {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-      cache: "no-store",
-    });
-    if (!resp.ok) return null;
-    return (await resp.json()) as RelayHealth;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
+  for (const baseUrl of RELAY_URL_CANDIDATES) {
+    const url = new URL("/health", baseUrl);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PRICE_RELAY_TIMEOUT_MS);
+    try {
+      const resp = await fetch(url.toString(), {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+        cache: "no-store",
+      });
+      if (!resp.ok) continue;
+      return (await resp.json()) as RelayHealth;
+    } catch {
+      continue;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+
+  return null;
+}
+
+async function fetchBestRelayCandles(opts: {
+  symbol: string;
+  tf: string;
+  count: number;
+  connId?: string;
+}) {
+  let lastError = "PRICE_RELAY_URL not configured";
+
+  for (const baseUrl of RELAY_URL_CANDIDATES) {
+    const result = await fetchRelayCandles({ ...opts, baseUrl });
+    if (result.bars !== null) {
+      return { ...result, baseUrl };
+    }
+    lastError = result.error ?? lastError;
+  }
+
+  return { bars: null as RelayFetchResult["bars"], error: lastError, baseUrl: null as string | null };
 }
 
 function connectionStateIsFresh(connId: string): boolean {
@@ -240,7 +270,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  if (!PRICE_RELAY_URL) {
+  if (!RELAY_URL_CANDIDATES.length) {
     // No relay configured; return whatever state has (possibly empty).
     return NextResponse.json(
       {
@@ -260,7 +290,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  let relay = await fetchRelayCandles({ symbol, tf, count, connId: relayConnId });
+  let relay = await fetchBestRelayCandles({ symbol, tf, count, connId: relayConnId });
 
   // If the selected terminal connection is not the VPS relay source connection,
   // retry once using the relay's active/source connection so history is still
@@ -269,7 +299,7 @@ export async function GET(req: NextRequest) {
     const health = await fetchRelayHealth();
     const fallbackConnId = health?.relay_source_connection_id || health?.active_conn_ids?.[0];
     if (fallbackConnId && fallbackConnId !== relayConnId) {
-      const fallbackRelay = await fetchRelayCandles({ symbol, tf, count, connId: fallbackConnId });
+      const fallbackRelay = await fetchBestRelayCandles({ symbol, tf, count, connId: fallbackConnId });
       if (fallbackRelay.bars && fallbackRelay.bars.length > (relay.bars?.length ?? 0)) {
         relay = fallbackRelay;
       }
@@ -290,6 +320,7 @@ export async function GET(req: NextRequest) {
           exact_state_count: exactStateBars.length,
           redis_count: aggregatedRedisBars.length,
           relay_error: relay.error ?? null,
+          relay_base_url: relay.baseUrl,
           instance: INSTANCE_ID,
         },
       },
@@ -321,6 +352,7 @@ export async function GET(req: NextRequest) {
         exact_state_count: exactStateBars.length,
         redis_count: aggregatedRedisBars.length,
         relay_count: relay.bars.length,
+        relay_base_url: relay.baseUrl,
         instance: INSTANCE_ID,
       },
     },
