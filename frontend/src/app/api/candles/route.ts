@@ -158,8 +158,12 @@ export async function GET(req: NextRequest) {
   const stateBars = exactStateBars;
   const stateIsFresh = connectionStateIsFresh(stateConnId);
 
-  // If state has enough bars, trust it and skip relay fetch.
-  if (stateBars.length >= MIN_STATE_BARS && stateIsFresh) {
+  const requiredStateBars = Math.min(count, Math.max(1, MIN_STATE_BARS));
+
+  // Only skip relay history when this instance has both fresh state and enough
+  // bars to satisfy the requested chart depth. Otherwise a fresh-but-shallow
+  // Railway instance can wipe older chart history after redeploys.
+  if (stateBars.length >= requiredStateBars && stateIsFresh) {
     return NextResponse.json(
       {
         symbol,
