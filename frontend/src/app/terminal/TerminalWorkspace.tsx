@@ -9,11 +9,14 @@ import {
   Bot,
   Calendar,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Edit3,
   History,
   Info,
   Link2,
   Network,
+  Plus,
   RefreshCw,
   Shield,
   Target,
@@ -552,6 +555,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
   const [pendingFeedSymbol, setPendingFeedSymbol] = useState<string | null>(null);
   const [authPromptOpen, setAuthPromptOpen] = useState(false);
   const [authPromptIntent, setAuthPromptIntent] = useState<string>("queue trades");
+  const [symbolChooserOpen, setSymbolChooserOpen] = useState(false);
+  const [symbolChooserQuery, setSymbolChooserQuery] = useState("");
 
   useEffect(() => {
     if (selectedConnectionId) return;
@@ -1551,6 +1556,54 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     ...(displaySymbol ? [displaySymbol] : []),
     ...rawTabSymbols,
   ].filter((sym, index, arr) => Boolean(sym) && arr.indexOf(sym) === index);
+  const symbolTabIndex = Math.max(0, tabSymbols.indexOf(displaySymbol));
+  const symbolMetadata = useMemo(() => {
+    const bySymbol = new Map<string, SymbolRow>();
+    for (const row of symbols) {
+      if (!row.symbol) continue;
+      bySymbol.set(row.symbol, row);
+    }
+    return bySymbol;
+  }, [symbols]);
+  const symbolChooserOptions = useMemo(() => {
+    const uniqueSymbols = [...new Set([...availableSymbols, ...dbSymbols, ...tabSymbols])]
+      .filter((sym): sym is string => Boolean(sym) && sym !== displaySymbol);
+
+    return uniqueSymbols.map((sym) => {
+      const meta = symbolMetadata.get(sym);
+      const live = prices[sym];
+      return {
+        symbol: sym,
+        description: meta?.description?.trim() || null,
+        category: meta?.category?.trim() || null,
+        bid: live?.bid ?? null,
+        hasLive: Boolean(live),
+      };
+    });
+  }, [availableSymbols, dbSymbols, displaySymbol, prices, symbolMetadata, tabSymbols]);
+  const filteredSymbolChooserOptions = useMemo(() => {
+    const query = symbolChooserQuery.trim().toLowerCase();
+    if (!query) return symbolChooserOptions;
+
+    return symbolChooserOptions.filter((option) => {
+      const haystack = [option.symbol, option.description ?? "", option.category ?? ""]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [symbolChooserOptions, symbolChooserQuery]);
+
+  const stepSelectedSymbol = (direction: -1 | 1) => {
+    if (!tabSymbols.length) return;
+    const nextIndex = (symbolTabIndex + direction + tabSymbols.length) % tabSymbols.length;
+    setSelectedSymbol(tabSymbols[nextIndex]);
+  };
+
+  const chooseSymbolFromModal = (symbol: string) => {
+    setSelectedSymbol(symbol);
+    setSymbolChooserOpen(false);
+    setSymbolChooserQuery("");
+  };
 
   function renderAITrading() {
     return (
@@ -1768,38 +1821,70 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
             </div>
 
             {/* ── Symbol tab bar — identical pattern to strategies page ManualTradeCard ── */}
-            <div
-              className="flex overflow-x-auto rounded-lg border border-[#1a1a1a] bg-[#0d0d0d]"
-              style={{ scrollbarWidth: "none" }}
-            >
-              {tabSymbols.map((sym) => {
-                const live   = prices[sym];
-                const isAct  = displaySymbol === sym;
-                const digits = getDecimals(sym);
-                return (
-                  <button
-                    key={sym}
-                    type="button"
-                    onClick={() => setSelectedSymbol(sym)}
-                    className={`flex-shrink-0 flex flex-col items-start px-3 py-2 border-b-2 transition-colors whitespace-nowrap
-                      ${isAct
-                        ? "border-orange-500 bg-[#141414]"
-                        : "border-transparent hover:bg-[#111] hover:border-gray-700"
-                      }`}
-                  >
-                    <span className={`font-mono font-semibold text-[11px] ${isAct ? "text-white" : "text-gray-500"}`}>
-                      {sym}
-                    </span>
-                    {live ? (
-                      <span className={`text-[10px] font-mono mt-0.5 ${isAct ? "text-emerald-400" : "text-gray-600"}`}>
-                        {live.bid.toFixed(digits)}
+            <div className="flex items-stretch gap-2">
+              <button
+                type="button"
+                onClick={() => stepSelectedSymbol(-1)}
+                disabled={tabSymbols.length <= 1}
+                className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border border-[#242424] bg-[#111] text-gray-300 transition hover:bg-[#181818] hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label="Previous symbol"
+              >
+                <ChevronLeft className="size-4" />
+              </button>
+
+              <div
+                className="flex min-w-0 flex-1 overflow-x-auto rounded-lg border border-[#1a1a1a] bg-[#0d0d0d]"
+                style={{ scrollbarWidth: "none" }}
+              >
+                {tabSymbols.map((sym) => {
+                  const live   = prices[sym];
+                  const isAct  = displaySymbol === sym;
+                  const digits = getDecimals(sym);
+                  return (
+                    <button
+                      key={sym}
+                      type="button"
+                      onClick={() => setSelectedSymbol(sym)}
+                      className={`flex-shrink-0 flex flex-col items-start px-3 py-2 border-b-2 transition-colors whitespace-nowrap
+                        ${isAct
+                          ? "border-orange-500 bg-[#141414]"
+                          : "border-transparent hover:bg-[#111] hover:border-gray-700"
+                        }`}
+                    >
+                      <span className={`font-mono font-semibold text-[11px] ${isAct ? "text-white" : "text-gray-500"}`}>
+                        {sym}
                       </span>
-                    ) : (
-                      <span className="text-[10px] text-gray-700 mt-0.5">—</span>
-                    )}
-                  </button>
-                );
-              })}
+                      {live ? (
+                        <span className={`text-[10px] font-mono mt-0.5 ${isAct ? "text-emerald-400" : "text-gray-600"}`}>
+                          {live.bid.toFixed(digits)}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-gray-700 mt-0.5">—</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setSymbolChooserOpen(true)}
+                className="flex h-12 min-w-[118px] shrink-0 items-center gap-2 rounded-lg border border-[#242424] bg-[#111] px-3 text-sm text-gray-200 transition hover:bg-[#181818] hover:text-white"
+                aria-label="Choose symbol"
+              >
+                <Plus className="size-4 text-gray-400" />
+                <span className="text-xs font-medium">Choose</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => stepSelectedSymbol(1)}
+                disabled={tabSymbols.length <= 1}
+                className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border border-[#242424] bg-[#111] text-gray-300 transition hover:bg-[#181818] hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label="Next symbol"
+              >
+                <ChevronRight className="size-4" />
+              </button>
             </div>
 
             <div className="rounded-xl border border-[#1f1f1f] bg-[#101010] p-3">
@@ -2588,15 +2673,6 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                 <div className="text-xs text-gray-500">Live route wired to MT5 runtime, chart feed, setup monitor, and trade queue</div>
               </div>
             </div>
-            <div className="h-8 w-px bg-[#242424]" />
-            <div className="rounded-lg border border-[#242424] bg-[#161616] px-4 py-2 text-sm">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500">Selected symbol</div>
-              <div className="mt-1 flex items-center gap-3">
-                <span className="font-semibold text-white">{activeSymbol}</span>
-                <span className="font-mono text-emerald-300">Bid {quoteBid}</span>
-                <span className="font-mono text-red-300">Ask {quoteAsk}</span>
-              </div>
-            </div>
           </div>
           <div className="flex items-center gap-6 text-right text-sm">
             <div>
@@ -2627,14 +2703,6 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
             <div className="text-right text-xs">
               <div className="text-gray-500">Equity</div>
               <div className="font-semibold text-emerald-300">{fmtCurrency(accountEquity)}</div>
-            </div>
-          </div>
-          <div className="rounded-lg border border-[#2a2a2a] bg-[#161616] px-3 py-2 text-sm text-white">
-            <div className="text-[10px] uppercase tracking-[0.2em] text-gray-500">Selected symbol</div>
-            <div className="mt-1 flex items-center justify-between gap-3 text-xs">
-              <span className="font-semibold text-white">{activeSymbol}</span>
-              <span className="font-mono text-emerald-300">B {quoteBid}</span>
-              <span className="font-mono text-red-300">A {quoteAsk}</span>
             </div>
           </div>
         </div>
@@ -2702,6 +2770,80 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
           <DialogFooter>
             <Button variant="outline" onClick={() => setTermsOpen(false)} className="border-[#2a2a2a] bg-[#161616] text-gray-200 hover:bg-[#1b1b1b]">Close</Button>
             <Button onClick={() => { setTermsAccepted(true); setTermsOpen(false); }} className="bg-blue-600 text-white hover:bg-blue-500">Accept current version</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={symbolChooserOpen}
+        onOpenChange={(open) => {
+          setSymbolChooserOpen(open);
+          if (!open) setSymbolChooserQuery("");
+        }}
+      >
+        <DialogContent className="max-w-2xl border-[#2a2a2a] bg-[#111] text-white">
+          <DialogHeader>
+            <DialogTitle>Choose symbol</DialogTitle>
+            <DialogDescription>
+              Search the live MT5 symbol set and switch the terminal chart without using the side-panel selector.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <Input
+              value={symbolChooserQuery}
+              onChange={(e) => setSymbolChooserQuery(e.target.value)}
+              placeholder="Search symbol, description, or category"
+              className="h-11 border-[#2b2b2b] bg-[#0f0f0f] text-white"
+            />
+
+            <div className="max-h-[55vh] space-y-2 overflow-y-auto rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] p-2">
+              {filteredSymbolChooserOptions.length > 0 ? (
+                filteredSymbolChooserOptions.map((option) => (
+                  <button
+                    key={option.symbol}
+                    type="button"
+                    onClick={() => chooseSymbolFromModal(option.symbol)}
+                    className="flex w-full items-center justify-between rounded-lg border border-transparent bg-[#111] px-3 py-3 text-left transition hover:border-blue-500/30 hover:bg-[#161616]"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-sm font-semibold text-white">{option.symbol}</span>
+                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${option.hasLive ? "bg-emerald-500/15 text-emerald-300" : "bg-gray-500/15 text-gray-400"}`}>
+                          {option.hasLive ? "Live" : "Waiting"}
+                        </span>
+                      </div>
+                      <div className="mt-1 text-xs text-gray-500">
+                        {option.description || option.category || "No symbol metadata available"}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-[10px] uppercase tracking-[0.2em] text-gray-600">Bid</div>
+                      <div className="font-mono text-sm text-emerald-300">
+                        {typeof option.bid === "number" ? option.bid.toFixed(getDecimals(option.symbol)) : "—"}
+                      </div>
+                    </div>
+                  </button>
+                ))
+              ) : (
+                <div className="rounded-lg border border-dashed border-[#2a2a2a] px-4 py-8 text-center text-sm text-gray-500">
+                  No symbols match your search.
+                </div>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setSymbolChooserOpen(false);
+                setSymbolChooserQuery("");
+              }}
+              className="border-[#2a2a2a] bg-[#161616] text-gray-200 hover:bg-[#1b1b1b]"
+            >
+              Close
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
