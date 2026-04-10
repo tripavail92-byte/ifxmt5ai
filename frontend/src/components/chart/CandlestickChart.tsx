@@ -229,6 +229,7 @@ export function CandlestickChart({
   const fetchSeqRef = useRef(0);
   const fitOnNextLoadRef = useRef(true);
   const lastFeedKeyRef = useRef("");
+  const lastPriceTsRef = useRef(0);
 
   const [activeTf, setActiveTf] = useState<TF>(() => {
     if (typeof window === "undefined") return "M5";
@@ -504,6 +505,7 @@ export function CandlestickChart({
     if (feedKey === lastFeedKeyRef.current) return;
 
     lastFeedKeyRef.current = feedKey;
+    lastPriceTsRef.current = 0;
     seriesRef.current?.setData([]);
     historyRef.current = [];
     hasHistoryRef.current = false;
@@ -571,9 +573,10 @@ export function CandlestickChart({
 
   useEffect(() => {
     if (!effectiveLiveSymbol || !prices) return;
-    if (forming?.[effectiveLiveSymbol]) return;
     const snapshot = prices[effectiveLiveSymbol];
     if (!snapshot?.ts_ms) return;
+    if (snapshot.ts_ms <= lastPriceTsRef.current) return;
+    lastPriceTsRef.current = snapshot.ts_ms;
     upsertPriceBar(snapshot);
     setIsLive(true);
   }, [prices, forming, effectiveLiveSymbol, activeTf]);
