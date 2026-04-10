@@ -11,6 +11,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { mt5State } from "@/lib/mt5-state";
 import { PUBLIC_PRICE_RELAY_URL, SERVER_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
+import { getRedisForming, getRedisPrices, getRedisSymbols } from "@/lib/mt5-redis";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
@@ -136,8 +137,14 @@ export async function GET(req: NextRequest) {
   const stateConnId = access.connId || undefined;
   const relayConnId = relayConnectionId(stateConnId);
 
-  const formingAll = mt5State.getForming(stateConnId);
-  const reconciledState = reconcilePricesFromForming(mt5State.getPrices(stateConnId), formingAll);
+  const redisPrices = stateConnId ? await getRedisPrices(stateConnId) : {};
+  const redisForming = stateConnId ? await getRedisForming(stateConnId) : {};
+  const memoryPrices = mt5State.getPrices(stateConnId);
+  const memoryForming = mt5State.getForming(stateConnId);
+  const mergedBasePrices = Object.keys(redisPrices).length ? redisPrices : memoryPrices;
+  const mergedBaseForming = Object.keys(redisForming).length ? redisForming : memoryForming;
+
+  const reconciledState = reconcilePricesFromForming(mergedBasePrices, mergedBaseForming);
   const stateAll = reconciledState.prices;
   const statePrices = symbol ? (stateAll[symbol] ? { [symbol]: stateAll[symbol] } : {}) : stateAll;
   let all = stateAll;
@@ -161,8 +168,9 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  const redisSymbols = stateConnId ? await getRedisSymbols(stateConnId) : [];
   const stateSymbols = stateConnId ? mt5State.getSymbols(stateConnId) : mt5State.getSymbols();
-  const symbols = [...new Set([...stateSymbols, ...Object.keys(all)])];
+  const symbols = [...new Set([...redisSymbols, ...stateSymbols, ...Object.keys(all)])];
 
   return NextResponse.json(
     debug
@@ -172,6 +180,8 @@ export async function GET(req: NextRequest) {
           debug: {
             instance: INSTANCE_ID,
             source: selectedSource,
+            redis_prices: Object.keys(redisPrices).length,
+            redis_forming: Object.keys(redisForming).length,
             state_conn_id: stateConnId,
             relay_conn_id: relayConnId,
             state_is_fresh: stateIsFresh,

@@ -14,6 +14,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { mt5State, TF_MINUTES } from "@/lib/mt5-state";
 import { SERVER_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
+import { getRedisCandles, getRedisForming } from "@/lib/mt5-redis";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
@@ -122,6 +123,56 @@ function connectionStateIsFresh(connId: string): boolean {
   return false;
 }
 
+function sortAndDedupeBars(bars: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }>) {
+  const byTime = new Map<number, { t: number; o: number; h: number; l: number; c: number; v: number }>();
+  for (const bar of bars) {
+    if (!bar?.t) continue;
+    byTime.set(bar.t, bar);
+  }
+  return [...byTime.values()].sort((a, b) => a.t - b.t);
+}
+
+function aggregateBars(
+  bars1m: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }>,
+  tfMin: number
+) {
+  if (tfMin === 1) return [...bars1m];
+  const slotSec = tfMin * 60;
+  const out: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }> = [];
+
+  for (const bar of bars1m) {
+    const slot = Math.floor(bar.t / slotSec) * slotSec;
+    const last = out[out.length - 1];
+    if (last && last.t === slot) {
+      last.h = Math.max(last.h, bar.h);
+      last.l = Math.min(last.l, bar.l);
+      last.c = bar.c;
+      last.v += bar.v;
+    } else {
+      out.push({ t: slot, o: bar.o, h: bar.h, l: bar.l, c: bar.c, v: bar.v });
+    }
+  }
+  return out;
+}
+
+function appendFormingBar(
+  bars: Array<{ t: number; o: number; h: number; l: number; c: number; v: number }>,
+  forming: { t: number; o: number; h: number; l: number; c: number; v: number } | undefined,
+  tfMin: number
+) {
+  if (!forming?.t) return bars;
+  const slotSec = tfMin * 60;
+  const snapped = { ...forming, t: Math.floor(forming.t / slotSec) * slotSec };
+  const next = [...bars];
+  const last = next[next.length - 1];
+  if (!last || last.t < snapped.t) {
+    next.push(snapped);
+  } else if (last.t === snapped.t) {
+    next[next.length - 1] = snapped;
+  }
+  return next;
+}
+
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
 
@@ -154,7 +205,13 @@ export async function GET(req: NextRequest) {
   // Fast-path: serve from connection-scoped in-memory state only.
   // Do not merge bars from other connections here; that can leak unrelated
   // symbol streams into the active chart and create visual gaps.
-  const exactStateBars = mt5State.getCandles(stateConnId, symbol, tf, count);
+  const tfMin = TF_MINUTES[tf] ?? 1;
+  const redisBars1m = await getRedisCandles(stateConnId, symbol, Math.max(count, MIN_STATE_BARS) * tfMin);
+  const redisForming = await getRedisForming(stateConnId);
+  const aggregatedRedisBars = sortAndDedupeBars(appendFormingBar(aggregateBars(redisBars1m, tfMin), redisForming[symbol], tfMin));
+  const exactStateBars = aggregatedRedisBars.length
+    ? (count < aggregatedRedisBars.length ? aggregatedRedisBars.slice(-count) : aggregatedRedisBars)
+    : mt5State.getCandles(stateConnId, symbol, tf, count);
   const stateBars = exactStateBars;
   const stateIsFresh = connectionStateIsFresh(stateConnId);
 
@@ -173,6 +230,7 @@ export async function GET(req: NextRequest) {
         bars: stateBars,
         debug: {
           exact_state_count: exactStateBars.length,
+          redis_count: aggregatedRedisBars.length,
           instance: INSTANCE_ID,
         },
       },
@@ -191,6 +249,7 @@ export async function GET(req: NextRequest) {
         bars: stateBars,
         debug: {
           exact_state_count: exactStateBars.length,
+          redis_count: aggregatedRedisBars.length,
           relay_error: "PRICE_RELAY_URL not configured",
           instance: INSTANCE_ID,
         },
@@ -227,6 +286,7 @@ export async function GET(req: NextRequest) {
         bars: stateBars,
         debug: {
           exact_state_count: exactStateBars.length,
+          redis_count: aggregatedRedisBars.length,
           relay_error: relay.error ?? null,
           instance: INSTANCE_ID,
         },
@@ -256,6 +316,7 @@ export async function GET(req: NextRequest) {
       bars: bestBars,
       debug: {
         exact_state_count: exactStateBars.length,
+        redis_count: aggregatedRedisBars.length,
         relay_count: relay.bars.length,
         instance: INSTANCE_ID,
       },

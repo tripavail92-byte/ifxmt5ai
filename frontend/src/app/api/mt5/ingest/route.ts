@@ -13,6 +13,11 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { mt5State } from "@/lib/mt5-state";
+import {
+  writeCandleCloseToRedis,
+  writeHistoricalBulkToRedis,
+  writeTickBatchToRedis,
+} from "@/lib/mt5-redis";
 
 const INGEST_TOKEN = process.env.RELAY_INGEST_TOKEN ?? "";
 const INSTANCE_ID = process.env.RAILWAY_REPLICA_ID ?? process.env.HOSTNAME ?? "unknown";
@@ -47,6 +52,7 @@ export async function POST(req: NextRequest) {
       const ticks   = (body.ticks           as Array<{ symbol: string; bid: number; ask: number; ts_ms: number }>) ?? [];
       const forming = (body.forming_candles as Array<{ symbol: string; time: number; open: number; high: number; low: number; close: number; tick_vol: number }>) ?? [];
       mt5State.applyTickBatch(connId, ticks, forming);
+      await writeTickBatchToRedis(connId, ticks, forming);
       break;
     }
 
@@ -55,6 +61,7 @@ export async function POST(req: NextRequest) {
       const symbol = body.symbol as string;
       if (bar && symbol) {
         mt5State.applyCandleClose(connId, symbol, bar);
+        await writeCandleCloseToRedis(connId, symbol, bar);
       }
       break;
     }
@@ -68,10 +75,12 @@ export async function POST(req: NextRequest) {
 
       if (symbolsData?.length) {
         mt5State.applyHistoricalBulk(connId, symbolsData);
+        await writeHistoricalBulkToRedis(connId, symbolsData, symbolNames);
       } else if (symbolNames?.length) {
         // No bar data in payload — just register symbol list
         mt5State.symbols.set(connId, symbolNames);
         mt5State.broadcast({ type: "connected", connection_id: connId, symbols: symbolNames });
+        await writeHistoricalBulkToRedis(connId, [], symbolNames);
       }
       break;
     }
@@ -81,6 +90,7 @@ export async function POST(req: NextRequest) {
       if (symbols?.length) {
         mt5State.symbols.set(connId, symbols);
         mt5State.broadcast({ type: "connected", connection_id: connId, symbols });
+        await writeHistoricalBulkToRedis(connId, [], symbols);
       }
       break;
     }

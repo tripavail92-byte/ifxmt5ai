@@ -20,6 +20,12 @@
 
 import { NextRequest } from "next/server";
 import { mt5State, type SseSubscriber } from "@/lib/mt5-state";
+import {
+  createRedisSubscriber,
+  getRedisForming,
+  getRedisPrices,
+  getRedisSymbols,
+} from "@/lib/mt5-redis";
 import { SERVER_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
 
@@ -72,6 +78,159 @@ function hasWarmState(connFilter?: string): boolean {
   }
 
   return false;
+}
+
+async function hasWarmRedisState(connFilter?: string): Promise<boolean> {
+  if (!connFilter) return false;
+
+  const now = Date.now();
+  const prices = await getRedisPrices(connFilter);
+  for (const snap of Object.values(prices)) {
+    if (snap?.ts_ms && now - snap.ts_ms <= WARM_STATE_MAX_AGE_MS) {
+      return true;
+    }
+  }
+
+  const forming = await getRedisForming(connFilter);
+  for (const bar of Object.values(forming)) {
+    if (bar?.t && now - bar.t * 1000 <= WARM_STATE_MAX_AGE_MS) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function pricePayloadFromTickBatch(payload: {
+  connection_id?: string;
+  ticks?: Array<{ symbol: string; bid: number; ask: number; ts_ms: number }>;
+}) {
+  const prices: Record<string, { bid: number; ask: number; ts_ms: number }> = {};
+  for (const tick of payload.ticks ?? []) {
+    prices[tick.symbol] = { bid: tick.bid, ask: tick.ask, ts_ms: tick.ts_ms };
+  }
+  return {
+    type: "prices",
+    connection_id: payload.connection_id,
+    prices,
+  };
+}
+
+function candleUpdatePayloadFromTickBatch(payload: {
+  connection_id?: string;
+  forming_candles?: Array<{ symbol: string; time: number; open: number; high: number; low: number; close: number; tick_vol: number }>;
+}) {
+  const forming: Record<string, { t: number; o: number; h: number; l: number; c: number; v: number }> = {};
+  for (const candle of payload.forming_candles ?? []) {
+    forming[candle.symbol] = {
+      t: candle.time,
+      o: candle.open,
+      h: candle.high,
+      l: candle.low,
+      c: candle.close,
+      v: candle.tick_vol,
+    };
+  }
+  return {
+    type: "candle_update",
+    connection_id: payload.connection_id,
+    forming,
+  };
+}
+
+async function streamFromRedis(req: NextRequest, connFilter?: string): Promise<Response | null> {
+  const subscriber = await createRedisSubscriber();
+  if (!subscriber) return null;
+
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let closed = false;
+
+  const close = async () => {
+    if (closed) return;
+    closed = true;
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    try {
+      await subscriber.quit();
+    } catch {
+      try {
+        subscriber.disconnect();
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const symbols = connFilter ? await getRedisSymbols(connFilter) : mt5State.getSymbols();
+      const prices = connFilter ? await getRedisPrices(connFilter) : mt5State.getPrices();
+      const forming = connFilter ? await getRedisForming(connFilter) : mt5State.getForming();
+      controller.enqueue(sseMessage({ type: "init", symbols, prices, forming }));
+
+      heartbeatTimer = setInterval(() => {
+        try {
+          controller.enqueue(sseMessage({ type: "heartbeat", ts: Date.now() }));
+        } catch {
+          void close();
+        }
+      }, 2_500);
+
+      const handleMessage = (raw: string) => {
+        try {
+          const payload = JSON.parse(raw) as {
+            type?: string;
+            connection_id?: string;
+            ticks?: Array<{ symbol: string; bid: number; ask: number; ts_ms: number }>;
+            forming_candles?: Array<{ symbol: string; time: number; open: number; high: number; low: number; close: number; tick_vol: number }>;
+          };
+
+          if (payload.type === "tick_batch") {
+            const pricesEvent = pricePayloadFromTickBatch(payload);
+            if (Object.keys(pricesEvent.prices).length) {
+              controller.enqueue(sseMessage(pricesEvent));
+            }
+
+            const candleEvent = candleUpdatePayloadFromTickBatch(payload);
+            if (Object.keys(candleEvent.forming).length) {
+              controller.enqueue(sseMessage(candleEvent));
+            }
+            return;
+          }
+
+          controller.enqueue(sseMessage(payload));
+        } catch {
+          // ignore malformed pubsub payloads
+        }
+      };
+
+      if (connFilter) {
+        await subscriber.subscribe(`mt5:${connFilter}:prices`, handleMessage);
+        await subscriber.subscribe(`mt5:${connFilter}:candles`, handleMessage);
+        await subscriber.subscribe(`mt5:${connFilter}:connected`, handleMessage);
+      } else {
+        await subscriber.pSubscribe("mt5:*:prices", handleMessage);
+        await subscriber.pSubscribe("mt5:*:candles", handleMessage);
+        await subscriber.pSubscribe("mt5:*:connected", handleMessage);
+      }
+
+      req.signal.addEventListener("abort", () => {
+        void close();
+      });
+    },
+    cancel() {
+      void close();
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }
 
 /** Fallback: stream from Railway in-memory mt5State */
@@ -180,6 +339,11 @@ export async function GET(req: NextRequest) {
     ? stateConnFilter
     : relayConnectionId(stateConnFilter);
 
+  if (await hasWarmRedisState(stateConnFilter)) {
+    const redisStream = await streamFromRedis(req, stateConnFilter);
+    if (redisStream) return redisStream;
+  }
+
   if (hasWarmState(stateConnFilter)) {
     return streamFromState(req, stateConnFilter);
   }
@@ -188,6 +352,9 @@ export async function GET(req: NextRequest) {
     const proxied = await proxyRelayStream(req, relayConnFilter);
     if (proxied.ok) return proxied;
   }
+
+  const redisStream = await streamFromRedis(req, stateConnFilter);
+  if (redisStream) return redisStream;
 
   return streamFromState(req, stateConnFilter);
 }
