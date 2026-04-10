@@ -49,6 +49,8 @@ ulong    g_last_health_ms = 0;  // Last /health check timestamp
 int      g_relay_uptime_prev = -2; // -2=first-run  -1=was-down  >=0=last-uptime
 bool     g_historical_seeded = false; // true once /historical-bulk succeeds
 
+#define CLOSE_REPAIR_RETRY_MS 5000
+
 #define MAX_ACTIVE_SYMBOLS 12
 
 string   g_active_symbols[];
@@ -246,9 +248,27 @@ void PollAllSymbols()
          }
          else if(current_bar > g_sym_last_bar[i])
          {
+            bool advanced_bar = false;
             if(live_copied > 1)
-               SendCandleCloseBar(g_sym_names[i], i, live_rates[1]);
-            g_sym_last_bar[i] = current_bar;
+            {
+               if(SendCandleCloseBar(g_sym_names[i], i, live_rates[1]))
+               {
+                  advanced_bar = true;
+               }
+               else if(now_ms - g_sym_last_repair_ms[i] >= CLOSE_REPAIR_RETRY_MS)
+               {
+                  g_sym_last_repair_ms[i] = now_ms;
+                  Print("🔄 [RECOVER] ", g_sym_names[i], " candle-close failed — pushing recent history before advancing bar state");
+                  if(PushHistoricalBulkSymbol(i, RepairBarsToSend()))
+                  {
+                     g_historical_seeded = true;
+                     advanced_bar = true;
+                  }
+               }
+            }
+
+            if(advanced_bar)
+               g_sym_last_bar[i] = current_bar;
          }
 
          if(latest_closed_bar > 0
@@ -368,7 +388,7 @@ void FlushTickBatch(ulong now_ms, bool activeSymbols)
 }
 
 // Send a single completed bar (called immediately when bar closes)
-void SendCandleCloseBar(const string symbol, int sym_idx, const MqlRates &bar)
+bool SendCandleCloseBar(const string symbol, int sym_idx, const MqlRates &bar)
 {
    int d = g_sym_digits[sym_idx];
    string json = "{";
@@ -387,9 +407,14 @@ void SendCandleCloseBar(const string symbol, int sym_idx, const MqlRates &bar)
    {
       g_sym_last_uploaded_close[sym_idx] = bar.time;
       Print("✅ [", symbol, "] candle-close T=", TimeToString(bar.time));
+      return true;
    }
    else
+   {
       Print("⚠️ [", symbol, "] candle-close POST failed");
+   }
+
+   return false;
 }
 
 // Send a single completed bar (fallback helper)
