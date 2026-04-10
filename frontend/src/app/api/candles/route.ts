@@ -14,10 +14,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { mt5State, TF_MINUTES } from "@/lib/mt5-state";
 import { SERVER_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
-import { getRedisCandles, getRedisForming } from "@/lib/mt5-redis";
+import { getRedisCandles, getRedisForming, writeHistoricalBulkToRedis } from "@/lib/mt5-redis";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 const MIN_STATE_BARS = 20;
 const INSTANCE_ID = process.env.RAILWAY_REPLICA_ID ?? process.env.HOSTNAME ?? "unknown";
 
@@ -215,7 +217,7 @@ export async function GET(req: NextRequest) {
   const stateBars = exactStateBars;
   const stateIsFresh = connectionStateIsFresh(stateConnId);
 
-  const requiredStateBars = Math.min(count, Math.max(1, MIN_STATE_BARS));
+  const requiredStateBars = Math.max(1, count);
 
   // Only skip relay history when this instance has both fresh state and enough
   // bars to satisfy the requested chart depth. Otherwise a fresh-but-shallow
@@ -302,6 +304,7 @@ export async function GET(req: NextRequest) {
   try {
     if (relay.bars.length) {
       mt5State.applyHistoricalBulk(stateConnId, [{ symbol, bars: relay.bars }]);
+      await writeHistoricalBulkToRedis(stateConnId, [{ symbol, bars: relay.bars }], [symbol]);
     }
   } catch {
     // Best-effort seeding only.
