@@ -186,7 +186,7 @@ export default async function ConnectionsPage() {
             </div>
           </aside>
         </div>
-      </div>
+      </section>
     </div>
   );
 }

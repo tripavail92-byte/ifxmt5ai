@@ -8,6 +8,7 @@ export type TerminalConnectionSummary = {
   account_login: string;
   status: string | null;
   is_active: boolean | null;
+  created_at?: string | null;
 };
 
 export const PUBLIC_TERMINAL_CONN_ID = (
@@ -30,7 +31,7 @@ export async function enforceSingleActiveConnection(
 ) {
   const { data, error } = await supabase
     .from("mt5_user_connections")
-    .select("id, broker_server, account_login, status, is_active")
+    .select("id, broker_server, account_login, status, is_active, created_at")
     .eq("user_id", userId)
     .eq("is_active", true)
     .order("created_at", { ascending: false });
