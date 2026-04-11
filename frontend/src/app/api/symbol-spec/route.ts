@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SERVER_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
+import { getRedisSymbols } from "@/lib/mt5-redis";
+import { mt5State } from "@/lib/mt5-state";
 
 export const runtime = "nodejs";
 
@@ -33,6 +35,28 @@ function fallbackSpec(symbol: string) {
   };
 }
 
+function stripBrokerSuffix(symbol: string) {
+  return symbol.replace(/[._-]?[a-z]+$/i, "");
+}
+
+async function resolveConnectionSymbol(connId: string, requestedSymbol: string) {
+  const requested = requestedSymbol.trim();
+  if (!requested) return requested;
+
+  const stateSymbols = mt5State.getSymbols(connId) ?? [];
+  const redisSymbols = await getRedisSymbols(connId);
+  const candidates = [...new Set([...stateSymbols, ...redisSymbols].filter(Boolean))];
+  if (!candidates.length) return requested;
+
+  const exactMatch = candidates.find((symbol) => symbol === requested);
+  if (exactMatch) return exactMatch;
+
+  const normalizedRequested = stripBrokerSuffix(requested).toUpperCase();
+  if (!normalizedRequested) return requested;
+
+  return candidates.find((symbol) => stripBrokerSuffix(symbol).toUpperCase() === normalizedRequested) ?? requested;
+}
+
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const symbol = (searchParams.get("symbol") ?? "").trim();
@@ -57,8 +81,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "conn_id required" }, { status: 400 });
   }
 
+  const effectiveSymbol = await resolveConnectionSymbol(stateConnId, symbol);
+
   const url = new URL("/symbol-spec", PRICE_RELAY_URL);
-  url.searchParams.set("symbol", symbol);
+  url.searchParams.set("symbol", effectiveSymbol);
   if (effectiveConnId) url.searchParams.set("conn_id", effectiveConnId);
 
   const controller = new AbortController();
@@ -77,7 +103,7 @@ export async function GET(req: NextRequest) {
       headers: { "Cache-Control": "no-store" },
     });
   } catch (err) {
-    return NextResponse.json(fallbackSpec(symbol), {
+    return NextResponse.json(fallbackSpec(effectiveSymbol), {
       headers: { "Cache-Control": "no-store" },
     });
   } finally {

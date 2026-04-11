@@ -13,7 +13,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { mt5State, TF_MINUTES } from "@/lib/mt5-state";
-import { getRedisCandles, getRedisForming } from "@/lib/mt5-redis";
+import { getRedisCandles, getRedisForming, getRedisSymbols } from "@/lib/mt5-redis";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
@@ -131,6 +131,28 @@ function appendFormingBar(
   return next;
 }
 
+function stripBrokerSuffix(symbol: string) {
+  return symbol.replace(/[._-]?[a-z]+$/i, "");
+}
+
+async function resolveConnectionSymbol(connId: string, requestedSymbol: string) {
+  const requested = requestedSymbol.trim();
+  if (!requested) return requested;
+
+  const stateSymbols = mt5State.getSymbols(connId) ?? [];
+  const redisSymbols = await getRedisSymbols(connId);
+  const candidates = [...new Set([...stateSymbols, ...redisSymbols].filter(Boolean))];
+  if (!candidates.length) return requested;
+
+  const exactMatch = candidates.find((symbol) => symbol === requested);
+  if (exactMatch) return exactMatch;
+
+  const normalizedRequested = stripBrokerSuffix(requested).toUpperCase();
+  if (!normalizedRequested) return requested;
+
+  return candidates.find((symbol) => stripBrokerSuffix(symbol).toUpperCase() === normalizedRequested) ?? requested;
+}
+
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
 
@@ -159,16 +181,18 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "conn_id required" }, { status: 400 });
   }
 
+  const effectiveSymbol = await resolveConnectionSymbol(stateConnId, symbol);
+
   // Fast-path: serve from connection-scoped in-memory state only.
   // Do not merge bars from other connections here; that can leak unrelated
   // symbol streams into the active chart and create visual gaps.
   const tfMin = TF_MINUTES[tf] ?? 1;
-  const redisBars1m = await getRedisCandles(stateConnId, symbol, Math.max(count, MIN_STATE_BARS) * tfMin);
+  const redisBars1m = await getRedisCandles(stateConnId, effectiveSymbol, Math.max(count, MIN_STATE_BARS) * tfMin);
   const redisForming = await getRedisForming(stateConnId);
-  const aggregatedRedisBars = sortAndDedupeBars(appendFormingBar(aggregateBars(redisBars1m, tfMin), redisForming[symbol], tfMin));
+  const aggregatedRedisBars = sortAndDedupeBars(appendFormingBar(aggregateBars(redisBars1m, tfMin), redisForming[effectiveSymbol], tfMin));
   const rawStateBars = aggregatedRedisBars.length
     ? aggregatedRedisBars
-    : mt5State.getCandles(stateConnId, symbol, tf, count);
+    : mt5State.getCandles(stateConnId, effectiveSymbol, tf, count);
   const exactStateBars = takeTrailingContiguousBars(rawStateBars, tfMin, count);
   const stateBars = exactStateBars.length > count ? exactStateBars.slice(-count) : exactStateBars;
   const stateIsFresh = connectionStateIsFresh(stateConnId);
@@ -177,6 +201,7 @@ export async function GET(req: NextRequest) {
   return NextResponse.json(
     {
       symbol,
+      resolved_symbol: effectiveSymbol,
       tf,
       count: stateBars.length,
       source: "state",
