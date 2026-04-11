@@ -30,12 +30,12 @@ export function Sidebar({ isAdmin = false }: { isAdmin?: boolean }) {
   if (!mounted) return null;
 
   return (
-    <div className="hidden border-r bg-muted/40 md:block md:w-64 lg:w-72 shrink-0 h-screen sticky top-0">
-      <div className="flex h-full max-h-screen flex-col gap-2">
-        <div className="flex h-14 items-center border-b px-4 lg:h-[60px] lg:px-6">
-          <Link href="/" className="flex items-center gap-2 font-semibold">
-            <Activity className="h-6 w-6 text-primary" />
-            <span className="">IFX AI Portal</span>
+    <div className="hidden h-screen shrink-0 border-r border-[#171717] bg-[linear-gradient(180deg,#101010_0%,#0a0a0a_100%)] md:sticky md:top-0 md:block md:w-64 lg:w-72">
+      <div className="flex h-full max-h-screen flex-col gap-2 text-white">
+        <div className="flex h-14 items-center border-b border-[#1b1b1b] px-4 lg:h-[60px] lg:px-6">
+          <Link href="/" className="flex items-center gap-2 font-semibold text-white">
+            <Activity className="h-6 w-6 text-blue-400" />
+            <span>IFX AI Portal</span>
           </Link>
         </div>
         <div className="flex-1 overflow-auto py-2">
@@ -48,8 +48,8 @@ export function Sidebar({ isAdmin = false }: { isAdmin?: boolean }) {
                   key={item.href}
                   href={item.href}
                   className={cn(
-                    "flex items-center gap-3 rounded-lg px-3 py-2 text-muted-foreground transition-all hover:text-primary hover:bg-muted",
-                    isActive && "bg-muted text-primary font-semibold"
+                    "flex items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 text-gray-400 transition-all hover:border-[#232323] hover:bg-[#141414] hover:text-white",
+                    isActive && "border-[#27324a] bg-[#101828] text-blue-300 font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
                   )}
                 >
                   <Icon className="h-4 w-4" />

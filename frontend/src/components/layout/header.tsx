@@ -63,10 +63,10 @@ export function Header({ isAdmin = false }: { isAdmin?: boolean }) {
             <span className="sr-only">Toggle navigation menu</span>
           </Button>
         </SheetTrigger>
-        <SheetContent side="left" className="flex flex-col">
+        <SheetContent side="left" className="flex flex-col border-r border-[#171717] bg-[linear-gradient(180deg,#101010_0%,#0a0a0a_100%)] text-white">
           <nav className="grid gap-2 text-lg font-medium">
-            <Link href="/" className="flex items-center gap-2 text-lg font-semibold mb-4">
-              <Activity className="h-6 w-6 text-primary" />
+            <Link href="/" className="mb-4 flex items-center gap-2 text-lg font-semibold text-white">
+              <Activity className="h-6 w-6 text-blue-400" />
               <span>IFX AI Portal</span>
             </Link>
             {navItems.map((item) => {
@@ -77,8 +77,8 @@ export function Header({ isAdmin = false }: { isAdmin?: boolean }) {
                   key={item.href}
                   href={item.href}
                   className={cn(
-                    "flex items-center gap-4 rounded-xl px-3 py-2 text-muted-foreground hover:text-foreground",
-                    isActive && "bg-muted text-primary"
+                    "flex items-center gap-4 rounded-xl border border-transparent px-3 py-2 text-gray-400 hover:border-[#232323] hover:bg-[#141414] hover:text-white",
+                    isActive && "border-[#27324a] bg-[#101828] text-blue-300"
                   )}
                 >
                   <Icon className="h-5 w-5" />
