@@ -204,10 +204,14 @@ $controlPlaneUrl = Get-ConfigValue -Map $config -Name 'CONTROL_PLANE_URL' -Defau
 $controlPlaneUrl = $controlPlaneUrl.TrimEnd('/')
 $relayUrl = Get-ConfigValue -Map $config -Name 'EA_BACKEND_RELAY_URL' -Default ($controlPlaneUrl + '/api/mt5')
 $relayUrl = $relayUrl.TrimEnd('/')
-$eaSourcePath = Get-ConfigValue -Map $config -Name 'IFX_EA_SOURCE_PATH' -Default (Join-Path $Root 'IFX_Railway_Bridge_v1.ex5')
+$eaSourcePath = Get-ConfigValue -Map $config -Name 'IFX_EA_SOURCE_PATH' -Default (Join-Path $Root 'IFX_Railway_Bridge_v1.mq5')
+$expectedEaPath = [System.IO.Path]::ChangeExtension($eaSourcePath, '.ex5')
+if ([string]::IsNullOrWhiteSpace($expectedEaPath)) {
+    $expectedEaPath = Join-Path $Root 'IFX_Railway_Bridge_v1.ex5'
+}
 $terminalsDir = Get-ConfigValue -Map $config -Name 'MT5_TERMINALS_DIR' -Default 'C:\mt5system\terminals'
 $managerHostName = Get-ConfigValue -Map $config -Name 'TERMINAL_MANAGER_HOST_NAME' -Default $env:COMPUTERNAME
-$expectedEaName = Split-Path -Leaf $eaSourcePath
+$expectedEaName = Split-Path -Leaf $expectedEaPath
 
 $legacyRuntimeProcs = @(Get-LogicalPythonProcesses @('price_relay.py', 'main.py supervisor', 'main.py scheduler', 'job_worker.py'))
 $relayHealth = Invoke-JsonHealthCheck -Url ($relayUrl + '/health')

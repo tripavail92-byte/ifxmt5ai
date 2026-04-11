@@ -2,8 +2,10 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/utils/supabase/server";
+import { createAdminClient } from "@/utils/supabase/admin";
 import { encryptMT5Password } from "@/utils/crypto";
 import { enforceSingleActiveConnection } from "@/lib/terminal-access";
+import { ensureActiveConfig, ensureBootstrapAssignment, pickProvisioningHost } from "@/lib/ea-control-plane";
 
 export async function addConnection(formData: FormData) {
   const supabase = await createClient();
@@ -33,7 +35,7 @@ export async function addConnection(formData: FormData) {
   const { ciphertextB64, nonceB64 } = encryptMT5Password(plaintextPassword, masterKey);
 
   // Insert into database
-  const { error } = await supabase.from("mt5_user_connections").insert({
+  const { data: insertedRows, error } = await supabase.from("mt5_user_connections").insert({
     user_id: user.id,
     broker_server,
     account_login,
@@ -41,11 +43,52 @@ export async function addConnection(formData: FormData) {
     password_nonce_b64: nonceB64,
     is_active: true,
     status: "offline",
-  });
+  }).select("id").limit(1);
 
   if (error) {
     console.error("Failed to insert connection:", error);
     throw new Error("Failed to add connection. Check logs.");
+  }
+
+  const connectionId = insertedRows?.[0]?.id as string | undefined;
+  if (!connectionId) {
+    throw new Error("Connection created without an ID. Check logs.");
+  }
+
+  try {
+    const admin = createAdminClient();
+    const host = await pickProvisioningHost(admin);
+    if (!host?.id) {
+      await admin
+        .from("mt5_user_connections")
+        .update({
+          status: "offline",
+          last_error: "No online terminal host available for provisioning",
+        })
+        .eq("id", connectionId);
+    } else {
+      await ensureActiveConfig(admin, connectionId);
+      await ensureBootstrapAssignment(admin, {
+        connectionId,
+        hostId: String(host.id),
+      });
+      await admin
+        .from("mt5_user_connections")
+        .update({
+          status: "connecting",
+          last_error: null,
+        })
+        .eq("id", connectionId);
+    }
+  } catch (bootstrapError) {
+    console.error("Failed to bootstrap connection for provisioning:", bootstrapError);
+    await createAdminClient()
+      .from("mt5_user_connections")
+      .update({
+        status: "offline",
+        last_error: bootstrapError instanceof Error ? bootstrapError.message : "Provisioning bootstrap failed",
+      })
+      .eq("id", connectionId);
   }
 
   revalidatePath("/connections");

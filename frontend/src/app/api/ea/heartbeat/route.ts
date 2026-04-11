@@ -9,6 +9,8 @@ export async function POST(req: NextRequest) {
     status?: string;
     metrics?: Record<string, unknown>;
     last_error?: string | null;
+    terminal_path?: string | null;
+    account_login?: string | null;
   }>(req);
 
   const connectionId = (body?.connection_id ?? "").trim();
@@ -44,6 +46,28 @@ export async function POST(req: NextRequest) {
     .from("mt5_user_connections")
     .update({ status: (body?.status ?? "online").trim() || "online" })
     .eq("id", connectionId);
+
+  const { error: heartbeatError } = await auth.admin
+    .from("mt5_worker_heartbeats")
+    .upsert(
+      {
+        connection_id: connectionId,
+        pid: Number(body?.metrics?.pid ?? 0) || 0,
+        host: String(body?.metrics?.host ?? "mt5-ea"),
+        status: (body?.status ?? "online").trim() || "online",
+        started_at: now,
+        last_seen_at: now,
+        terminal_path: body?.terminal_path ?? null,
+        mt5_initialized: Boolean(body?.metrics?.mt5_initialized ?? true),
+        account_login: (body?.account_login ?? body?.metrics?.account_login ?? "").toString() || null,
+        last_metrics: body?.metrics ?? {},
+      },
+      { onConflict: "connection_id" }
+    );
+
+  if (heartbeatError) {
+    return NextResponse.json({ error: heartbeatError.message }, { status: 500 });
+  }
 
   return NextResponse.json({ ok: true, installation: (data ?? [])[0] ?? null });
 }

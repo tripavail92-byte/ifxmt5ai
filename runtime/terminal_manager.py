@@ -79,6 +79,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("terminal_manager")
 
+DEFAULT_EA_VERSION = "local-dev"
+
 
 def _require_env(name: str) -> str:
     value = (os.getenv(name) or "").strip()
@@ -123,6 +125,101 @@ def _prefer_compiled_artifact(path_value: str) -> str:
         return str(compiled_path)
 
     return path_value
+
+
+def _candidate_metaeditor_paths() -> list[Path]:
+    configured = (os.getenv("METAEDITOR_PATH") or "").strip()
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured))
+
+    candidates.extend(
+        [
+            Path(r"C:\Program Files\MetaTrader 5\metaeditor64.exe"),
+            Path(r"C:\Program Files\MetaTrader 5\MetaEditor64.exe"),
+            Path(r"C:\Program Files\MetaTrader 5\metaeditor.exe"),
+            Path(r"C:\Program Files\MetaTrader 5\MetaEditor.exe"),
+        ]
+    )
+    return candidates
+
+
+def _resolve_metaeditor_exe() -> Path:
+    for candidate in _candidate_metaeditor_paths():
+        if candidate.exists():
+            return candidate
+    raise RuntimeError(
+        "MetaEditor executable not found. Set METAEDITOR_PATH or install MetaTrader 5 MetaEditor."
+    )
+
+
+def _decode_compile_log(log_path: Path) -> str:
+    if not log_path.exists():
+        return ""
+
+    raw = log_path.read_bytes()
+    for encoding in ("utf-16", "utf-8", "latin-1"):
+        try:
+            return raw.decode(encoding, errors="replace")
+        except Exception:
+            continue
+    return ""
+
+
+def _compile_mq5_source(source_path: Path) -> Path:
+    if source_path.suffix.lower() != ".mq5":
+        return source_path
+    if not source_path.exists():
+        raise RuntimeError(f"EA source path not found: {source_path}")
+
+    compiled_path = source_path.with_suffix(".ex5")
+    auto_compile = _truthy("IFX_EA_AUTO_COMPILE", True)
+    if compiled_path.exists() and compiled_path.stat().st_mtime >= source_path.stat().st_mtime and not auto_compile:
+        return compiled_path
+    if compiled_path.exists() and compiled_path.stat().st_mtime >= source_path.stat().st_mtime and auto_compile:
+        return compiled_path
+
+    metaeditor = _resolve_metaeditor_exe()
+    compile_timeout = int((os.getenv("IFX_EA_COMPILE_TIMEOUT_SEC") or "120").strip() or "120")
+    log_path = LOG_DIR / f"{source_path.stem}_compile.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Compiling EA source %s with %s", source_path, metaeditor)
+    completed = subprocess.run(
+        [
+            str(metaeditor),
+            f"/compile:{source_path}",
+            f"/log:{log_path}",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=max(30, compile_timeout),
+        check=False,
+    )
+
+    log_text = _decode_compile_log(log_path)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"MetaEditor compile failed for {source_path} (exit={completed.returncode})\n{log_text[-1200:]}"
+        )
+    if not compiled_path.exists():
+        raise RuntimeError(
+            f"MetaEditor reported success but no compiled artifact was produced for {source_path}\n{log_text[-1200:]}"
+        )
+    if "0 errors, 0 warnings" not in log_text and "Result:" in log_text:
+        logger.warning("MetaEditor compile completed with non-clean log for %s: %s", source_path, log_text.strip())
+
+    logger.info("Compiled EA artifact %s", compiled_path)
+    return compiled_path
+
+
+def _resolve_local_ea_candidate(path_value: str) -> str:
+    if not path_value:
+        return ""
+    source_path = Path(path_value)
+    if not source_path.exists():
+        raise RuntimeError(f"EA source path not found: {source_path}")
+    return str(_compile_mq5_source(source_path))
 
 
 def _api_base_url() -> str:
@@ -240,6 +337,10 @@ class ControlPlaneClient:
         resp = self._request("GET", f"/api/ea/release-manifest{query}")
         return resp.json().get("release", {})
 
+    def verify_assignment_launch(self, assignment_id: str) -> dict[str, Any]:
+        resp = self._request("GET", f"/api/terminal-host/assignment/{assignment_id}/verify")
+        return resp.json()
+
 
 def _running_terminal_process(executable_path: Path) -> bool:
     try:
@@ -296,6 +397,21 @@ class TerminalManager:
         host_id = self._ensure_host_id()
         self.client.heartbeat_host(host_id, metadata={"host_name": self.host_name})
 
+    def _wait_for_assignment_verification(self, assignment_id: str) -> dict[str, Any]:
+        timeout_sec = float((os.getenv("TERMINAL_MANAGER_VERIFY_TIMEOUT_SEC") or "90").strip() or "90")
+        poll_sec = float((os.getenv("TERMINAL_MANAGER_VERIFY_POLL_SEC") or "3").strip() or "3")
+        deadline = time.time() + max(15.0, timeout_sec)
+        last_result: dict[str, Any] | None = None
+
+        while time.time() < deadline:
+            result = self.client.verify_assignment_launch(assignment_id)
+            last_result = result
+            if bool(result.get("ok")):
+                return result
+            time.sleep(max(1.0, poll_sec))
+
+        raise RuntimeError(f"Launch verification timed out: {json.dumps(last_result or {}, ensure_ascii=True)[:1200]}")
+
     def bootstrap_connection(self, connection_id: str, release_channel: str | None = None) -> dict[str, Any]:
         host_id = self._ensure_host_id()
         result = self.client.bootstrap_connection(connection_id, host_id, release_channel=release_channel)
@@ -345,6 +461,7 @@ class TerminalManager:
             )
             bootstrap_path = self._write_bootstrap_json(terminal_dir, assignment)
             self._launch_terminal(terminal_dir, startup_ini)
+            verification = self._wait_for_assignment_verification(assignment_id)
 
             self.client.ack_assignment(
                 assignment_id,
@@ -355,6 +472,7 @@ class TerminalManager:
                     "ea_asset": assets.get("installed_artifact"),
                     "bootstrap_json": str(bootstrap_path),
                     "preset_path": str(preset_path),
+                    "verification": verification.get("verification") or {},
                 },
             )
             logger.info("Assignment %s launched successfully", assignment_id)
@@ -378,7 +496,7 @@ class TerminalManager:
     def _resolve_ea_source(self, assignment: dict[str, Any]) -> tuple[str, str]:
         release = assignment.get("release") or {}
         artifact_url = str(release.get("artifact_url") or "").strip()
-        explicit_source = _prefer_compiled_artifact((os.getenv("IFX_EA_SOURCE_PATH") or "").strip())
+        explicit_source = _resolve_local_ea_candidate((os.getenv("IFX_EA_SOURCE_PATH") or "").strip())
 
         candidate = explicit_source or artifact_url
         if candidate:
@@ -394,7 +512,8 @@ class TerminalManager:
         ]
         for fallback in fallback_candidates:
             if fallback.exists():
-                return str(fallback), str(release.get("version") or DEFAULT_EA_VERSION)
+                resolved = _resolve_local_ea_candidate(str(fallback))
+                return resolved, str(release.get("version") or DEFAULT_EA_VERSION)
 
         raise RuntimeError("No EA source available. Set IFX_EA_SOURCE_PATH or IFX_EA_ARTIFACT_URL.")
 
@@ -569,6 +688,9 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap_parser.add_argument("--capacity", type=int, default=int((os.getenv("TERMINAL_MANAGER_CAPACITY") or "5").strip() or "5"))
     bootstrap_parser.add_argument("--release-channel", default=(os.getenv("IFX_EA_RELEASE_CHANNEL") or "stable"))
 
+    build_parser_cmd = sub.add_parser("build-ea", help="Compile the local EA source into an ex5 artifact")
+    build_parser_cmd.add_argument("--source", default=(os.getenv("IFX_EA_SOURCE_PATH") or str(ROOT / "IFX_Railway_Bridge_v1.mq5")))
+
     return parser
 
 
@@ -597,6 +719,11 @@ def main() -> int:
         )
         result = manager.bootstrap_connection(args.connection_id, release_channel=args.release_channel)
         print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "build-ea":
+        compiled = _resolve_local_ea_candidate(str(args.source))
+        print(compiled)
         return 0
 
     parser.error(f"Unknown command: {args.command}")

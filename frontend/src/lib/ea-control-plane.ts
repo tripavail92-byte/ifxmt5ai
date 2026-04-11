@@ -133,6 +133,31 @@ export async function upsertTerminalHost(
   return (data ?? [])[0];
 }
 
+export async function pickProvisioningHost(admin: AdminClient) {
+  const { data, error } = await admin
+    .from("terminal_hosts")
+    .select("id, host_name, host_type, status, capacity, last_seen_at, metadata")
+    .eq("status", "online")
+    .order("last_seen_at", { ascending: false })
+    .limit(10);
+
+  if (error) {
+    throw new Error(`Failed to load terminal hosts: ${error.message}`);
+  }
+
+  const now = Date.now();
+  const staleAfterMs = Math.max(
+    45_000,
+    (Number.parseFloat((process.env.TERMINAL_MANAGER_POLL_SEC ?? "10").trim()) || 10) * 3 * 1000,
+  );
+
+  return (data ?? []).find((host) => {
+    const lastSeenAt = Date.parse(String(host.last_seen_at ?? ""));
+    if (!Number.isFinite(lastSeenAt)) return false;
+    return now - lastSeenAt <= staleAfterMs;
+  }) ?? null;
+}
+
 export function buildDefaultEaConfig(connectionId: string): JsonMap {
   const symbols = (process.env.IFX_DEFAULT_ACTIVE_SYMBOLS
     ?? "EURUSDm,XAUUSDm,USDJPYm,AUDUSDm,USOILm,GBPUSDm")

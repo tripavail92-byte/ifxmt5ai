@@ -30,6 +30,10 @@ input int     HistoryRepairBars    = 240;                        // Recent 1m ba
 input int     HistoryRepairCooldownSec = 120;                    // Minimum delay between per-symbol repair attempts
 input int     HistoryRepairTriggerMissedBars = 3;                // Re-push history after this many closed bars are missing
 input int     HistoryRefreshWindowSec = 300;                     // Periodically re-push a recent 1m window even when close uploads look healthy
+input bool    EnableAccountHeartbeat = true;                     // Post account metrics so the UI can show real balance/equity
+input int     AccountHeartbeatSec = 30;                          // Heartbeat interval for account metrics
+input bool    EnableOneShotFullHistoryReseed = true;             // Retry one full historical seed until all configured symbols succeed
+input int     OneShotFullHistoryReseedRetrySec = 15;             // Delay between full reseed attempts while the relay is recovering
 input bool    EnableLocalFractalSignals = true;                  // Run a minimal local structure detector inside the EA
 input ENUM_TIMEFRAMES StructureTimeframe = PERIOD_M5;            // Timeframe for local fractal break detection
 input int     StructurePivotWindow = 2;                          // Fractal confirmation width on each side of the pivot
@@ -58,8 +62,14 @@ ulong    g_last_flush_ms = 0;
 ulong    g_last_watchlist_flush_ms = 0;
 ulong    g_last_config_ms= 0;
 ulong    g_last_health_ms = 0;  // Last /health check timestamp
+ulong    g_last_account_heartbeat_ms = 0;
+ulong    g_last_full_reseed_attempt_ms = 0;
 int      g_relay_uptime_prev = -2; // -2=first-run  -1=was-down  >=0=last-uptime
 bool     g_historical_seeded = false; // true once /historical-bulk succeeds
+bool     g_control_plane_ready = false;
+bool     g_one_shot_full_reseed_pending = true;
+string   g_install_token = "";
+string   g_heartbeat_url = "";
 
 #define CLOSE_REPAIR_RETRY_MS 5000
 #define CLOSE_DISCONTINUITY_RESEED_MS 30000
@@ -89,6 +99,191 @@ bool ActiveArrayContains(const string sym)
       if(g_active_symbols[i] == sym)
          return true;
    return false;
+}
+
+string EscapeJson(const string value)
+{
+   string escaped = value;
+   StringReplace(escaped, "\\", "\\\\");
+   StringReplace(escaped, "\"", "\\\"");
+   StringReplace(escaped, "\r", "");
+   StringReplace(escaped, "\n", " ");
+   return escaped;
+}
+
+string JsonExtractStringAfter(const string json, int from_pos, const string key)
+{
+   string marker = "\"" + key + "\"";
+   int key_pos = StringFind(json, marker, from_pos);
+   if(key_pos < 0)
+      return "";
+
+   int colon_pos = StringFind(json, ":", key_pos + StringLen(marker));
+   if(colon_pos < 0)
+      return "";
+
+   int start = colon_pos + 1;
+   while(start < StringLen(json))
+   {
+      ushort ch = StringGetCharacter(json, start);
+      if(ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n')
+      {
+         start++;
+         continue;
+      }
+      break;
+   }
+
+   if(start >= StringLen(json) || StringGetCharacter(json, start) != '"')
+      return "";
+
+   start++;
+   int finish = start;
+   while(finish < StringLen(json))
+   {
+      if(StringGetCharacter(json, finish) == '"')
+         break;
+      finish++;
+   }
+
+   if(finish <= start)
+      return "";
+
+   return StringSubstr(json, start, finish - start);
+}
+
+bool ReadTextFileUtf8(const string relative_path, string &content)
+{
+   content = "";
+   int handle = FileOpen(relative_path, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
+   if(handle == INVALID_HANDLE)
+      return false;
+
+   while(!FileIsEnding(handle))
+      content += FileReadString(handle);
+
+   FileClose(handle);
+   return StringLen(content) > 0;
+}
+
+bool LoadControlPlaneHeartbeatBootstrap()
+{
+   string manifest = "";
+   if(!ReadTextFileUtf8("ifx\\bootstrap.json", manifest))
+      return false;
+
+   int control_pos = StringFind(manifest, "\"control_plane\"");
+   g_install_token = JsonExtractStringAfter(manifest, 0, "install_token");
+   g_heartbeat_url = JsonExtractStringAfter(manifest, control_pos, "heartbeat_url");
+   g_control_plane_ready = (StringLen(g_install_token) > 0 && StringLen(g_heartbeat_url) > 0);
+
+   if(g_control_plane_ready)
+      Print("✅ [HEARTBEAT] control-plane heartbeat bootstrap loaded");
+
+   return g_control_plane_ready;
+}
+
+bool ControlPlanePost(const string url, const string json, int timeout_ms)
+{
+   if(StringLen(url) == 0 || StringLen(g_install_token) == 0)
+      return false;
+
+   string headers = "Content-Type: application/json\r\n";
+   headers += "X-IFX-INSTALL-TOKEN: " + g_install_token + "\r\n";
+
+   uchar post[];
+   StringToCharArray(json, post, 0, WHOLE_ARRAY, CP_UTF8);
+   if(ArraySize(post) > 0)
+      ArrayResize(post, ArraySize(post) - 1);
+
+   uchar result[];
+   string resultHeaders = "";
+
+   ResetLastError();
+   int status = WebRequest("POST", url, headers, timeout_ms, post, result, resultHeaders);
+   int err = GetLastError();
+
+   if(status >= 200 && status < 300)
+      return true;
+
+   string resp = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+   if(status == -1)
+      Print("❌ [HEARTBEAT] POST failed err=", err, " | url=", url);
+   else
+      Print("❌ [HEARTBEAT] POST ", url, " → HTTP ", status, " err=", err, " | ", StringSubstr(resp, 0, 120));
+   return false;
+}
+
+bool SendAccountHeartbeat()
+{
+   if(!EnableAccountHeartbeat || !g_control_plane_ready)
+      return false;
+
+   string accountLogin = IntegerToString((int)AccountInfoInteger(ACCOUNT_LOGIN));
+   string terminalPath = EscapeJson(TerminalInfoString(TERMINAL_DATA_PATH));
+   string json = "{";
+   json += "\"connection_id\":\"" + EscapeJson(ConnectionId) + "\",";
+   json += "\"status\":\"online\",";
+   json += "\"terminal_path\":\"" + terminalPath + "\",";
+   json += "\"account_login\":\"" + accountLogin + "\",";
+   json += "\"metrics\":{";
+   json += "\"account_login\":\"" + accountLogin + "\",";
+   json += "\"balance\":" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + ",";
+   json += "\"equity\":" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + ",";
+   json += "\"margin\":" + DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN), 2) + ",";
+   json += "\"free_margin\":" + DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_FREE), 2) + ",";
+   json += "\"host\":\"mt5-ea\",";
+   json += "\"pid\":0,";
+   json += "\"mt5_initialized\":true";
+   json += "}}";
+
+   if(ControlPlanePost(g_heartbeat_url, json, 5000))
+   {
+      Print("✅ [HEARTBEAT] balance=", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2),
+            " equity=", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2));
+      return true;
+   }
+   return false;
+}
+
+void MaybeSendAccountHeartbeat(const ulong now_ms)
+{
+   if(!EnableAccountHeartbeat)
+      return;
+   if(!g_control_plane_ready && !LoadControlPlaneHeartbeatBootstrap())
+      return;
+
+   ulong interval_ms = (ulong)MathMax(5, AccountHeartbeatSec) * 1000;
+   if(g_last_account_heartbeat_ms == 0 || now_ms - g_last_account_heartbeat_ms >= interval_ms)
+   {
+      if(SendAccountHeartbeat())
+         g_last_account_heartbeat_ms = now_ms;
+   }
+}
+
+void MaybeRunOneShotFullHistoryReseed(const ulong now_ms)
+{
+   if(!EnableOneShotFullHistoryReseed || !g_one_shot_full_reseed_pending)
+      return;
+   if(g_sym_count <= 0)
+      return;
+
+   ulong retry_ms = (ulong)MathMax(5, OneShotFullHistoryReseedRetrySec) * 1000;
+   if(g_last_full_reseed_attempt_ms > 0 && now_ms - g_last_full_reseed_attempt_ms < retry_ms)
+      return;
+
+   g_last_full_reseed_attempt_ms = now_ms;
+   Print("🔄 [RESEED-ALL] attempting one-shot full historical reseed for ", g_sym_count, " symbols");
+   PushHistoricalBulk();
+   if(g_historical_seeded)
+   {
+      g_one_shot_full_reseed_pending = false;
+      Print("✅ [RESEED-ALL] full historical reseed completed");
+   }
+   else
+   {
+      Print("⚠️ [RESEED-ALL] full historical reseed incomplete — will retry");
+   }
 }
 
 void LoadPreferredActiveSymbols()
@@ -352,6 +547,7 @@ int OnInit()
    Print("=== IFX Railway Bridge v1 ===");
    Print("Relay: ", BackendRelayUrl, " (must be whitelisted in MT5 Options -> Expert Advisors)");
    Print("ConnectionId: ", ConnectionId);
+   LoadControlPlaneHeartbeatBootstrap();
    if(EnableLocalFractalSignals)
       Print("🧠 [FRACTAL] local detector enabled tf=", TimeframeLabel(StructureTimeframe),
             " pivot_window=", SanitizedStructurePivotWindow(),
@@ -373,6 +569,11 @@ int OnInit()
    g_last_watchlist_flush_ms = g_last_flush_ms;
    g_last_config_ms = GetTickCount64();
    g_last_health_ms = GetTickCount64();
+   g_last_account_heartbeat_ms = 0;
+   g_last_full_reseed_attempt_ms = 0;
+   g_one_shot_full_reseed_pending = EnableOneShotFullHistoryReseed;
+
+   MaybeSendAccountHeartbeat(g_last_flush_ms);
 
    Print("✅ Started. Monitoring ", g_sym_count, " symbols");
    return INIT_SUCCEEDED;
@@ -414,6 +615,9 @@ void OnTimer()
       CheckRelayRestart();
       g_last_health_ms = now_ms;
    }
+
+   MaybeSendAccountHeartbeat(now_ms);
+   MaybeRunOneShotFullHistoryReseed(now_ms);
 }
 
 //==========================================================================
