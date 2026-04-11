@@ -4,6 +4,10 @@ $ErrorActionPreference = 'Continue'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -Path $Root
 
+Write-Host 'Emergency stop only.' -ForegroundColor Yellow
+Write-Host 'This script is not part of normal startup in Railway-only mode.' -ForegroundColor Yellow
+Write-Host ''
+
 Write-Host '[1/4] Stopping runtime Python processes...' -ForegroundColor Cyan
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
     Where-Object {
@@ -23,7 +27,7 @@ $currentPid = $PID
 Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
     Where-Object {
         $_.ProcessId -ne $currentPid -and
-        $_.CommandLine -match 'main\.py supervisor|main\.py scheduler|runtime\\price_relay\.py|runtime\\job_worker\.py|restart_runtime\.ps1|start_runtime_headless\.ps1|start_exness_mt5\.ps1'
+        $_.CommandLine -match 'main\.py supervisor|main\.py scheduler|runtime\\price_relay\.py|runtime\\job_worker\.py|restart_runtime\.ps1|start_runtime_headless\.ps1'
     } |
     ForEach-Object {
         try {

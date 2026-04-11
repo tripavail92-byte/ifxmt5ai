@@ -31,6 +31,19 @@ BROKER_BASE_MAP: dict[str, str] = {
 DEFAULT_BASE = r"C:\Program Files\MetaTrader 5"
 
 
+def _configured_template_dir() -> Path | None:
+    raw = (os.environ.get("MT5_TEMPLATE_DIR") or "").strip()
+    if not raw:
+        return None
+
+    template_dir = Path(raw)
+    if not template_dir.exists() or not (template_dir / "terminal64.exe").exists():
+        logger.warning("[provisioner] Ignoring MT5_TEMPLATE_DIR without terminal64.exe: %s", template_dir)
+        return None
+
+    return template_dir
+
+
 def _resolve_base(broker_server: str) -> str:
     """Return the MT5 base installation path for the given broker server."""
     key = broker_server.lower()
@@ -97,13 +110,16 @@ def _backup_existing_terminal_folder(dest: Path) -> Path | None:
 
 def provision(connection_id: str, broker_server: str = "", force: bool = False) -> Path:
     """
-    Copy MT5 binary into terminals/<connection_id>/ if not already present.
-    Selects broker-specific MT5 installation based on broker_server name.
+    Copy a preconfigured MT5 template into terminals/<connection_id>/ when available,
+    otherwise fall back to the broker-specific MT5 installation.
     """
-    base = Path(_resolve_base(broker_server))
-    if not base.exists():
+    source_dir = _configured_template_dir()
+    if source_dir is None:
+        source_dir = Path(_resolve_base(broker_server))
+
+    if not source_dir.exists():
         raise FileNotFoundError(
-            f"MT5 base directory not found: {base}\n"
+            f"MT5 source directory not found: {source_dir}\n"
             f"Install MetaTrader 5 for broker '{broker_server}' and update BROKER_BASE_MAP."
         )
 
@@ -125,8 +141,8 @@ def provision(connection_id: str, broker_server: str = "", force: bool = False) 
         except Exception as exc:
             raise RuntimeError(f"Failed to backup existing terminal folder {dest}: {exc}") from exc
 
-    logger.info("[provisioner] Copying %s → %s", base, dest)
-    shutil.copytree(str(base), str(dest), dirs_exist_ok=True)
+    logger.info("[provisioner] Copying %s → %s", source_dir, dest)
+    shutil.copytree(str(source_dir), str(dest), dirs_exist_ok=True)
 
     # Portable mode marker
     (dest / "portable").touch()

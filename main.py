@@ -1,15 +1,16 @@
 """
 main.py
-IFX MT5 Runtime — Root entry point launcher.
+Legacy local-runtime launcher.
 
-Usage:
-  python main.py supervisor          # start supervisor
-  python main.py worker <conn_id>    # start one worker (supervisor does this automatically)
-  python main.py scheduler           # start AI eval scheduler
-  python main.py poller              # start poller
+This entry point belongs to the older local supervisor/worker/scheduler path.
+It is no longer the standard operator path for this workspace, which is now:
+    MT5 terminal + EA + public Railway + runtime/terminal_manager.py
 
-This script adds the correct module paths before importing.
-Always run from C:\\mt5system with the .venv active.
+Historical usage:
+    python main.py supervisor
+    python main.py worker <conn_id>
+    python main.py scheduler
+    python main.py poller
 """
 
 import sys

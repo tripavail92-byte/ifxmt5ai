@@ -305,12 +305,14 @@ class Mt5State {
 
   getSymbols(connId?: string): string[] {
     if (connId) {
-      const syms = new Set<string>(this.symbols.get(connId) ?? []);
+      const syms = new Set<string>((this.symbols.get(connId) ?? []).filter((symbol): symbol is string => typeof symbol === "string"));
       this.prices.get(connId)?.forEach((_, key) => syms.add(key));
       return [...syms];
     }
     const syms = new Set<string>();
-    this.symbols.forEach(list => list.forEach(s => syms.add(s)));
+    this.symbols.forEach(list => list.forEach(s => {
+      if (typeof s === "string") syms.add(s);
+    }));
     this.prices.forEach(m => m.forEach((_, k) => syms.add(k)));
     return [...syms];
   }

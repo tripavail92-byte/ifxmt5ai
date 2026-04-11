@@ -6,7 +6,7 @@ import {
   writeTickBatchToRedis,
   redisAvailable,
 } from "@/lib/mt5-redis";
-import { hasSigningSecret, verifySignedBody } from "@/lib/mt5-ingest-auth";
+import { getRelayAuthMode, hasSigningSecret, verifySignedBody } from "@/lib/mt5-ingest-auth";
 
 const INGEST_TOKEN = process.env.RELAY_INGEST_TOKEN ?? "";
 const INSTANCE_ID = process.env.RAILWAY_REPLICA_ID ?? process.env.HOSTNAME ?? "unknown";
@@ -19,14 +19,15 @@ function unauthorized(message: string) {
 
 async function authorize(req: NextRequest, canonicalPath: string, bodyText: string, mode: IngestMode) {
   if (mode === "signed") {
-    if (!hasSigningSecret()) {
-      return NextResponse.json({ error: "RELAY_SECRET not configured" }, { status: 500 });
+    const connectionId = (req.headers.get("X-IFX-CONN-ID") ?? "").trim();
+    if (!connectionId) {
+      return unauthorized("missing connection id");
     }
 
     const ts = req.headers.get("X-IFX-TS") ?? "";
     const nonce = req.headers.get("X-IFX-NONCE") ?? "";
     const signature = req.headers.get("X-IFX-SIGNATURE") ?? "";
-    if (!verifySignedBody({ canonicalPath, bodyText, ts, nonce, signature })) {
+    if (!(await verifySignedBody({ connectionId, canonicalPath, bodyText, ts, nonce, signature }))) {
       return unauthorized("invalid signature");
     }
     return null;
@@ -127,28 +128,35 @@ export async function handleHistoricalBulk(req: NextRequest, canonicalPath: stri
 
   const body = parseJson<{
     connection_id?: string;
-    symbols?: string[];
+    symbols?: Array<string | { symbol: string; bars: CandleBar[] }>;
     symbols_data?: Array<{ symbol: string; bars: CandleBar[] }>;
   }>(bodyText);
   if (!body?.connection_id) {
     return NextResponse.json({ error: "invalid historical-bulk payload" }, { status: 400 });
   }
 
-  const symbolsData = body.symbols_data ?? [];
+  const symbolsPayload = body.symbols ?? [];
+  const symbolsData = body.symbols_data?.length
+    ? body.symbols_data
+    : symbolsPayload.filter((entry): entry is { symbol: string; bars: CandleBar[] } => typeof entry !== "string");
+  const symbolNames = symbolsPayload
+    .filter((entry): entry is string => typeof entry === "string")
+    .concat(symbolsData.map((entry) => entry.symbol));
+
   if (symbolsData.length) {
     mt5State.applyHistoricalBulk(body.connection_id, symbolsData);
-  } else if (body.symbols?.length) {
-    mt5State.symbols.set(body.connection_id, body.symbols);
-    mt5State.broadcast({ type: "connected", connection_id: body.connection_id, symbols: body.symbols });
+  } else if (symbolNames.length) {
+    mt5State.symbols.set(body.connection_id, [...new Set(symbolNames)]);
+    mt5State.broadcast({ type: "connected", connection_id: body.connection_id, symbols: [...new Set(symbolNames)] });
   }
 
-  const wroteRedis = await writeHistoricalBulkToRedis(body.connection_id, symbolsData, body.symbols);
+  const wroteRedis = await writeHistoricalBulkToRedis(body.connection_id, symbolsData, symbolNames);
 
   return NextResponse.json({
     ok: true,
     type: "historical_bulk",
     connection_id: body.connection_id,
-    symbols: body.symbols ?? symbolsData.map((entry) => entry.symbol),
+    symbols: [...new Set(symbolNames)],
     redis: wroteRedis,
   });
 }
@@ -156,7 +164,9 @@ export async function handleHistoricalBulk(req: NextRequest, canonicalPath: stri
 export async function handleRelayHealth() {
   return NextResponse.json({
     status: "ok",
-    ingest_mode: hasSigningSecret() ? "signed" : (INGEST_TOKEN ? "bearer" : "open"),
+    ingest_mode: getRelayAuthMode(),
+    global_signing_secret: hasSigningSecret(),
+    scoped_install_tokens: true,
     redis: await redisAvailable(),
     subscribers: mt5State.subscriberCount,
     symbols: mt5State.getSymbols(),

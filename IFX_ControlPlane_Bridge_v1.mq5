@@ -1,8 +1,9 @@
 //+------------------------------------------------------------------+
-//|  IFX_PriceBridge_v3.mq5                                         |
-//|  Industrial-grade multi-symbol tick bridge for IFX terminal      |
+//|  IFX_ControlPlane_Bridge_v1.mq5                                  |
+//|  Industrial-grade multi-symbol tick bridge with control-plane    |
+//|  registration for dedicated terminal bootstrap flows             |
 //|  Architecture: OnTick() + EventSetMillisecondTimer(50)           |
-//|  Target: Railway cloud ingest (/api/mt5)                         |
+//|  Target: Public Railway relay and control plane (/api/mt5)       |
 //|                                                                  |
 //|  SETUP: In MT5 -> Tools -> Options -> Expert Advisors            |
 //|    Add https://ifx-mt5-portal-production.up.railway.app to the   |
@@ -10,8 +11,8 @@
 //|    BackendRelayUrl should point to the /api/mt5 base path.       |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "3.0"
-#property description "IFX Price Bridge v3 - Multi-symbol tick relay -> Railway cloud ingest"
+#property version   "3.1"
+#property description "IFX Control Plane Bridge v1 - Tick relay plus EA registration/heartbeat"
 
 //==========================================================================
 // SECTION 1 — INPUTS
@@ -34,6 +35,9 @@ input ENUM_TIMEFRAMES StructureTimeframe = PERIOD_M5;            // Timeframe fo
 input int     StructurePivotWindow = 2;                          // Fractal confirmation width on each side of the pivot
 input int     StructureBarsToScan = 120;                         // Closed candles fetched per symbol for structure analysis
 input bool    LogFractalSignals = true;                          // Print local bullish/bearish fractal breaks to Experts log
+input bool    EnableControlPlaneBootstrap = true;                // Register/heartbeat against bootstrap control plane
+input string  BootstrapManifestPath = "ifx\\bootstrap.json";    // MQL5/Files-relative bootstrap manifest
+input int     ControlPlaneHeartbeatSec = 30;                     // Fallback heartbeat interval when bootstrap config is absent
 
 //==========================================================================
 // SECTION 2 — GLOBALS
@@ -59,6 +63,17 @@ ulong    g_last_config_ms= 0;
 ulong    g_last_health_ms = 0;  // Last /health check timestamp
 int      g_relay_uptime_prev = -2; // -2=first-run  -1=was-down  >=0=last-uptime
 bool     g_historical_seeded = false; // true once /historical-bulk succeeds
+bool     g_control_plane_ready = false;
+bool     g_ea_registered = false;
+string   g_runtime_backend_url = "";
+string   g_runtime_connection_id = "";
+string   g_runtime_signing_secret = "";
+string   g_install_token = "";
+string   g_register_url = "";
+string   g_heartbeat_url = "";
+ulong    g_last_register_attempt_ms = 0;
+ulong    g_last_heartbeat_attempt_ms = 0;
+int      g_effective_heartbeat_sec = 30;
 
 #define CLOSE_REPAIR_RETRY_MS 5000
 #define CLOSE_DISCONTINUITY_RESEED_MS 30000
@@ -88,6 +103,254 @@ bool ActiveArrayContains(const string sym)
       if(g_active_symbols[i] == sym)
          return true;
    return false;
+}
+
+string RuntimeBackendUrl()
+{
+   if(StringLen(g_runtime_backend_url) > 0)
+      return g_runtime_backend_url;
+   return BackendRelayUrl;
+}
+
+string RuntimeConnectionId()
+{
+   if(StringLen(g_runtime_connection_id) > 0)
+      return g_runtime_connection_id;
+   return ConnectionId;
+}
+
+string RuntimeSigningSecret()
+{
+   return g_runtime_signing_secret;
+}
+
+string EscapeJson(const string value)
+{
+   string escaped = value;
+   StringReplace(escaped, "\\", "\\\\");
+   StringReplace(escaped, "\"", "\\\"");
+   StringReplace(escaped, "\r", "");
+   StringReplace(escaped, "\n", " ");
+   return escaped;
+}
+
+string JsonExtractStringAfter(const string json, int from_pos, const string key)
+{
+   string marker = "\"" + key + "\"";
+   int key_pos = StringFind(json, marker, from_pos);
+   if(key_pos < 0)
+      return "";
+
+   int colon_pos = StringFind(json, ":", key_pos + StringLen(marker));
+   if(colon_pos < 0)
+      return "";
+
+   int start = colon_pos + 1;
+   while(start < StringLen(json))
+   {
+      ushort ch = StringGetCharacter(json, start);
+      if(ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n')
+      {
+         start++;
+         continue;
+      }
+      break;
+   }
+
+   if(start >= StringLen(json) || StringGetCharacter(json, start) != '"')
+      return "";
+
+   start++;
+   int finish = start;
+   while(finish < StringLen(json))
+   {
+      if(StringGetCharacter(json, finish) == '"')
+         break;
+      finish++;
+   }
+
+   if(finish <= start)
+      return "";
+
+   return StringSubstr(json, start, finish - start);
+}
+
+bool ReadTextFileUtf8(const string relative_path, string &content)
+{
+   content = "";
+   int handle = FileOpen(relative_path, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
+   if(handle == INVALID_HANDLE)
+   {
+      Print("⚠️ [BOOTSTRAP] file open failed: ", relative_path, " err=", GetLastError());
+      return false;
+   }
+
+   while(!FileIsEnding(handle))
+      content += FileReadString(handle);
+
+   FileClose(handle);
+   return StringLen(content) > 0;
+}
+
+bool LoadControlPlaneBootstrap()
+{
+   if(!EnableControlPlaneBootstrap)
+      return false;
+
+   string manifest = "";
+   if(!ReadTextFileUtf8(BootstrapManifestPath, manifest))
+      return false;
+
+   g_runtime_backend_url = BackendRelayUrl;
+   g_runtime_connection_id = ConnectionId;
+   g_runtime_signing_secret = SigningSecret;
+   g_effective_heartbeat_sec = MathMax(5, ControlPlaneHeartbeatSec);
+
+   int relay_pos = StringFind(manifest, "\"relay\"");
+   int control_pos = StringFind(manifest, "\"control_plane\"");
+
+   string manifest_connection = JsonExtractStringAfter(manifest, 0, "connection_id");
+   if(StringLen(manifest_connection) > 0)
+      g_runtime_connection_id = manifest_connection;
+
+   g_install_token = JsonExtractStringAfter(manifest, 0, "install_token");
+   g_register_url = JsonExtractStringAfter(manifest, control_pos, "register_url");
+   g_heartbeat_url = JsonExtractStringAfter(manifest, control_pos, "heartbeat_url");
+
+   string relay_url = JsonExtractStringAfter(manifest, relay_pos, "base_url");
+   if(StringLen(relay_url) > 0)
+      g_runtime_backend_url = relay_url;
+
+   g_control_plane_ready = (StringLen(g_install_token) > 0
+      && StringLen(g_register_url) > 0
+      && StringLen(g_heartbeat_url) > 0
+      && StringLen(g_runtime_connection_id) > 0);
+
+   if(g_control_plane_ready)
+   {
+      Print("✅ [BOOTSTRAP] control-plane manifest loaded for connection ", g_runtime_connection_id);
+      Print("✅ [BOOTSTRAP] register=", g_register_url);
+   }
+   else
+   {
+      Print("⚠️ [BOOTSTRAP] manifest found but required fields are missing");
+   }
+
+   return g_control_plane_ready;
+}
+
+bool ControlPlanePost(const string url, const string json, string &response, int timeout_ms)
+{
+   response = "";
+   if(StringLen(url) == 0 || StringLen(g_install_token) == 0)
+      return false;
+
+   string headers = "Content-Type: application/json\r\n";
+   headers += "X-IFX-INSTALL-TOKEN: " + g_install_token + "\r\n";
+
+   uchar payload[];
+   StringToCharArray(json, payload, 0, WHOLE_ARRAY, CP_UTF8);
+   if(ArraySize(payload) > 0)
+      ArrayResize(payload, ArraySize(payload) - 1);
+
+   uchar result[];
+   string result_headers = "";
+   ResetLastError();
+   int status = WebRequest("POST", url, headers, timeout_ms, payload, result, result_headers);
+   int err = GetLastError();
+   response = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+
+   if(status >= 200 && status < 300)
+      return true;
+
+   if(status == -1)
+      Print("❌ [CONTROL] POST failed err=", err, " url=", url);
+   else
+      Print("❌ [CONTROL] POST ", url, " → HTTP ", status, " err=", err, " | ", StringSubstr(response, 0, 160));
+
+   return false;
+}
+
+bool RegisterControlPlaneInstallation()
+{
+   if(!g_control_plane_ready)
+      return false;
+
+   string terminal_path = TerminalInfoString(TERMINAL_DATA_PATH);
+   string payload = "{";
+   payload += "\"connection_id\":\"" + EscapeJson(RuntimeConnectionId()) + "\",";
+   payload += "\"terminal_path\":\"" + EscapeJson(terminal_path) + "\",";
+   payload += "\"ea_version\":\"IFX_ControlPlane_Bridge_v1\",";
+   payload += "\"metadata\":{";
+   payload += "\"account_login\":\"" + IntegerToString((int)AccountInfoInteger(ACCOUNT_LOGIN)) + "\",";
+   payload += "\"broker_server\":\"" + EscapeJson(AccountInfoString(ACCOUNT_SERVER)) + "\",";
+   payload += "\"chart_symbol\":\"" + EscapeJson(_Symbol) + "\"";
+   payload += "}}";
+
+   string response = "";
+   if(!ControlPlanePost(g_register_url, payload, response, 5000))
+      return false;
+
+   g_ea_registered = true;
+   Print("✅ [CONTROL] EA registration succeeded for ", RuntimeConnectionId());
+   return true;
+}
+
+bool SendControlPlaneHeartbeat()
+{
+   if(!g_control_plane_ready)
+      return false;
+
+   string payload = "{";
+   payload += "\"connection_id\":\"" + EscapeJson(RuntimeConnectionId()) + "\",";
+   payload += "\"status\":\"online\",";
+   payload += "\"metrics\":{";
+   payload += "\"account_login\":\"" + IntegerToString((int)AccountInfoInteger(ACCOUNT_LOGIN)) + "\",";
+   payload += "\"equity\":" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + ",";
+   payload += "\"balance\":" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + ",";
+   payload += "\"symbol_count\":" + IntegerToString(g_sym_count);
+   payload += "}}";
+
+   string response = "";
+   if(!ControlPlanePost(g_heartbeat_url, payload, response, 5000))
+      return false;
+
+   Print("✅ [CONTROL] heartbeat ok for ", RuntimeConnectionId());
+   return true;
+}
+
+void MaybeSyncControlPlane()
+{
+   if(!EnableControlPlaneBootstrap)
+      return;
+
+   ulong now_ms = GetTickCount64();
+   if(!g_control_plane_ready)
+   {
+      if(now_ms - g_last_register_attempt_ms >= 10000)
+      {
+         g_last_register_attempt_ms = now_ms;
+         LoadControlPlaneBootstrap();
+      }
+      return;
+   }
+
+   if(!g_ea_registered)
+   {
+      if(now_ms - g_last_register_attempt_ms >= 5000)
+      {
+         g_last_register_attempt_ms = now_ms;
+         if(RegisterControlPlaneInstallation())
+            g_last_heartbeat_attempt_ms = now_ms;
+      }
+      return;
+   }
+
+   if(now_ms - g_last_heartbeat_attempt_ms >= (ulong)MathMax(5, g_effective_heartbeat_sec) * 1000)
+   {
+      if(SendControlPlaneHeartbeat())
+         g_last_heartbeat_attempt_ms = now_ms;
+   }
 }
 
 void LoadPreferredActiveSymbols()
@@ -348,9 +611,15 @@ void MaybeProcessLocalFractalSignal(const int sym_idx)
 //==========================================================================
 int OnInit()
 {
-   Print("=== IFX Price Bridge v3.0 ===");
-   Print("Relay: ", BackendRelayUrl, " (must be whitelisted in MT5 Options -> Expert Advisors)");
-   Print("ConnectionId: ", ConnectionId);
+   g_runtime_backend_url = BackendRelayUrl;
+   g_runtime_connection_id = ConnectionId;
+   g_runtime_signing_secret = SigningSecret;
+   g_effective_heartbeat_sec = MathMax(5, ControlPlaneHeartbeatSec);
+   LoadControlPlaneBootstrap();
+
+   Print("=== IFX Control Plane Bridge v1 ===");
+   Print("Relay: ", RuntimeBackendUrl(), " (must be whitelisted in MT5 Options -> Expert Advisors)");
+   Print("ConnectionId: ", RuntimeConnectionId());
    if(EnableLocalFractalSignals)
       Print("🧠 [FRACTAL] local detector enabled tf=", TimeframeLabel(StructureTimeframe),
             " pivot_window=", SanitizedStructurePivotWindow(),
@@ -372,6 +641,10 @@ int OnInit()
    g_last_watchlist_flush_ms = g_last_flush_ms;
    g_last_config_ms = GetTickCount64();
    g_last_health_ms = GetTickCount64();
+   g_last_register_attempt_ms = 0;
+   g_last_heartbeat_attempt_ms = 0;
+
+   MaybeSyncControlPlane();
 
    Print("✅ Started. Monitoring ", g_sym_count, " symbols");
    return INIT_SUCCEEDED;
@@ -398,6 +671,7 @@ void OnTick()
 void OnTimer()
 {
    PollAllSymbols();
+   MaybeSyncControlPlane();
 
    // Config refresh
    ulong now_ms = GetTickCount64();
@@ -557,7 +831,7 @@ void FlushTickBatch(ulong now_ms, bool activeSymbols)
    // chart symbols or the lower-priority watchlist symbols.
 
    string json = "{";
-   json += "\"connection_id\":\"" + ConnectionId + "\",";
+   json += "\"connection_id\":\"" + RuntimeConnectionId() + "\",";
    json += "\"ts_ms\":" + IntegerToString((long)now_ms) + ",";
 
    int sentIdx[];
@@ -633,7 +907,7 @@ bool SendCandleCloseBar(const string symbol, int sym_idx, const MqlRates &bar)
 {
    int d = g_sym_digits[sym_idx];
    string json = "{";
-   json += "\"connection_id\":\"" + ConnectionId + "\",";
+   json += "\"connection_id\":\"" + RuntimeConnectionId() + "\",";
    json += "\"symbol\":\""        + symbol                        + "\",";
    json += "\"timeframe\":\"1m\",";
    json += "\"time\":"            + IntegerToString((long)bar.time) + ",";
@@ -694,7 +968,7 @@ bool PushHistoricalBulkSymbol(const int sym_idx, int barsRequested)
 
    int d = g_sym_digits[sym_idx];
    string json = "{";
-   json += "\"connection_id\":\"" + ConnectionId + "\",";
+   json += "\"connection_id\":\"" + RuntimeConnectionId() + "\",";
    json += "\"bars_requested\":"  + IntegerToString(barsRequested) + ",";
    json += "\"symbols\":[{";
    json += "\"symbol\":\"" + g_sym_names[sym_idx] + "\",\"bars\":[";
@@ -773,7 +1047,7 @@ void PushHistoricalBulk()
 //==========================================================================
 void CheckRelayRestart()
 {
-   string url = BackendRelayUrl + "/health";
+   string url = RuntimeBackendUrl() + "/health";
    uchar  emptyData[];
    ArrayResize(emptyData, 0);
    uchar  result[];
@@ -856,7 +1130,7 @@ void CheckRelayRestart()
 //==========================================================================
 void FetchConfig()
 {
-   string url = BackendRelayUrl + "/config";
+   string url = RuntimeBackendUrl() + "/config";
    uchar emptyData[];
    ArrayResize(emptyData, 0);
    uchar result[];
@@ -1083,16 +1357,16 @@ int FindDigits(const string sym)
 //==========================================================================
 bool SignedPost(const string path, const string json, int timeout_ms)
 {
-   string url = BackendRelayUrl + path;
+   string url = RuntimeBackendUrl() + path;
    string ts    = IntegerToString((long)TimeGMT() * 1000);
    string nonce = IntegerToString((long)GetTickCount64());
 
    string bodyHash     = Sha256Hex(json);
    string stringToSign = "POST\n" + path + "\n" + ts + "\n" + nonce + "\n" + bodyHash;
-   string signature    = HmacSha256Hex(SigningSecret, stringToSign);
+   string signature    = HmacSha256Hex(RuntimeSigningSecret(), stringToSign);
 
    string headers  = "Content-Type: application/json\r\n";
-   headers += "X-IFX-CONN-ID: "   + ConnectionId + "\r\n";
+   headers += "X-IFX-CONN-ID: "   + RuntimeConnectionId() + "\r\n";
    headers += "X-IFX-TS: "        + ts           + "\r\n";
    headers += "X-IFX-NONCE: "     + nonce        + "\r\n";
    headers += "X-IFX-SIGNATURE: " + signature    + "\r\n";

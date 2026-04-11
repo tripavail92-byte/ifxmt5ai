@@ -1,24 +1,25 @@
 //+------------------------------------------------------------------+
-//|  IFX_PriceBridge_v3.mq5                                         |
-//|  Industrial-grade multi-symbol tick bridge for IFX terminal      |
+//|  IFX_Railway_Bridge_v1.mq5                                      |
+//|  Railway-only multi-symbol tick bridge for IFX terminals         |
 //|  Architecture: OnTick() + EventSetMillisecondTimer(50)           |
-//|  Target: Railway cloud ingest (/api/mt5)                         |
+//|  Target: Public Railway ingest and control plane                 |
 //|                                                                  |
 //|  SETUP: In MT5 -> Tools -> Options -> Expert Advisors            |
 //|    Add https://ifx-mt5-portal-production.up.railway.app to the   |
 //|    "Allow WebRequest for listed URL" list.                      |
-//|    BackendRelayUrl should point to the /api/mt5 base path.       |
+//|    BackendRelayUrl must point to the /api/mt5 base path.         |
+//|    SigningSecret should be the scoped install token/secret.      |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "3.0"
-#property description "IFX Price Bridge v3 - Multi-symbol tick relay -> Railway cloud ingest"
+#property version   "4.0"
+#property description "IFX Railway Bridge v1 - Multi-symbol tick relay -> public Railway"
 
 //==========================================================================
 // SECTION 1 — INPUTS
 //==========================================================================
 input string  BackendRelayUrl      = "https://ifx-mt5-portal-production.up.railway.app/api/mt5"; // Public Railway relay base URL
-input string  ConnectionId         = "200beae4-553b-4607-8653-8a15e5699865"; // Your MT5 connection UUID
-input string  SigningSecret        = "ZoySwg4Mbjc+QtqnNEJc0QuUzaPWoYsgiUBJUji4gJ4="; // Must match Railway RELAY_SECRET
+input string  ConnectionId         = "";                         // Set the assigned MT5 connection UUID
+input string  SigningSecret        = "";                         // Set the scoped install token/signing secret
 input int     TickBatchMs          = 250;                        // Active symbol snapshot flush interval (ms)
 input int     WatchlistTickBatchMs = 500;                        // Watchlist symbol snapshot flush interval (ms)
 input string  ActiveSymbolsCsv     = "EURUSDm,XAUUSDm,USDJPYm,AUDUSDm,USOILm,GBPUSDm,BTCUSDm,ETHUSDm,USDCHFm,USDCADm,NZDUSDm,EURGBPm"; // Preferred high-rate symbols (max 12); attached chart symbol is always active
@@ -348,7 +349,7 @@ void MaybeProcessLocalFractalSignal(const int sym_idx)
 //==========================================================================
 int OnInit()
 {
-   Print("=== IFX Price Bridge v3.0 ===");
+   Print("=== IFX Railway Bridge v1 ===");
    Print("Relay: ", BackendRelayUrl, " (must be whitelisted in MT5 Options -> Expert Advisors)");
    Print("ConnectionId: ", ConnectionId);
    if(EnableLocalFractalSignals)
