@@ -994,12 +994,13 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     const liveAvailable = [...new Set(liveQuoteSymbols.filter(Boolean))];
     const streamAvailable = [...new Set((liveSymbols ?? []).filter(Boolean))];
     const dbAvailable = [...new Set(symbols.map((row) => row.symbol).filter(Boolean))];
-    const defaultAvailable = !isAuthenticated ? SUBSCRIBED_DEFAULT_SYMBOLS : dbAvailable;
-    const available = liveAvailable.length > 0 ? liveAvailable : streamAvailable.length > 0 ? streamAvailable : defaultAvailable;
+    const fallbackAvailable = !isAuthenticated ? SUBSCRIBED_DEFAULT_SYMBOLS : dbAvailable;
+    const preferredAvailable = liveAvailable.length > 0 ? liveAvailable : streamAvailable.length > 0 ? streamAvailable : fallbackAvailable;
+    const available = [...new Set([...liveAvailable, ...streamAvailable, ...fallbackAvailable])];
     if (!available.length) return;
     const resolved = resolveLiveSymbolMatch(selectedSymbol || undefined, available);
     if (!selectedSymbol || !available.includes(selectedSymbol)) {
-      setSelectedSymbol(resolved && available.includes(resolved) ? resolved : available[0]);
+      setSelectedSymbol(resolved && available.includes(resolved) ? resolved : (preferredAvailable[0] ?? available[0]));
     } else if (resolved && resolved !== selectedSymbol && available.includes(resolved)) {
       setSelectedSymbol(resolved);
     }
@@ -1512,11 +1513,12 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
   const dbSymbols = [...new Set(symbols.map((row) => row.symbol).filter(Boolean))];
   const liveSelectableSymbols = [...new Set(liveQuoteSymbols.filter(Boolean))];
   const streamSelectableSymbols = [...new Set((liveSymbols ?? []).filter(Boolean))];
-  const availableSymbols = liveSelectableSymbols.length > 0
-    ? liveSelectableSymbols
-    : streamSelectableSymbols.length > 0
-      ? streamSelectableSymbols
-      : (isAuthenticated ? dbSymbols : SUBSCRIBED_DEFAULT_SYMBOLS);
+  const fallbackSelectableSymbols = isAuthenticated ? dbSymbols : SUBSCRIBED_DEFAULT_SYMBOLS;
+  const availableSymbols = [...new Set([
+    ...liveSelectableSymbols,
+    ...streamSelectableSymbols,
+    ...fallbackSelectableSymbols,
+  ])];
   const hasLiveQuoteForSelected = resolvedSelectedSymbol ? Boolean(prices[resolvedSelectedSymbol]) : false;
   const quoteSymbol = activeSymbol;
   const quoteDigits = getDecimals(quoteSymbol);
