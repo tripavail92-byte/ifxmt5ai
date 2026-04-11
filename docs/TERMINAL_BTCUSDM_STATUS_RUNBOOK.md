@@ -135,6 +135,126 @@ Validated remotely:
 
 - Railway deployment `9d803119-9baf-4c8e-a1fc-8bb7a13e2c55` is `SUCCESS`.
 
+## New Connection Behavior
+
+### What happens when a new user adds a new MT5 connection
+
+When a user creates a new MT5 connection, the server now tries to provision it automatically.
+
+Current flow:
+
+1. The app creates the `mt5_user_connections` row.
+2. The app looks for an online terminal host.
+3. The app creates a bootstrap assignment for that host.
+4. The connection status is moved to `connecting`.
+5. The terminal manager picks up the assignment.
+6. The manager provisions a dedicated portable MT5 terminal for that connection.
+7. The manager installs the EA, preset file, and bootstrap file.
+8. The manager writes a `startup.ini` that launches MT5 with the EA already attached.
+9. The manager waits for verification before acknowledging launch.
+
+Important constraint:
+
+- The current app logic still enforces one active MT5 connection per user.
+
+### Where the new MT5 terminal opens
+
+By default, a new portable MT5 terminal is created under:
+
+- `C:\mt5system\terminals\<connection_id>`
+
+That location comes from the runtime provisioner and is keyed by the connection id so each connection gets its own isolated MT5 data folder.
+
+Provisioning behavior:
+
+- If `MT5_TEMPLATE_DIR` is configured and valid, the terminal is copied from that template.
+- Otherwise the provisioner copies from the broker-specific MT5 install.
+- If no broker-specific install matches, it falls back to the default MetaTrader base install.
+
+### Is the EA applied automatically
+
+Yes, if an online terminal host exists and the terminal manager is running.
+
+Automatic manager steps:
+
+- install EA into `MQL5/Experts/IFX`
+- write `MQL5/Presets/ifx_connection.set`
+- write `MQL5/Files/ifx/bootstrap.json`
+- write `startup.ini` with:
+  - `Expert=<installed EA path>`
+  - `ExpertParameters=ifx_connection.set`
+- launch `terminal64.exe /portable /config:startup.ini`
+
+### When auto-provisioning will not happen
+
+Auto-provisioning depends on the local terminal host layer still being available.
+
+It will not complete automatically if:
+
+- no terminal host is online
+- the terminal manager is not running
+- the local machine does not have a valid MT5 template or base install
+- connection bootstrap fails and the connection is left `offline` with an error
+
+In that case, the connection row can still be created, but the actual MT5 terminal will not launch until the host/manager layer is healthy.
+
+## Reducing Local Dependency
+
+### Direction of the architecture
+
+The system is being pushed away from a local-machine-dependent model and toward an EA + Railway model for the majority of operational work.
+
+The goal is:
+
+- local host only provisions and launches MT5
+- EA handles market data upload, heartbeat, and scoped connection identity
+- Railway handles ingest, routing, state, candles, symbol resolution, UI, and control-plane logic
+
+### What has already moved away from the local machine
+
+The following responsibilities are now primarily handled by the EA or Railway rather than by ad hoc local scripts:
+
+- tick ingestion
+- candle-close ingestion
+- historical bulk upload
+- account heartbeat and account metrics
+- connection-scoped symbol/config lookup
+- broker symbol alias resolution
+- terminal assignment tracking
+- launch verification
+- terminal UI state, charting, and control-plane APIs
+
+### What still depends on the local machine today
+
+The local machine is still responsible for a smaller but important set of tasks:
+
+- storing and running the MT5 terminal executable
+- provisioning a portable terminal folder per connection
+- launching MT5 with the EA attached
+- compiling the local EA source into `.ex5` when needed
+- keeping the terminal manager online so assignments can be processed
+
+### Practical interpretation
+
+For most runtime behavior, the system now depends more on:
+
+- the EA running inside MT5
+- Railway control-plane and API routes
+- Supabase state
+- Redis-backed live data and candle storage
+
+And it depends less on:
+
+- manual local intervention
+- custom one-off local scripts
+- local UI or local relay behavior for core data flow
+
+This is the intended steady state:
+
+- local machine = provisioning and MT5 host
+- EA = on-terminal agent
+- Railway = source of truth for ingest, orchestration, UI, and verification
+
 ## How To Verify Now
 
 ### Browser verification
