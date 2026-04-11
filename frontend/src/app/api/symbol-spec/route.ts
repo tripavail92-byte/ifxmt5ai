@@ -35,8 +35,8 @@ function fallbackSpec(symbol: string) {
   };
 }
 
-function stripBrokerSuffix(symbol: string) {
-  return symbol.replace(/[._-]?[a-z]+$/i, "");
+function normalizeAliasCandidate(symbol: string) {
+  return symbol.replace(/[^a-z0-9]/gi, "").toUpperCase();
 }
 
 async function resolveConnectionSymbol(connId: string, requestedSymbol: string) {
@@ -51,10 +51,14 @@ async function resolveConnectionSymbol(connId: string, requestedSymbol: string) 
   const exactMatch = candidates.find((symbol) => symbol === requested);
   if (exactMatch) return exactMatch;
 
-  const normalizedRequested = stripBrokerSuffix(requested).toUpperCase();
+  const normalizedRequested = normalizeAliasCandidate(requested);
   if (!normalizedRequested) return requested;
 
-  return candidates.find((symbol) => stripBrokerSuffix(symbol).toUpperCase() === normalizedRequested) ?? requested;
+  return candidates.find((symbol) => {
+    const normalizedCandidate = normalizeAliasCandidate(symbol);
+    if (normalizedCandidate === normalizedRequested) return true;
+    return normalizedCandidate.startsWith(normalizedRequested) && (normalizedCandidate.length - normalizedRequested.length) <= 4;
+  }) ?? requested;
 }
 
 export async function GET(req: NextRequest) {
