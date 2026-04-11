@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/utils/supabase/server";
 import { encryptMT5Password } from "@/utils/crypto";
+import { enforceSingleActiveConnection } from "@/lib/terminal-access";
 
 export async function addConnection(formData: FormData) {
   const supabase = await createClient();
@@ -16,6 +17,12 @@ export async function addConnection(formData: FormData) {
   const broker_server = formData.get("broker_server") as string;
   const account_login = formData.get("account_login") as string;
   const plaintextPassword = formData.get("password") as string;
+
+  const existingConnections = await enforceSingleActiveConnection(supabase, user.id);
+
+  if (existingConnections.length > 0) {
+    throw new Error("Only one MT5 connection is supported. Remove the current connection or logout first.");
+  }
 
   const masterKey = process.env.MT5_CREDENTIALS_MASTER_KEY_B64;
   if (!masterKey) {
@@ -42,6 +49,8 @@ export async function addConnection(formData: FormData) {
   }
 
   revalidatePath("/connections");
+  revalidatePath("/");
+  revalidatePath("/terminal");
 }
 
 export async function deleteConnection(formData: FormData) {
@@ -68,4 +77,6 @@ export async function deleteConnection(formData: FormData) {
   }
 
   revalidatePath("/connections");
+  revalidatePath("/");
+  revalidatePath("/terminal");
 }

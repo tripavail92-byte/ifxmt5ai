@@ -1,182 +1,210 @@
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { Activity, Network, Clock, CheckCircle, AlertTriangle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, Link2, Network, TrendingUp } from "lucide-react";
 import { createClient } from "@/utils/supabase/server";
 import { Button } from "@/components/ui/button";
+import { enforceSingleActiveConnection } from "@/lib/terminal-access";
 import Link from "next/link";
 
 export default async function Dashboard() {
   const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
-  // Fetch summary counts
-  const [{ count: activeConnections }, { count: activeStrategies }, { count: completedTrades }, { count: queuedTrades }] = await Promise.all([
-    supabase.from("mt5_user_connections").select("*", { count: "exact", head: true }).eq("is_active", true),
-    supabase.from("user_strategies").select("*", { count: "exact", head: true }).eq("is_active", true),
+  const activeConnection = user?.id
+    ? (await enforceSingleActiveConnection(supabase, user.id))[0] ?? null
+    : null;
+
+  const [{ count: completedTrades }, { count: queuedTrades }, heartbeatResult, eventsResult] = await Promise.all([
     supabase.from("trade_jobs").select("*", { count: "exact", head: true }).eq("status", "success"),
     supabase.from("trade_jobs").select("*", { count: "exact", head: true }).in("status", ["queued", "claimed", "executing", "retry"]),
+    activeConnection
+      ? supabase
+          .from("mt5_worker_heartbeats")
+          .select(`
+            *,
+            mt5_user_connections (account_login, broker_server)
+          `)
+          .eq("connection_id", activeConnection.id)
+          .order("last_seen_at", { ascending: false })
+          .limit(1)
+      : Promise.resolve({ data: [] as never[] }),
+    activeConnection
+      ? supabase
+          .from("mt5_runtime_events")
+          .select("*")
+          .eq("connection_id", activeConnection.id)
+          .order("created_at", { ascending: false })
+          .limit(8)
+      : supabase.from("mt5_runtime_events").select("*").order("created_at", { ascending: false }).limit(8),
   ]);
 
-  // Fetch live worker heartbeats
-  const { data: heartbeats } = await supabase
-    .from("mt5_worker_heartbeats")
-    .select(`
-      *,
-      mt5_user_connections (account_login, broker_server)
-    `)
-    .order("last_seen_at", { ascending: false });
-
-  // Fetch recent runtime events
-  const { data: events } = await supabase
-    .from("mt5_runtime_events")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(10);
-
-  const staleWorkers = heartbeats?.filter((hb) => new Date().getTime() - new Date(hb.last_seen_at).getTime() > 30000).length || 0;
+  const heartbeats = heartbeatResult.data ?? [];
+  const events = eventsResult.data ?? [];
+  const latestHeartbeat = heartbeats[0] ?? null;
+  const isStale = latestHeartbeat
+    ? new Date().getTime() - new Date(latestHeartbeat.last_seen_at).getTime() > 30000
+    : false;
+  const runtimeState = !activeConnection
+    ? "Disconnected"
+    : !latestHeartbeat
+      ? (activeConnection.status || "offline")
+      : isStale
+        ? "stale"
+        : latestHeartbeat.status;
+  const runtimeTone = !activeConnection
+    ? "border-[#2a2a2a] bg-[#111111] text-gray-300"
+    : runtimeState === "online"
+      ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
+      : runtimeState === "stale"
+        ? "border-amber-500/20 bg-amber-500/10 text-amber-200"
+        : "border-red-500/20 bg-red-500/10 text-red-200";
 
   return (
-    <>
-      <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold md:text-2xl">Dashboard</h1>
-        <Button asChild>
-          <Link href="/connections">
-            <Network className="mr-2 h-4 w-4" />
-            Connect MT5 Terminal
-          </Link>
-        </Button>
-      </div>
-      
-      <div className="grid gap-4 md:grid-cols-2 md:gap-8 lg:grid-cols-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Active Connected</CardTitle>
-            <Network className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{activeConnections || 0}</div>
-            <p className="text-xs text-muted-foreground">MT5 terminals configured</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Active Strategies</CardTitle>
-            <Activity className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{activeStrategies || 0}</div>
-            <p className="text-xs text-muted-foreground">Across all accounts</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Trades Executed</CardTitle>
-            <CheckCircle className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{completedTrades || 0}</div>
-            <p className="text-xs text-muted-foreground">Total successful executions</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Live Workers</CardTitle>
-            <Clock className="h-4 w-4 text-green-500" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{heartbeats?.filter(h => h.status === 'online').length || 0}</div>
-            <p className="text-xs text-muted-foreground">Online right now</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">My Queue Health</CardTitle>
-            <AlertTriangle className="h-4 w-4 text-amber-500" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{queuedTrades || 0}</div>
-            <p className="text-xs text-muted-foreground">Queued/claiming jobs, {staleWorkers} stale workers</p>
-          </CardContent>
-        </Card>
-      </div>
+    <div className="space-y-6 text-white">
+      <section className="overflow-hidden rounded-[28px] border border-[#181818] bg-[#090909] shadow-[0_30px_80px_rgba(0,0,0,0.45)]">
+        <div className="border-b border-[#171717] bg-[radial-gradient(circle_at_top_left,_rgba(37,99,235,0.24),_transparent_40%),linear-gradient(180deg,#101010_0%,#090909_100%)] px-6 py-6 lg:px-8">
+          <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+            <div className="space-y-3">
+              <div className="inline-flex items-center gap-2 rounded-full border border-[#252525] bg-[#121212] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-gray-400">
+                <TrendingUp className="size-3.5" /> Terminal Overview
+              </div>
+              <div>
+                <h1 className="text-3xl font-semibold tracking-tight text-white">Runtime Dashboard</h1>
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-400">
+                  A terminal-style command deck for the single MT5 connection attached to this user. Status, execution queue, and broker runtime signals stay centered on the same account.
+                </p>
+              </div>
+            </div>
 
-      <div className="grid gap-4 md:gap-8 lg:grid-cols-2 xl:grid-cols-3">
-        <Card className="xl:col-span-2 shadow-sm">
-          <CardHeader>
-            <CardTitle>Worker Health</CardTitle>
-            <CardDescription>Live heartbeat status of all MT5 terminals</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {heartbeats && heartbeats.length > 0 ? (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Account</TableHead>
-                    <TableHead>PID</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Last Seen</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {heartbeats.map((hb) => {
-                    const isStale = new Date().getTime() - new Date(hb.last_seen_at).getTime() > 30000; // 30s
-                    return (
-                      <TableRow key={hb.connection_id}>
-                        <TableCell className="font-medium">
-                          {hb.account_login || hb.mt5_user_connections?.account_login}
-                        </TableCell>
-                        <TableCell className="font-mono text-sm">{hb.pid}</TableCell>
-                        <TableCell>
-                          <Badge variant={isStale ? "destructive" : hb.status === "online" ? "default" : "secondary"}>
-                            {isStale ? "stale" : hb.status}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-muted-foreground text-sm">
-                          {new Date(hb.last_seen_at).toLocaleTimeString()}
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
+            <div className="flex flex-wrap gap-3">
+              <Button asChild className="h-11 bg-blue-600 px-5 text-white hover:bg-blue-500">
+                <Link href="/terminal">Open Terminal</Link>
+              </Button>
+              <Button asChild variant="outline" className="h-11 border-[#2b2b2b] bg-transparent px-5 text-gray-200 hover:bg-[#111111] hover:text-white">
+                <Link href="/connections">Manage Connection</Link>
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid gap-4 p-6 md:grid-cols-2 xl:grid-cols-4 lg:p-8">
+          <div className="rounded-3xl border border-[#1f1f1f] bg-[#101010] p-5">
+            <div className="flex items-center justify-between text-xs uppercase tracking-[0.18em] text-gray-500">
+              <span>Terminal Link</span>
+              <Link2 className="size-4 text-blue-300" />
+            </div>
+            <div className="mt-4 text-3xl font-semibold text-white">{activeConnection ? "1" : "0"}</div>
+            <div className="mt-2 text-sm text-gray-400">Single-connection policy enforced for this user.</div>
+          </div>
+
+          <div className="rounded-3xl border border-[#1f1f1f] bg-[#101010] p-5">
+            <div className="flex items-center justify-between text-xs uppercase tracking-[0.18em] text-gray-500">
+              <span>Runtime Status</span>
+              <Network className="size-4 text-emerald-300" />
+            </div>
+            <div className="mt-4">
+              <Badge className={`border ${runtimeTone}`}>
+                {runtimeState}
+              </Badge>
+            </div>
+            <div className="mt-2 text-sm text-gray-400">
+              {latestHeartbeat?.last_seen_at ? `Last heartbeat ${new Date(latestHeartbeat.last_seen_at).toLocaleTimeString()}` : "Waiting for worker heartbeat."}
+            </div>
+          </div>
+
+          <div className="rounded-3xl border border-[#1f1f1f] bg-[#101010] p-5">
+            <div className="flex items-center justify-between text-xs uppercase tracking-[0.18em] text-gray-500">
+              <span>Trades Executed</span>
+              <CheckCircle2 className="size-4 text-emerald-300" />
+            </div>
+            <div className="mt-4 text-3xl font-semibold text-white">{completedTrades || 0}</div>
+            <div className="mt-2 text-sm text-gray-400">Successful trade jobs recorded for this workspace.</div>
+          </div>
+
+          <div className="rounded-3xl border border-[#1f1f1f] bg-[#101010] p-5">
+            <div className="flex items-center justify-between text-xs uppercase tracking-[0.18em] text-gray-500">
+              <span>Queue Pressure</span>
+              <Clock3 className="size-4 text-amber-300" />
+            </div>
+            <div className="mt-4 text-3xl font-semibold text-white">{queuedTrades || 0}</div>
+            <div className="mt-2 text-sm text-gray-400">Queued, claimed, executing, or retry jobs still in flight.</div>
+          </div>
+        </div>
+
+        <div className="grid gap-6 px-6 pb-6 lg:grid-cols-[minmax(0,1.1fr)_360px] lg:px-8 lg:pb-8">
+          <section className="rounded-3xl border border-[#1f1f1f] bg-[#101010] p-5">
+            <div className="flex items-center justify-between gap-3 border-b border-[#1a1a1a] pb-4">
+              <div>
+                <div className="text-xs uppercase tracking-[0.18em] text-gray-500">Primary Account</div>
+                <h2 className="mt-1 text-xl font-semibold text-white">Connection Health</h2>
+              </div>
+              {activeConnection ? (
+                <Badge className="border border-[#2a2a2a] bg-[#111111] text-gray-200 hover:bg-[#111111]">
+                  {activeConnection.account_login} · {activeConnection.broker_server}
+                </Badge>
+              ) : null}
+            </div>
+
+            {activeConnection ? (
+              <div className="mt-5 grid gap-4 md:grid-cols-3">
+                <div className="rounded-2xl border border-[#202020] bg-[#151515] px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Connection</div>
+                  <div className="mt-2 text-sm font-medium text-white">{activeConnection.account_login}</div>
+                  <div className="text-xs text-gray-500">{activeConnection.broker_server}</div>
+                </div>
+                <div className="rounded-2xl border border-[#202020] bg-[#151515] px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Worker Signal</div>
+                  <div className="mt-2 text-sm font-medium text-white">{runtimeState}</div>
+                  <div className="text-xs text-gray-500">{latestHeartbeat ? new Date(latestHeartbeat.last_seen_at).toLocaleString() : "No heartbeat yet"}</div>
+                </div>
+                <div className="rounded-2xl border border-[#202020] bg-[#151515] px-4 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Account Status</div>
+                  <div className="mt-2 text-sm font-medium text-white">{activeConnection.status || "offline"}</div>
+                  <div className="text-xs text-gray-500">Provisioned terminal link</div>
+                </div>
+              </div>
             ) : (
-              <div className="flex items-center justify-center p-8 text-muted-foreground border border-dashed rounded-lg">
-                No workers currently checking in.
+              <div className="mt-5 rounded-2xl border border-dashed border-[#2b2b2b] bg-[#0d0d0d] px-4 py-10 text-center text-sm text-gray-500">
+                No MT5 account is connected. Open Connections to link a terminal before using the command deck.
               </div>
             )}
-          </CardContent>
-        </Card>
-        
-        <Card className="shadow-sm">
-          <CardHeader>
-            <CardTitle>System Events</CardTitle>
-            <CardDescription>Recent runtime logs</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              {events && events.length > 0 ? (
-                events.map(ev => (
-                  <div key={ev.id} className="flex flex-col gap-1 border-b pb-2 last:border-0">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold capitalize bg-muted px-2 py-0.5 rounded">
-                        {ev.component}
+
+            {isStale ? (
+              <div className="mt-4 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                The worker heartbeat is stale. Check the MT5 runtime or reopen the terminal session.
+              </div>
+            ) : null}
+          </section>
+
+          <aside className="rounded-3xl border border-[#1f1f1f] bg-[#101010] p-5">
+            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-gray-500">
+              <AlertTriangle className="size-4 text-amber-300" /> Runtime Events
+            </div>
+            <div className="mt-4 space-y-3">
+              {events.length > 0 ? (
+                events.map((event) => (
+                  <div key={event.id} className="rounded-2xl border border-[#202020] bg-[#151515] px-4 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="rounded-full border border-[#292929] bg-[#111111] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-gray-400">
+                        {event.component}
                       </span>
-                      <span className="text-xs text-muted-foreground">
-                        {new Date(ev.created_at).toLocaleTimeString()}
-                      </span>
+                      <span className="text-[11px] text-gray-500">{new Date(event.created_at).toLocaleTimeString()}</span>
                     </div>
-                    <p className={`text-sm ${ev.level === 'error' ? 'text-destructive font-medium' : ''}`}>
-                      {ev.message}
+                    <p className={`mt-2 text-sm leading-6 ${event.level === "error" ? "text-red-200" : "text-gray-300"}`}>
+                      {event.message}
                     </p>
                   </div>
                 ))
               ) : (
-                <div className="text-sm text-muted-foreground text-center">No recent events.</div>
+                <div className="rounded-2xl border border-dashed border-[#2b2b2b] bg-[#0d0d0d] px-4 py-10 text-center text-sm text-gray-500">
+                  No recent runtime events.
+                </div>
               )}
             </div>
-          </CardContent>
-        </Card>
-      </div>
-    </>
+          </aside>
+        </div>
+      </section>
+    </div>
   );
 }

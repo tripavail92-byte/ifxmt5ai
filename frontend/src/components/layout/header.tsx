@@ -17,14 +17,13 @@ import { createClient } from "@/utils/supabase/client";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
-import { LayoutDashboard, Network, Settings, History, Activity, TrendingUp } from "lucide-react";
+import { LayoutDashboard, Network, History, Activity, TrendingUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const baseNavItems = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Terminal", href: "/terminal", icon: TrendingUp },
   { name: "Connections", href: "/connections", icon: Network },
-  { name: "Strategies", href: "/strategies", icon: Settings },
   { name: "Trade History", href: "/trades", icon: History },
   { name: "System Logs", href: "/logs", icon: Activity },
 ];

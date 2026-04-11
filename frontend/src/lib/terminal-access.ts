@@ -1,5 +1,7 @@
 import { createClient } from "@/utils/supabase/server";
 
+type ServerSupabaseClient = Awaited<ReturnType<typeof createClient>>;
+
 export type TerminalConnectionSummary = {
   id: string;
   broker_server: string;
@@ -22,6 +24,40 @@ export const PUBLIC_TERMINAL_CONNECTION: TerminalConnectionSummary = {
   is_active: true,
 };
 
+export async function enforceSingleActiveConnection(
+  supabase: ServerSupabaseClient,
+  userId: string,
+) {
+  const { data, error } = await supabase
+    .from("mt5_user_connections")
+    .select("id, broker_server, account_login, status, is_active")
+    .eq("user_id", userId)
+    .eq("is_active", true)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to load active MT5 connections: ${error.message}`);
+  }
+
+  const connections = (data ?? []) as TerminalConnectionSummary[];
+  if (connections.length <= 1) {
+    return connections;
+  }
+
+  const staleIds = connections.slice(1).map((connection) => connection.id);
+  const { error: cleanupError } = await supabase
+    .from("mt5_user_connections")
+    .delete()
+    .eq("user_id", userId)
+    .in("id", staleIds);
+
+  if (cleanupError) {
+    console.error("Failed to remove duplicate MT5 connections:", cleanupError);
+  }
+
+  return connections.slice(0, 1);
+}
+
 export async function resolveTerminalAccess(requestedConnId?: string) {
   const supabase = await createClient();
   const {
@@ -41,13 +77,7 @@ export async function resolveTerminalAccess(requestedConnId?: string) {
     };
   }
 
-  const { data } = await supabase
-    .from("mt5_user_connections")
-    .select("id, broker_server, account_login, status, is_active")
-    .eq("is_active", true)
-    .order("created_at", { ascending: true });
-
-  const connections = (data ?? []) as TerminalConnectionSummary[];
+  const connections = await enforceSingleActiveConnection(supabase, user.id);
   const authorized = !requested || connections.some((conn) => conn.id === requested);
 
   return {
