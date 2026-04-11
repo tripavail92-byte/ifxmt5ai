@@ -435,10 +435,10 @@ function stripBrokerSuffix(symbol?: string | null) {
 
 function resolveLiveSymbolMatch(target: string | undefined, candidates: string[]) {
   const normalizedTarget = stripBrokerSuffix(target);
-  if (!normalizedTarget) return target;
+  if (!normalizedTarget) return undefined;
   const exact = candidates.find((sym) => sym === target);
   if (exact) return exact;
-  return candidates.find((sym) => stripBrokerSuffix(sym) === normalizedTarget) ?? target;
+  return candidates.find((sym) => stripBrokerSuffix(sym) === normalizedTarget);
 }
 
 function fmtCurrency(value: number | undefined | null) {
@@ -585,15 +585,16 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     () => resolveLiveSymbolMatch(selectedSymbol || undefined, [...liveQuoteSymbols, ...(liveSymbols ?? [])]),
     [selectedSymbol, liveQuoteSymbols, liveSymbols]
   );
-  const livePrice = resolvedSelectedSymbol ? prices[resolvedSelectedSymbol] : undefined;
+  const displaySymbol = selectedSymbol || resolvedSelectedSymbol || liveQuoteSymbols[0] || liveSymbols[0] || SUBSCRIBED_DEFAULT_SYMBOLS[0];
+  const liveQuoteSymbol = resolvedSelectedSymbol ?? (selectedSymbol && prices[selectedSymbol] ? selectedSymbol : undefined) ?? liveQuoteSymbols[0] ?? liveSymbols[0] ?? displaySymbol;
+  const livePrice = liveQuoteSymbol ? prices[liveQuoteSymbol] : undefined;
   const parsedEntry = parseFloat(entryPrice);
   const validEntry = Number.isFinite(parsedEntry) && parsedEntry > 0;
   const zone = useMemo(
     () => (validEntry ? calcZone(parsedEntry, zonePercent) : null),
     [parsedEntry, validEntry, zonePercent]
   );
-  const displaySymbol = resolvedSelectedSymbol || liveQuoteSymbols[0] || liveSymbols[0] || SUBSCRIBED_DEFAULT_SYMBOLS[0];
-  const activeSymbol = resolvedSelectedSymbol || displaySymbol;
+  const activeSymbol = displaySymbol;
   const aiManagedExecution = stopMode === "ai_dynamic";
   const effectiveStop = useMemo(() => {
     if (!selectedSymbol) return 0;
@@ -1519,7 +1520,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     ...streamSelectableSymbols,
     ...fallbackSelectableSymbols,
   ])];
-  const hasLiveQuoteForSelected = resolvedSelectedSymbol ? Boolean(prices[resolvedSelectedSymbol]) : false;
+  const hasLiveQuoteForSelected = Boolean(
+    (resolvedSelectedSymbol && prices[resolvedSelectedSymbol])
+    || (selectedSymbol && prices[selectedSymbol])
+  );
   const quoteSymbol = activeSymbol;
   const quoteDigits = getDecimals(quoteSymbol);
   const quoteBid = livePrice ? livePrice.bid.toFixed(quoteDigits) : "—";
@@ -1943,7 +1947,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
               <div className="relative">
                 <CandlestickChart
                   symbol={displaySymbol}
-                  liveSymbol={displaySymbol}
+                  liveSymbol={liveQuoteSymbol}
                   connId={selectedConnectionId || undefined}
                   entryPrice={showEntryZones && validEntry ? parsedEntry : undefined}
                   entryZoneLow={showEntryZones && zone ? zone.low : undefined}
@@ -2610,7 +2614,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
           {hydrated && (
             <CandlestickChart
               symbol={displaySymbol}
-              liveSymbol={displaySymbol}
+              liveSymbol={liveQuoteSymbol}
               connId={selectedConnectionId || undefined}
               entryPrice={showEntryZones && validEntry ? parsedEntry : undefined}
               entryZoneLow={showEntryZones && zone ? zone.low : undefined}
