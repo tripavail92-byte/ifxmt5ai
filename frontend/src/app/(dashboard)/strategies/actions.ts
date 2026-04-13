@@ -405,6 +405,10 @@ export async function activateTradeNow(params: {
         bias:         params.bias         ?? null,
         atr_zone_pct: params.atr_zone_pct ?? null,
         sl_pad_mult:  params.sl_pad_mult  ?? null,
+        // Phase 6 AutoRR fields
+        use_auto_rr:  params.use_auto_rr  ?? false,
+        auto_rr1:     params.auto_rr1     ?? 1.0,
+        auto_rr2:     params.auto_rr2     ?? 2.0,
       },
       idempotencyKey: `arm_trade:${params.connection_id}:${setupId}`,
       expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),

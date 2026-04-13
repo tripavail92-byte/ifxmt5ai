@@ -1,7 +1,7 @@
 "use server";
 
 import { createAdminClient } from "@/utils/supabase/admin";
-import { assertConnectionOwnership, enqueueEaCommand, getConnectionExecutionMode, publishEaConfigForConnection, setConnectionExecutionMode } from "@/lib/ea-control-plane";
+import { assertConnectionOwnership, enqueueEaCommand, getConnectionExecutionMode, patchEaConfigVisuals, publishEaConfigForConnection, setConnectionExecutionMode } from "@/lib/ea-control-plane";
 import { createClient } from "@/utils/supabase/server";
 import type { EaExecutionMode } from "@/lib/ea-config";
 import type { PersistedTerminalSettings, TerminalPreferences } from "@/app/terminal/types";
@@ -191,5 +191,29 @@ export async function closeTradeJob(input: {
     return { ok: false as const, reason: error.message };
   }
 
+  return { ok: true as const };
+}
+
+export async function patchEaVisuals(input: {
+  connectionId: string;
+  showStruct: boolean;
+  smcLookback: number;
+}) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) throw new Error("Unauthorized");
+
+  const admin = createAdminClient();
+  await assertConnectionOwnership(admin, user.id, input.connectionId);
+
+  await patchEaConfigVisuals(admin, input.connectionId, {
+    show_struct: input.showStruct,
+    smc_lookback: Math.min(Math.max(Math.round(input.smcLookback), 50), 5000),
+  });
+
+  await publishEaConfigForConnection(admin, input.connectionId);
   return { ok: true as const };
 }

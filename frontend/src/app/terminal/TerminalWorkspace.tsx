@@ -26,7 +26,7 @@ import {
 import { toast } from "sonner";
 
 import { activateTradeNow, placeManualTrade, saveTrackedSetup } from "@/app/(dashboard)/strategies/actions";
-import { closeTradeJob, getConnectionExecutionModeAction, saveConnectionExecutionMode, saveTerminalSettings } from "@/app/terminal/actions";
+import { closeTradeJob, getConnectionExecutionModeAction, patchEaVisuals, saveConnectionExecutionMode, saveTerminalSettings } from "@/app/terminal/actions";
 import type { EaExecutionMode } from "@/lib/ea-config";
 import { CandlestickChart as CandlestickChartType } from "@/components/chart/CandlestickChart";
 import { Badge } from "@/components/ui/badge";
@@ -2024,12 +2024,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                         if (!selectedConnectionId) return;
                         setVisualsSaving(true);
                         try {
-                          const res = await fetch(`/api/ea/config?connection_id=${encodeURIComponent(selectedConnectionId)}`, {
-                            method: "PATCH",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ visuals: { show_struct: showStruct, smc_lookback: smcLookback } }),
-                          });
-                          if (!res.ok) throw new Error((await res.json() as { error?: string }).error ?? "Failed to save");
+                          await patchEaVisuals({ connectionId: selectedConnectionId, showStruct, smcLookback });
                           toast.success("EA visuals saved");
                         } catch (err) {
                           toast.error(err instanceof Error ? err.message : "Failed to save visuals");
