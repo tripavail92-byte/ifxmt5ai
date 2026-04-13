@@ -31,6 +31,9 @@ export interface LivePriceSnapshot {
 export interface CandlestickChartProps {
   sl?: number;
   tp?: number;
+  tp1?: number;
+  tp2?: number;
+  invalidation?: number;
   entryPrice?: number;
   entryZoneLow?: number;
   entryZoneHigh?: number;
@@ -199,6 +202,9 @@ function resetViewport(chart: IChartApi | null, barCount = 0) {
 export function CandlestickChart({
   sl,
   tp,
+  tp1,
+  tp2,
+  invalidation,
   entryPrice,
   entryZoneLow,
   entryZoneHigh,
@@ -215,6 +221,9 @@ export function CandlestickChart({
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const slLineRef = useRef<IPriceLine | null>(null);
   const tpLineRef = useRef<IPriceLine | null>(null);
+  const tp1LineRef = useRef<IPriceLine | null>(null);
+  const tp2LineRef = useRef<IPriceLine | null>(null);
+  const invalLineRef = useRef<IPriceLine | null>(null);
   const entryLineRef = useRef<IPriceLine | null>(null);
   const entryBandRef = useRef<ISeriesApi<"Baseline"> | null>(null);
   // ── Indicator series refs ────────────────────────────────────────────────
@@ -517,6 +526,9 @@ export function CandlestickChart({
       seriesRef.current = null;
       slLineRef.current = null;
       tpLineRef.current = null;
+      tp1LineRef.current = null;
+      tp2LineRef.current = null;
+      invalLineRef.current = null;
       entryLineRef.current = null;
       entryBandRef.current = null;
       ema9SeriesRef.current = null;
@@ -725,6 +737,54 @@ export function CandlestickChart({
       });
     }
   }, [tp]);
+
+  useEffect(() => {
+    const s = seriesRef.current;
+    if (!s) return;
+    if (tp1LineRef.current) { s.removePriceLine(tp1LineRef.current); tp1LineRef.current = null; }
+    if (tp1 && tp1 > 0) {
+      tp1LineRef.current = s.createPriceLine({
+        price: tp1,
+        color: "#22c55e",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: "TP1",
+      });
+    }
+  }, [tp1]);
+
+  useEffect(() => {
+    const s = seriesRef.current;
+    if (!s) return;
+    if (tp2LineRef.current) { s.removePriceLine(tp2LineRef.current); tp2LineRef.current = null; }
+    if (tp2 && tp2 > 0) {
+      tp2LineRef.current = s.createPriceLine({
+        price: tp2,
+        color: "#16a34a",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: "TP2",
+      });
+    }
+  }, [tp2]);
+
+  useEffect(() => {
+    const s = seriesRef.current;
+    if (!s) return;
+    if (invalLineRef.current) { s.removePriceLine(invalLineRef.current); invalLineRef.current = null; }
+    if (invalidation && invalidation > 0) {
+      invalLineRef.current = s.createPriceLine({
+        price: invalidation,
+        color: "#f87171",
+        lineWidth: 1,
+        lineStyle: LineStyle.Dotted,
+        axisLabelVisible: true,
+        title: "Inval",
+      });
+    }
+  }, [invalidation]);
 
   useEffect(() => {
     const s = seriesRef.current;

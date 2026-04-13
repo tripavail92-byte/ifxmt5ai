@@ -554,6 +554,13 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
   const [tp2, setTp2] = useState<string>("");
   const [atrZonePct, setAtrZonePct] = useState<number>(ZONE_DEFAULT_FALLBACK);
   const [slPadMult, setSlPadMult] = useState<number>(2.0);
+  const [useAutoRR, setUseAutoRR] = useState(false);
+  const [autoRR1, setAutoRR1] = useState<number>(1.0);
+  const [autoRR2, setAutoRR2] = useState<number>(2.0);
+  const [aiText, setAiText] = useState<string>("");
+  const [showStruct, setShowStruct] = useState(false);
+  const [smcLookback, setSmcLookback] = useState(400);
+  const [visualsSaving, setVisualsSaving] = useState(false);
   const [showEntryZones, setShowEntryZones] = useState(true);
   const [showTPZones, setShowTPZones] = useState(true);
   const [stopMode, setStopMode] = useState<StopMode>("manual");
@@ -1165,6 +1172,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       setTp2(setup.tp2 != null ? String(setup.tp2) : "");
       setAtrZonePct(Number(setup.atr_zone_pct ?? setup.zone_percent) || getZoneDefault(selectedSymbol));
       setSlPadMult(Number(setup.sl_pad_mult) || 2.0);
+      setUseAutoRR(false);
+      setAutoRR1(1.0);
+      setAutoRR2(2.0);
+      setAiText("");
       setAiSensitivity(Number(setup.ai_sensitivity ?? 5));
       setActiveSetupState((setup.state as SetupState | undefined) ?? null);
       return;
@@ -1501,10 +1512,13 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
         ai_sensitivity: aiSensitivity,
         setup_id: setupIdsBySymbol[selectedSymbol] ?? null,
         pivot: parsedEntry,
-        tp1: parseFloat(tp1) || null,
-        tp2: parseFloat(tp2) || null,
+        tp1: useAutoRR ? null : (parseFloat(tp1) || null),
+        tp2: useAutoRR ? null : (parseFloat(tp2) || null),
         atr_zone_pct: atrZonePct,
         sl_pad_mult: slPadMult,
+        use_auto_rr: useAutoRR,
+        auto_rr1: useAutoRR ? autoRR1 : null,
+        auto_rr2: useAutoRR ? autoRR2 : null,
       });
 
       const nextSetup: SetupRow = {
@@ -1577,10 +1591,13 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
         trade_plan_notes: tradePlanNotes,
         setup_id: setupIdsBySymbol[selectedSymbol] ?? null,
         pivot: parsedEntry,
-        tp1: parseFloat(tp1) || null,
-        tp2: parseFloat(tp2) || null,
+        tp1: useAutoRR ? null : (parseFloat(tp1) || null),
+        tp2: useAutoRR ? null : (parseFloat(tp2) || null),
         atr_zone_pct: atrZonePct,
         sl_pad_mult: slPadMult,
+        use_auto_rr: useAutoRR,
+        auto_rr1: useAutoRR ? autoRR1 : null,
+        auto_rr2: useAutoRR ? autoRR2 : null,
       });
       setSetupIdsBySymbol((prev) => ({ ...prev, [selectedSymbol]: setupId }));
       setTradeNowBySymbol((prev) => ({ ...prev, [selectedSymbol]: true }));
@@ -1900,6 +1917,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                   />
                 </div>
 
+                {!useAutoRR && (
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">TP1</Label>
@@ -1910,6 +1928,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                     <Input type="number" step="any" value={tp2} onChange={(e) => setTp2(e.target.value)} placeholder="0.00000" className="h-10 border-[#2b2b2b] bg-[#0f0f0f] text-white" />
                   </div>
                 </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-2">
                   <div>
@@ -1921,6 +1940,108 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                     <Input type="number" step="0.1" value={slPadMult} onChange={(e) => setSlPadMult(parseFloat(e.target.value) || 0)} className="h-10 border-[#2b2b2b] bg-[#0f0f0f] text-white" />
                   </div>
                 </div>
+
+                {/* Auto R:R toggle */}
+                <label className="flex items-center justify-between rounded-lg border border-[#232323] bg-[#111] px-3 py-2 text-xs text-gray-300 cursor-pointer">
+                  <span>Auto R:R (hide manual TP)</span>
+                  <input type="checkbox" checked={useAutoRR} onChange={(e) => setUseAutoRR(e.target.checked)} className="accent-purple-500" />
+                </label>
+
+                {useAutoRR && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">RR1 ×</Label>
+                      <Input type="number" step="0.1" min="0.1" value={autoRR1} onChange={(e) => setAutoRR1(parseFloat(e.target.value) || 1)} className="h-10 border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+                    </div>
+                    <div>
+                      <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">RR2 ×</Label>
+                      <Input type="number" step="0.1" min="0.1" value={autoRR2} onChange={(e) => setAutoRR2(parseFloat(e.target.value) || 2)} className="h-10 border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+                    </div>
+                  </div>
+                )}
+
+                {/* AI Brain */}
+                <details className="rounded-lg border border-[#232323] bg-[#111]">
+                  <summary className="cursor-pointer px-3 py-2 text-[11px] uppercase tracking-wide text-gray-500 select-none">AI Brain — paste analysis</summary>
+                  <div className="px-3 pb-3 pt-1 space-y-2">
+                    <textarea
+                      rows={4}
+                      value={aiText}
+                      onChange={(e) => setAiText(e.target.value)}
+                      placeholder={"BIAS: Long\nPIVOT: 2650.5\nTP1: 2680\nTP2: 2720"}
+                      className="w-full rounded border border-[#2b2b2b] bg-[#0c0c0c] px-2 py-1.5 text-[11px] font-mono text-gray-200 focus:outline-none focus:border-blue-500/40 resize-none"
+                    />
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="h-7 w-full bg-purple-600/80 text-white hover:bg-purple-500 text-[11px]"
+                      onClick={() => {
+                        const text = aiText;
+                        const extract = (labels: string[]): number | null => {
+                          for (const lbl of labels) {
+                            const m = new RegExp(`${lbl}[:\\s]+([\\d.]+)`, "i").exec(text);
+                            if (m) return parseFloat(m[1]);
+                          }
+                          return null;
+                        };
+                        const biasM = /BIAS[:\s]+(Long|Short|Buy|Sell|Neutral)/i.exec(text);
+                        if (biasM) {
+                          const b = biasM[1].toLowerCase();
+                          if (b === "long" || b === "buy") setSide("buy");
+                          else if (b === "short" || b === "sell") setSide("sell");
+                        }
+                        const pv = extract(["PIVOT", "ENTRY"]);
+                        if (pv) setPivot(String(pv));
+                        const t1 = extract(["TP1", "TARGET 1", "TARGET1"]);
+                        if (t1) setTp1(String(t1));
+                        const t2 = extract(["TP2", "TARGET 2", "TARGET2"]);
+                        if (t2) setTp2(String(t2));
+                      }}
+                    >
+                      Parse &amp; Apply
+                    </Button>
+                  </div>
+                </details>
+
+                {/* EA Visuals */}
+                <details className="rounded-lg border border-[#232323] bg-[#111]">
+                  <summary className="cursor-pointer px-3 py-2 text-[11px] uppercase tracking-wide text-gray-500 select-none">EA Visuals</summary>
+                  <div className="px-3 pb-3 pt-2 space-y-3">
+                    <label className="flex items-center justify-between text-xs text-gray-300 cursor-pointer">
+                      <span>Show SMC Structure lines</span>
+                      <input type="checkbox" checked={showStruct} onChange={(e) => setShowStruct(e.target.checked)} className="accent-blue-500" />
+                    </label>
+                    <div>
+                      <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">SMC Lookback (candles)</Label>
+                      <Input type="number" step="50" min="50" max="5000" value={smcLookback} onChange={(e) => setSmcLookback(parseInt(e.target.value) || 400)} className="h-9 border-[#2b2b2b] bg-[#0c0c0c] text-white" />
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={visualsSaving || !selectedConnectionId}
+                      className="h-8 w-full bg-blue-700/80 text-white hover:bg-blue-600 text-[11px] disabled:opacity-40"
+                      onClick={async () => {
+                        if (!selectedConnectionId) return;
+                        setVisualsSaving(true);
+                        try {
+                          const res = await fetch(`/api/ea/config?connection_id=${encodeURIComponent(selectedConnectionId)}`, {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ visuals: { show_struct: showStruct, smc_lookback: smcLookback } }),
+                          });
+                          if (!res.ok) throw new Error((await res.json() as { error?: string }).error ?? "Failed to save");
+                          toast.success("EA visuals saved");
+                        } catch (err) {
+                          toast.error(err instanceof Error ? err.message : "Failed to save visuals");
+                        } finally {
+                          setVisualsSaving(false);
+                        }
+                      }}
+                    >
+                      {visualsSaving ? "Saving…" : "Save to EA"}
+                    </Button>
+                  </div>
+                </details>
 
                 {zone && (
                   <div className="space-y-1 rounded-lg bg-[#0f0f0f] p-3 text-xs">
@@ -2194,6 +2315,9 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                   entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
                   sl={showEntryZones && !aiManagedExecution ? slValue : undefined}
                   tp={showTPZones && !aiManagedExecution ? effectiveTakeProfit : undefined}
+                  tp1={showTPZones && !useAutoRR && parseFloat(tp1) > 0 ? parseFloat(tp1) : undefined}
+                  tp2={showTPZones && !useAutoRR && parseFloat(tp2) > 0 ? parseFloat(tp2) : undefined}
+                  invalidation={zone ? (side === "buy" ? zone.low : zone.high) : undefined}
                   prices={prices}
                   forming={forming}
                   lastClose={lastClose}
@@ -2903,6 +3027,9 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
               entryZoneHigh={showEntryZones && zone ? zone.high : undefined}
               sl={showEntryZones && !aiManagedExecution ? slValue : undefined}
               tp={showTPZones && !aiManagedExecution ? effectiveTakeProfit : undefined}
+              tp1={showTPZones && !useAutoRR && parseFloat(tp1) > 0 ? parseFloat(tp1) : undefined}
+              tp2={showTPZones && !useAutoRR && parseFloat(tp2) > 0 ? parseFloat(tp2) : undefined}
+              invalidation={zone ? (side === "buy" ? zone.low : zone.high) : undefined}
               prices={prices}
               forming={forming}
               lastClose={lastClose}

@@ -521,6 +521,57 @@ export async function setConnectionExecutionMode(admin: AdminClient, connectionI
   return { changed: true, row: (data ?? [])[0] ?? null };
 }
 
+export async function patchEaConfigVisuals(
+  admin: AdminClient,
+  connectionId: string,
+  patch: { show_struct?: boolean; smc_lookback?: number },
+) {
+  const current = await ensureActiveConfig(admin, connectionId);
+  const normalizedCurrent = normalizeEaConfig(current.config_json, connectionId, {
+    publishedAt: String(current.created_at ?? isoNow()),
+  });
+
+  const now = isoNow();
+  const nextVersion = Number(current.version ?? 0) + 1;
+  const nextConfig = {
+    ...normalizedCurrent,
+    meta: { ...normalizedCurrent.meta, published_at: now, migration_source: "visuals-patch" },
+    visuals: {
+      ...normalizedCurrent.visuals,
+      ...(patch.show_struct !== undefined ? { show_struct: patch.show_struct } : {}),
+      ...(patch.smc_lookback !== undefined ? { smc_lookback: patch.smc_lookback } : {}),
+    },
+  };
+
+  const { error: deactivateError } = await admin
+    .from("ea_user_configs")
+    .update({ is_active: false, updated_at: now })
+    .eq("id", current.id);
+
+  if (deactivateError) {
+    throw new Error(`Failed to retire previous EA config: ${deactivateError.message}`);
+  }
+
+  const { data, error } = await admin
+    .from("ea_user_configs")
+    .insert({
+      connection_id: connectionId,
+      version: nextVersion,
+      config_json: nextConfig,
+      is_active: true,
+      created_at: now,
+      updated_at: now,
+    })
+    .select("id, connection_id, version, config_json, is_active, created_at")
+    .limit(1);
+
+  if (error) {
+    throw new Error(`Failed to patch EA visuals config: ${error.message}`);
+  }
+
+  return { changed: true, row: (data ?? [])[0] ?? null };
+}
+
 export async function enqueueEaCommand(
   admin: AdminClient,
   input: {

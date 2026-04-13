@@ -166,6 +166,9 @@ export async function saveTrackedSetup(params: {
   bias?: string | null;
   atr_zone_pct?: number | null;
   sl_pad_mult?: number | null;
+  use_auto_rr?: boolean | null;
+  auto_rr1?: number | null;
+  auto_rr2?: number | null;
 }): Promise<string> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -208,6 +211,9 @@ export async function saveTrackedSetup(params: {
   if (params.bias != null)         v930Patch.bias         = params.bias;
   if (params.atr_zone_pct != null) v930Patch.atr_zone_pct = params.atr_zone_pct;
   if (params.sl_pad_mult != null)  v930Patch.sl_pad_mult  = params.sl_pad_mult;
+  if (params.use_auto_rr != null)  v930Patch.use_auto_rr  = params.use_auto_rr;
+  if (params.auto_rr1 != null)     v930Patch.auto_rr1     = params.auto_rr1;
+  if (params.auto_rr2 != null)     v930Patch.auto_rr2     = params.auto_rr2;
 
   if (Object.keys(v930Patch).length > 0) {
     const service = createServiceClient(
@@ -319,6 +325,9 @@ export async function activateTradeNow(params: {
   bias?: string | null;
   atr_zone_pct?: number | null;
   sl_pad_mult?: number | null;
+  use_auto_rr?: boolean | null;
+  auto_rr1?: number | null;
+  auto_rr2?: number | null;
 }): Promise<string> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -353,6 +362,9 @@ export async function activateTradeNow(params: {
   if (params.bias != null)         v930Patch.bias         = params.bias;
   if (params.atr_zone_pct != null) v930Patch.atr_zone_pct = params.atr_zone_pct;
   if (params.sl_pad_mult != null)  v930Patch.sl_pad_mult  = params.sl_pad_mult;
+  if (params.use_auto_rr != null)  v930Patch.use_auto_rr  = params.use_auto_rr;
+  if (params.auto_rr1 != null)     v930Patch.auto_rr1     = params.auto_rr1;
+  if (params.auto_rr2 != null)     v930Patch.auto_rr2     = params.auto_rr2;
 
   if (Object.keys(v930Patch).length > 0) {
     const serviceV930 = createServiceClient(
