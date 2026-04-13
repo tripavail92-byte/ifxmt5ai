@@ -13,9 +13,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const MAX_SERVER_PRICE_AGE_MS = 2_000;
+const SELECTED_SYMBOL_MAX_AGE_MS = 1_500;
 const STREAM_STALE_MS = 3_500;
 const HEALTHY_POLL_MS = 3_000;
 const DEGRADED_POLL_MS = 500;
+const SELECTED_SYMBOL_POLL_MS = 750;
 const RECONNECT_GRACE_MS = 750;
 
 // ─── Types (mirror CandleBar / PriceSnapshot from mt5-state.ts) ───────────────
@@ -51,7 +53,7 @@ export interface PriceFeedState {
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
-export function usePriceFeed(connId?: string): PriceFeedState {
+export function usePriceFeed(connId?: string, selectedSymbol?: string): PriceFeedState {
   const [state, setState] = useState<PriceFeedState>({
     prices:      {},
     forming:     {},
@@ -68,7 +70,9 @@ export function usePriceFeed(connId?: string): PriceFeedState {
   const pingRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const connectRef = useRef<() => void>(() => {});
   const pollPricesRef = useRef<() => Promise<void>>(async () => {});
-  const lastEventAtRef = useRef<number>(0);
+  const pricesRef = useRef<Record<string, PriceSnapshot>>({});
+  const lastTransportEventAtRef = useRef<number>(0);
+  const lastPriceEventAtRef = useRef<number>(0);
   const mountedRef = useRef(true);
   const reconnectSeqRef = useRef(0);
   const stalePollsRef = useRef(0);
@@ -98,6 +102,11 @@ export function usePriceFeed(connId?: string): PriceFeedState {
     }
     return merged;
   }, []);
+
+  const selectedPriceTs = useCallback((prices?: Record<string, PriceSnapshot>) => {
+    if (!selectedSymbol) return 0;
+    return prices?.[selectedSymbol]?.ts_ms ?? 0;
+  }, [selectedSymbol]);
 
   const acceptsConn = useCallback((eventConnId?: string | null) => {
     if (!connId) return true;
@@ -145,7 +154,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       if (!mountedRef.current) return;
       backoffRef.current = 1_000;
       stalePollsRef.current = 0;
-      lastEventAtRef.current = Date.now();
+      lastTransportEventAtRef.current = Date.now();
       setState(s => ({ ...s, isConnected: true, transportMode: "ws" }));
       clearPingTimer();
       pingRef.current = setInterval(() => {
@@ -194,9 +203,11 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         };
 
         if (d.type !== "pong" && !acceptsConn(d.connection_id)) return;
-        lastEventAtRef.current = Date.now();
+        lastTransportEventAtRef.current = Date.now();
 
         if (d.type === "init") {
+          const newest = newestTs(d.prices);
+          if (newest > 0) lastPriceEventAtRef.current = Math.max(lastPriceEventAtRef.current, newest);
           setState(s => ({
             ...s,
             isConnected: true,
@@ -209,6 +220,8 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         }
 
         if (d.type === "prices") {
+          const newest = newestTs(d.prices);
+          if (newest > 0) lastPriceEventAtRef.current = Math.max(lastPriceEventAtRef.current, newest);
           setState(s => ({
             ...s,
             isConnected: true,
@@ -268,7 +281,14 @@ export function usePriceFeed(connId?: string): PriceFeedState {
 
   const pollPrices = useCallback(async () => {
     try {
-      const qs = connId ? `?conn_id=${encodeURIComponent(connId)}` : "";
+      const currentPrices = pricesRef.current;
+      const selectedTs = selectedPriceTs(currentPrices);
+      const selectedQuoteIsStale = Boolean(selectedSymbol)
+        && (!selectedTs || (Date.now() - selectedTs) > SELECTED_SYMBOL_MAX_AGE_MS);
+      const search = new URLSearchParams();
+      if (connId) search.set("conn_id", connId);
+      if (selectedQuoteIsStale && selectedSymbol) search.set("symbol", selectedSymbol);
+      const qs = search.toString() ? `?${search.toString()}` : "";
       const resp = await fetch(`/api/prices${qs}`, { cache: "no-store" });
       const data = resp.ok ? await resp.json() as {
         prices?: Record<string, PriceSnapshot>;
@@ -277,24 +297,31 @@ export function usePriceFeed(connId?: string): PriceFeedState {
 
       const serverNewest = newestTs(data?.prices);
       const serverIsStale = !serverNewest || (Date.now() - serverNewest) > MAX_SERVER_PRICE_AGE_MS;
-      const eventAge = Date.now() - lastEventAtRef.current;
-      const streamHealthy = Boolean(wsRef.current && wsRef.current.readyState === WebSocket.OPEN) && eventAge <= STREAM_STALE_MS;
+      const transportAge = Date.now() - lastTransportEventAtRef.current;
+      const streamHealthy = Boolean(wsRef.current && wsRef.current.readyState === WebSocket.OPEN) && transportAge <= STREAM_STALE_MS;
 
       if (!mountedRef.current) return;
 
       if (data?.prices && Object.keys(data.prices).length > 0) {
         const newest = newestTs(data.prices);
         if (newest > 0) {
-          lastEventAtRef.current = Math.max(lastEventAtRef.current, newest);
+          lastPriceEventAtRef.current = Math.max(lastPriceEventAtRef.current, newest);
         }
-        setState(s => ({
-          ...s,
-          prices: mergeFresherPrices(s.prices, data.prices),
-          symbols: data.symbols?.length ? data.symbols : s.symbols,
-          isConnected: true,
-          transportMode: streamHealthy ? "ws" : "polling",
-        }));
+        setState(s => {
+          const mergedPrices = mergeFresherPrices(s.prices, data.prices);
+          return {
+            ...s,
+            prices: mergedPrices,
+            symbols: data.symbols?.length ? data.symbols : s.symbols,
+            isConnected: true,
+            transportMode: streamHealthy ? "ws" : "polling",
+          };
+        });
       }
+
+      const quoteTs = Math.max(lastPriceEventAtRef.current, selectedPriceTs(data?.prices), selectedPriceTs(currentPrices));
+      const quoteIsStale = Boolean(selectedSymbol)
+        && (!quoteTs || (Date.now() - quoteTs) > SELECTED_SYMBOL_MAX_AGE_MS);
 
       if (streamHealthy) {
         stalePollsRef.current = 0;
@@ -306,19 +333,29 @@ export function usePriceFeed(connId?: string): PriceFeedState {
         }
       }
 
-      schedulePoll(streamHealthy && !serverIsStale ? HEALTHY_POLL_MS : DEGRADED_POLL_MS, () => {
+      const nextPollMs = quoteIsStale
+        ? SELECTED_SYMBOL_POLL_MS
+        : streamHealthy && !serverIsStale
+          ? HEALTHY_POLL_MS
+          : DEGRADED_POLL_MS;
+
+      schedulePoll(nextPollMs, () => {
         void pollPricesRef.current();
       });
     } catch {
-      const eventAge = Date.now() - lastEventAtRef.current;
-      if (eventAge > STREAM_STALE_MS) {
+      const transportAge = Date.now() - lastTransportEventAtRef.current;
+      if (transportAge > STREAM_STALE_MS) {
         refreshStream();
       }
       schedulePoll(DEGRADED_POLL_MS, () => {
         void pollPricesRef.current();
       });
     }
-  }, [connId, mergeFresherPrices, newestTs, refreshStream, schedulePoll]);
+  }, [connId, mergeFresherPrices, newestTs, refreshStream, schedulePoll, selectedPriceTs, selectedSymbol]);
+
+  useEffect(() => {
+    pricesRef.current = state.prices;
+  }, [state.prices]);
 
   useEffect(() => {
     connectRef.current = connect;
@@ -337,12 +374,22 @@ export function usePriceFeed(connId?: string): PriceFeedState {
       isConnected: false,
       transportMode: "connecting",
     });
-    lastEventAtRef.current = Date.now();
+    pricesRef.current = {};
+    lastTransportEventAtRef.current = Date.now();
+    lastPriceEventAtRef.current = 0;
   }, [connId]);
 
   useEffect(() => {
+    if (!mountedRef.current) return;
+    schedulePoll(0, () => {
+      void pollPricesRef.current();
+    });
+  }, [schedulePoll, selectedSymbol]);
+
+  useEffect(() => {
     mountedRef.current = true;
-    lastEventAtRef.current = Date.now();
+    lastTransportEventAtRef.current = Date.now();
+    lastPriceEventAtRef.current = 0;
     stalePollsRef.current = 0;
     connect();
     schedulePoll(DEGRADED_POLL_MS, () => {
@@ -361,7 +408,7 @@ export function usePriceFeed(connId?: string): PriceFeedState {
   useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState !== "visible") return;
-      if ((Date.now() - lastEventAtRef.current) > STREAM_STALE_MS) {
+      if ((Date.now() - lastTransportEventAtRef.current) > STREAM_STALE_MS) {
         refreshStream();
         schedulePoll(DEGRADED_POLL_MS, () => {
           void pollPrices();
