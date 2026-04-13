@@ -1,8 +1,10 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { createAdminClient } from "@/utils/supabase/admin";
 import { createClient } from "@/utils/supabase/server";
 import { createClient as createServiceClient } from "@supabase/supabase-js";
+import { assertConnectionOwnership, enqueueEaCommand, getConnectionExecutionMode, publishEaConfigForConnection } from "@/lib/ea-control-plane";
 
 const TERMINAL_TERMS_VERSION = "2026-03-28-v1";
 
@@ -141,7 +143,58 @@ export async function saveStrategy(formData: FormData) {
   );
 
   if (error) throw new Error("Failed to save strategy. Check logs.");
+  const admin = createAdminClient();
+  await assertConnectionOwnership(admin, user.id, connection_id);
+  await publishEaConfigForConnection(admin, connection_id);
   revalidatePath("/strategies");
+}
+
+export async function saveTrackedSetup(params: {
+  connection_id: string;
+  symbol: string;
+  side: string;
+  entry_price: number;
+  zone_percent: number;
+  timeframe: string;
+  ai_sensitivity: number;
+  trade_plan_notes?: string | null;
+  setup_id?: string | null;
+}): Promise<string> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("Unauthorized");
+
+  const payloadV2 = {
+    p_user_id: user.id,
+    p_connection_id: params.connection_id,
+    p_symbol: params.symbol,
+    p_side: params.side,
+    p_entry_price: params.entry_price,
+    p_zone_percent: params.zone_percent,
+    p_timeframe: params.timeframe,
+    p_ai_sensitivity: params.ai_sensitivity,
+    p_notes: params.trade_plan_notes ?? null,
+    p_setup_id: params.setup_id ?? null,
+  };
+
+  let { data: newId, error: upsertErr } = await supabase.rpc("upsert_trading_setup", payloadV2);
+  if (upsertErr) {
+    const msg = String((upsertErr as { message?: unknown })?.message ?? upsertErr);
+    if (msg.toLowerCase().includes("p_ai_sensitivity") || msg.toLowerCase().includes("p_notes") || msg.toLowerCase().includes("function")) {
+      const payloadV1 = { ...payloadV2 } as Record<string, unknown>;
+      delete payloadV1.p_ai_sensitivity;
+      delete payloadV1.p_notes;
+      ({ data: newId, error: upsertErr } = await supabase.rpc("upsert_trading_setup", payloadV1));
+    }
+  }
+
+  if (upsertErr) throw new Error(upsertErr.message);
+
+  const admin = createAdminClient();
+  await assertConnectionOwnership(admin, user.id, params.connection_id);
+  await publishEaConfigForConnection(admin, params.connection_id);
+
+  return String(newId);
 }
 
 export async function placeManualTrade(formData: FormData) {
@@ -161,6 +214,10 @@ export async function placeManualTrade(formData: FormData) {
     throw new Error("Missing required fields.");
   }
 
+  const admin = createAdminClient();
+  await assertConnectionOwnership(admin, user.id, connection_id);
+  const executionMode = await getConnectionExecutionMode(admin, connection_id);
+
   // Verify this connection belongs to the current user (via RLS)
   const { data: conn } = await supabase
     .from("mt5_user_connections")
@@ -170,6 +227,29 @@ export async function placeManualTrade(formData: FormData) {
   if (!conn) throw new Error("Connection not found or not authorized.");
 
   await enforceTerminalExecutionGuards(supabase, user.id, connection_id, volume);
+
+  if (executionMode === "ea-first") {
+    await enqueueEaCommand(admin, {
+      connectionId: connection_id,
+      userId: user.id,
+      commandType: "manual_trade",
+      payloadJson: {
+        symbol,
+        side,
+        volume,
+        sl: isNaN(sl_raw) ? null : sl_raw,
+        tp: isNaN(tp_raw) ? null : tp_raw,
+        comment: comment || null,
+      },
+      idempotencyKey: `${connection_id}:manual_trade:${symbol}:${Date.now()}`,
+      expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    });
+
+    revalidatePath("/trades");
+    revalidatePath("/strategies");
+    return;
+  }
+
   const service = createServiceClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -212,6 +292,10 @@ export async function activateTradeNow(params: {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error("Unauthorized");
 
+  const admin = createAdminClient();
+  await assertConnectionOwnership(admin, user.id, params.connection_id);
+  const executionMode = await getConnectionExecutionMode(admin, params.connection_id);
+
   // 1. Upsert (or create) the trading setup row
   const { data: newId, error: upsertErr } = await supabase.rpc("upsert_trading_setup", {
     p_user_id:        user.id,
@@ -237,6 +321,31 @@ export async function activateTradeNow(params: {
   if (!conn) throw new Error("Connection not found or not authorized.");
 
   await enforceTerminalExecutionGuards(supabase, user.id, params.connection_id);
+  await publishEaConfigForConnection(admin, params.connection_id);
+
+  if (executionMode === "ea-first") {
+    await enqueueEaCommand(admin, {
+      connectionId: params.connection_id,
+      userId: user.id,
+      commandType: "arm_trade",
+      payloadJson: {
+        setup_id: setupId,
+        symbol: params.symbol,
+        side: params.side,
+        entry_price: params.entry_price,
+        zone_percent: params.zone_percent,
+        timeframe: params.timeframe,
+        ai_sensitivity: params.ai_sensitivity,
+        trade_plan_notes: params.trade_plan_notes ?? null,
+      },
+      idempotencyKey: `arm_trade:${params.connection_id}:${setupId}`,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
+    });
+
+    revalidatePath("/strategies");
+    revalidatePath("/trades");
+    return setupId;
+  }
 
   // 2. Arm the Trade Now flag using service role (bypasses RLS on the update)
   const service = createServiceClient(

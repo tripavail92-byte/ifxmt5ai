@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { buildDefaultEaConfig, normalizeEaConfig, type EaExecutionMode } from "@/lib/ea-config";
 import { createAdminClient } from "@/utils/supabase/admin";
 
 type JsonMap = Record<string, unknown>;
@@ -10,6 +11,15 @@ const DEFAULT_RELEASE_CHANNEL = (process.env.IFX_EA_RELEASE_CHANNEL ?? "stable")
 const DEFAULT_EA_VERSION = (process.env.IFX_EA_RELEASE_VERSION ?? "dev-local").trim() || "dev-local";
 const DEFAULT_EA_ARTIFACT_URL = (process.env.IFX_EA_ARTIFACT_URL ?? "").trim();
 const DEFAULT_EA_SHA256 = (process.env.IFX_EA_RELEASE_SHA256 ?? "").trim();
+
+export type EaCommandType =
+  | "manual_trade"
+  | "close_position"
+  | "arm_trade"
+  | "cancel_trade"
+  | "sync_config"
+  | "set_bias"
+  | "set_setup";
 
 function secureEquals(left: string, right: string) {
   const leftBytes = Buffer.from(left);
@@ -158,45 +168,6 @@ export async function pickProvisioningHost(admin: AdminClient) {
   }) ?? null;
 }
 
-export function buildDefaultEaConfig(connectionId: string): JsonMap {
-  const symbols = (process.env.IFX_DEFAULT_ACTIVE_SYMBOLS
-    ?? "EURUSDm,XAUUSDm,USDJPYm,AUDUSDm,USOILm,GBPUSDm")
-    .split(",")
-    .map((symbol) => symbol.trim())
-    .filter(Boolean);
-
-  return {
-    connection_id: connectionId,
-    trade_enabled: false,
-    symbols,
-    structure: {
-      timeframe: "5m",
-      pivot_window: 2,
-      bars_to_scan: 120,
-      mode: "fractal",
-    },
-    risk: {
-      risk_percent: 1,
-      max_open_trades: 1,
-      max_daily_loss_usd: 0,
-      max_daily_trades: 3,
-    },
-    execution: {
-      allow_market_orders: true,
-      allow_pending_orders: true,
-      sl_mode: "structure",
-      tp_mode: "rr",
-      rr_target: 2,
-      break_even_enabled: false,
-      trailing_enabled: false,
-    },
-    telemetry: {
-      heartbeat_sec: 30,
-      config_poll_sec: 30,
-    },
-  };
-}
-
 export async function ensureActiveConfig(admin: AdminClient, connectionId: string) {
   const { data, error } = await admin
     .from("ea_user_configs")
@@ -216,12 +187,23 @@ export async function ensureActiveConfig(admin: AdminClient, connectionId: strin
   }
 
   const now = isoNow();
+  const symbols = (process.env.IFX_DEFAULT_ACTIVE_SYMBOLS
+    ?? "EURUSDm,XAUUSDm,USDJPYm,AUDUSDm,USOILm,GBPUSDm")
+    .split(",")
+    .map((symbol) => symbol.trim())
+    .filter(Boolean);
   const { data: inserted, error: insertError } = await admin
     .from("ea_user_configs")
     .insert({
       connection_id: connectionId,
       version: 1,
-      config_json: buildDefaultEaConfig(connectionId),
+      config_json: buildDefaultEaConfig(connectionId, {
+        activeSymbols: symbols,
+        releaseChannel: DEFAULT_RELEASE_CHANNEL,
+        expectedEaVersion: DEFAULT_EA_VERSION,
+        publishedAt: now,
+        migrationSource: "default-bootstrap",
+      }),
       is_active: true,
       created_at: now,
       updated_at: now,
@@ -234,6 +216,357 @@ export async function ensureActiveConfig(admin: AdminClient, connectionId: strin
   }
 
   return (inserted ?? [])[0];
+}
+
+async function loadActiveAssignment(admin: AdminClient, connectionId: string) {
+  const { data, error } = await admin
+    .from("terminal_assignments")
+    .select("id, release_channel, status, assigned_at")
+    .eq("connection_id", connectionId)
+    .order("assigned_at", { ascending: false })
+    .limit(1);
+
+  if (error) {
+    throw new Error(`Failed to load terminal assignment: ${error.message}`);
+  }
+
+  return (data ?? [])[0] ?? null;
+}
+
+async function loadUserTerminalSettings(admin: AdminClient, userId: string) {
+  const { data, error } = await admin
+    .from("user_terminal_settings")
+    .select("preferences_json, terms_version, terms_accepted_at")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    const message = error.message.toLowerCase();
+    if (message.includes("does not exist") || message.includes("relation") || message.includes("schema cache")) {
+      return null;
+    }
+    throw new Error(`Failed to load terminal settings: ${error.message}`);
+  }
+
+  return data ?? null;
+}
+
+async function loadUserStrategy(admin: AdminClient, connectionId: string) {
+  const { data, error } = await admin
+    .from("user_strategies")
+    .select("risk_percent, max_daily_trades, max_open_trades, rr_min, rr_max, updated_at")
+    .eq("connection_id", connectionId)
+    .maybeSingle();
+
+  if (error) {
+    const message = error.message.toLowerCase();
+    if (message.includes("does not exist") || message.includes("relation") || message.includes("schema cache")) {
+      return null;
+    }
+    throw new Error(`Failed to load user strategy: ${error.message}`);
+  }
+
+  return data ?? null;
+}
+
+async function loadLatestTradingSetup(admin: AdminClient, connectionId: string) {
+  const { data, error } = await admin
+    .from("trading_setups")
+    .select("id, symbol, side, entry_price, pivot, tp1, tp2, bias, ai_text, atr_zone_pct, sl_pad_mult, zone_percent, timeframe, ai_sensitivity, trade_now_active, updated_at")
+    .eq("connection_id", connectionId)
+    .eq("is_active", true)
+    .order("updated_at", { ascending: false })
+    .limit(1);
+
+  if (error) {
+    const message = error.message.toLowerCase();
+    if (message.includes("does not exist") || message.includes("relation") || message.includes("schema cache")) {
+      return null;
+    }
+    throw new Error(`Failed to load trading setup: ${error.message}`);
+  }
+
+  return (data ?? [])[0] ?? null;
+}
+
+export async function assertConnectionOwnership(admin: AdminClient, userId: string, connectionId: string) {
+  const connection = await loadConnection(admin, connectionId);
+  if (!connection || String(connection.user_id) !== userId) {
+    throw new Error("Connection not found or not authorized.");
+  }
+  return connection;
+}
+
+function buildSessionsPayload(raw: unknown) {
+  const sessions = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  return {
+    asia: {
+      enabled: Boolean(sessions.asia ?? false),
+      start: "19:00",
+      end: "03:00",
+    },
+    london: {
+      enabled: Boolean(sessions.london ?? true),
+      start: "03:00",
+      end: "11:00",
+    },
+    new_york: {
+      enabled: Boolean(sessions.newYork ?? sessions.new_york ?? true),
+      start: "08:00",
+      end: "17:00",
+    },
+  };
+}
+
+export async function buildEaConfigForConnection(admin: AdminClient, connectionId: string) {
+  const connection = await loadConnection(admin, connectionId);
+  if (!connection) {
+    throw new Error("Connection not found.");
+  }
+
+  const [current, assignment, settings, strategy, setup] = await Promise.all([
+    ensureActiveConfig(admin, connectionId),
+    loadActiveAssignment(admin, connectionId),
+    loadUserTerminalSettings(admin, String(connection.user_id)),
+    loadUserStrategy(admin, connectionId),
+    loadLatestTradingSetup(admin, connectionId),
+  ]);
+
+  const release = await getReleaseManifest(admin, assignment?.release_channel ?? undefined);
+  const prefs = ((settings?.preferences_json as Record<string, unknown> | null) ?? {}) as Record<string, unknown>;
+  const currentConfig = normalizeEaConfig(current.config_json, connectionId, {
+    releaseChannel: String(release.channel ?? DEFAULT_RELEASE_CHANNEL),
+    expectedEaVersion: String(release.version ?? DEFAULT_EA_VERSION),
+    publishedAt: String(current.created_at ?? isoNow()),
+  });
+
+  const nextConfig = normalizeEaConfig(
+    {
+      ...currentConfig,
+      meta: {
+        ...currentConfig.meta,
+        release_channel: String(release.channel ?? DEFAULT_RELEASE_CHANNEL),
+        expected_ea_version: String(release.version ?? DEFAULT_EA_VERSION),
+        published_at: isoNow(),
+        migration_source: "frontend-save",
+      },
+      trading: {
+        ...currentConfig.trading,
+        enabled: Boolean(settings?.terms_version),
+      },
+      symbols: {
+        ...currentConfig.symbols,
+        active: setup?.symbol ? [String(setup.symbol)] : currentConfig.symbols.active,
+        high_priority: setup?.symbol ? [String(setup.symbol)] : currentConfig.symbols.high_priority,
+      },
+      setup: {
+        ...currentConfig.setup,
+        bias: (setup?.bias === "buy" || setup?.bias === "sell" || setup?.bias === "neutral")
+          ? setup.bias
+          : (setup?.side === "buy" || setup?.side === "sell")
+            ? setup.side
+            : currentConfig.setup.bias,
+        pivot: typeof setup?.pivot === "number" ? setup.pivot : currentConfig.setup.pivot,
+        tp1: typeof setup?.tp1 === "number" ? setup.tp1 : currentConfig.setup.tp1,
+        tp2: typeof setup?.tp2 === "number" ? setup.tp2 : currentConfig.setup.tp2,
+        atr_zone_thickness_pct: typeof setup?.atr_zone_pct === "number"
+          ? setup.atr_zone_pct
+          : typeof setup?.zone_percent === "number"
+            ? setup.zone_percent
+            : currentConfig.setup.atr_zone_thickness_pct,
+      },
+      structure: {
+        ...currentConfig.structure,
+        timeframe: typeof setup?.timeframe === "string" && setup.timeframe.trim() ? setup.timeframe.trim() : currentConfig.structure.timeframe,
+        pivot_window: typeof setup?.ai_sensitivity === "number" ? setup.ai_sensitivity : currentConfig.structure.pivot_window,
+      },
+      risk: {
+        ...currentConfig.risk,
+        risk_percent: typeof strategy?.risk_percent === "number"
+          ? strategy.risk_percent
+          : typeof prefs.riskPercent === "number"
+            ? prefs.riskPercent
+            : currentConfig.risk.risk_percent,
+        max_open_trades: typeof strategy?.max_open_trades === "number"
+          ? strategy.max_open_trades
+          : currentConfig.risk.max_open_trades,
+        max_daily_trades: typeof strategy?.max_daily_trades === "number"
+          ? strategy.max_daily_trades
+          : typeof prefs.maxTradesPerDay === "number"
+            ? prefs.maxTradesPerDay
+            : currentConfig.risk.max_daily_trades,
+        max_daily_loss_usd: typeof prefs.dailyLossLimitUsd === "number"
+          ? prefs.dailyLossLimitUsd
+          : currentConfig.risk.max_daily_loss_usd,
+        max_position_size_lots: typeof prefs.maxPositionSizeLots === "number"
+          ? prefs.maxPositionSizeLots
+          : currentConfig.risk.max_position_size_lots,
+      },
+      sessions: buildSessionsPayload(prefs.sessions),
+      execution: {
+        ...currentConfig.execution,
+      },
+    },
+    connectionId,
+    {
+      releaseChannel: String(release.channel ?? DEFAULT_RELEASE_CHANNEL),
+      expectedEaVersion: String(release.version ?? DEFAULT_EA_VERSION),
+      publishedAt: isoNow(),
+      migrationSource: "frontend-save",
+    },
+  );
+
+  return { current, nextConfig };
+}
+
+export async function publishEaConfigForConnection(admin: AdminClient, connectionId: string) {
+  const { current, nextConfig } = await buildEaConfigForConnection(admin, connectionId);
+  const normalizedCurrent = normalizeEaConfig(current.config_json, connectionId, {
+    releaseChannel: nextConfig.meta.release_channel,
+    expectedEaVersion: nextConfig.meta.expected_ea_version,
+    publishedAt: String(current.created_at ?? isoNow()),
+  });
+
+  if (JSON.stringify(normalizedCurrent) === JSON.stringify(nextConfig)) {
+    return { changed: false, row: { ...current, config_json: normalizedCurrent } };
+  }
+
+  const now = isoNow();
+  const nextVersion = Number(current.version ?? 0) + 1;
+  const { error: deactivateError } = await admin
+    .from("ea_user_configs")
+    .update({ is_active: false, updated_at: now })
+    .eq("id", current.id);
+
+  if (deactivateError) {
+    throw new Error(`Failed to retire previous EA config: ${deactivateError.message}`);
+  }
+
+  const { data, error } = await admin
+    .from("ea_user_configs")
+    .insert({
+      connection_id: connectionId,
+      version: nextVersion,
+      config_json: nextConfig,
+      is_active: true,
+      created_at: now,
+      updated_at: now,
+    })
+    .select("id, connection_id, version, config_json, is_active, created_at")
+    .limit(1);
+
+  if (error) {
+    throw new Error(`Failed to publish EA config: ${error.message}`);
+  }
+
+  return { changed: true, row: (data ?? [])[0] ?? null };
+}
+
+export async function getConnectionExecutionMode(admin: AdminClient, connectionId: string): Promise<EaExecutionMode> {
+  const config = await ensureActiveConfig(admin, connectionId);
+  return normalizeEaConfig(config.config_json, connectionId).trading.execution_mode;
+}
+
+export async function setConnectionExecutionMode(admin: AdminClient, connectionId: string, mode: EaExecutionMode) {
+  const current = await ensureActiveConfig(admin, connectionId);
+  const normalizedCurrent = normalizeEaConfig(current.config_json, connectionId, {
+    publishedAt: String(current.created_at ?? isoNow()),
+  });
+
+  if (normalizedCurrent.trading.execution_mode === mode) {
+    return { changed: false, row: { ...current, config_json: normalizedCurrent } };
+  }
+
+  const now = isoNow();
+  const nextVersion = Number(current.version ?? 0) + 1;
+  const nextConfig = {
+    ...normalizedCurrent,
+    meta: {
+      ...normalizedCurrent.meta,
+      published_at: now,
+      migration_source: "execution-mode-toggle",
+    },
+    trading: {
+      ...normalizedCurrent.trading,
+      execution_mode: mode,
+    },
+  };
+
+  const { error: deactivateError } = await admin
+    .from("ea_user_configs")
+    .update({ is_active: false, updated_at: now })
+    .eq("id", current.id);
+
+  if (deactivateError) {
+    throw new Error(`Failed to retire previous EA config: ${deactivateError.message}`);
+  }
+
+  const { data, error } = await admin
+    .from("ea_user_configs")
+    .insert({
+      connection_id: connectionId,
+      version: nextVersion,
+      config_json: nextConfig,
+      is_active: true,
+      created_at: now,
+      updated_at: now,
+    })
+    .select("id, connection_id, version, config_json, is_active, created_at")
+    .limit(1);
+
+  if (error) {
+    throw new Error(`Failed to set execution mode: ${error.message}`);
+  }
+
+  return { changed: true, row: (data ?? [])[0] ?? null };
+}
+
+export async function enqueueEaCommand(
+  admin: AdminClient,
+  input: {
+    connectionId: string;
+    userId: string;
+    commandType: EaCommandType;
+    payloadJson?: JsonMap;
+    idempotencyKey?: string;
+    expiresAt?: string | null;
+  },
+) {
+  const { data: latestRows, error: latestError } = await admin
+    .from("ea_commands")
+    .select("sequence_no")
+    .eq("connection_id", input.connectionId)
+    .order("sequence_no", { ascending: false })
+    .limit(1);
+
+  if (latestError) {
+    throw new Error(`Failed to load EA command cursor: ${latestError.message}`);
+  }
+
+  const nextSequence = Number((latestRows ?? [])[0]?.sequence_no ?? 0) + 1;
+  const now = isoNow();
+  const { data, error } = await admin
+    .from("ea_commands")
+    .insert({
+      connection_id: input.connectionId,
+      user_id: input.userId,
+      command_type: input.commandType,
+      payload_json: input.payloadJson ?? {},
+      sequence_no: nextSequence,
+      idempotency_key: input.idempotencyKey ?? `${input.connectionId}:${input.commandType}:${randomUUID()}`,
+      status: "pending",
+      expires_at: input.expiresAt ?? null,
+      created_at: now,
+      updated_at: now,
+    })
+    .select("*")
+    .limit(1);
+
+  if (error) {
+    throw new Error(`Failed to enqueue EA command: ${error.message}`);
+  }
+
+  return (data ?? [])[0] ?? null;
 }
 
 export async function getReleaseManifest(admin: AdminClient, channel?: string) {

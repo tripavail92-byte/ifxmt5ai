@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ensureActiveConfig, isoNow, parseJsonBody, requireEaAuth } from "@/lib/ea-control-plane";
+import { normalizeEaConfig } from "@/lib/ea-config";
+import { ensureActiveConfig, getReleaseManifest, isoNow, parseJsonBody, requireEaAuth } from "@/lib/ea-control-plane";
 
 export const runtime = "nodejs";
 
@@ -23,6 +24,12 @@ export async function POST(req: NextRequest) {
   }
 
   const config = await ensureActiveConfig(auth.admin, connectionId);
+  const release = await getReleaseManifest(auth.admin, auth.access?.assignment?.release_channel ?? undefined);
+  const normalizedConfig = normalizeEaConfig(config.config_json, connectionId, {
+    releaseChannel: String(release.channel ?? "stable"),
+    expectedEaVersion: String(release.version ?? "dev-local"),
+    publishedAt: String(config.created_at ?? new Date().toISOString()),
+  });
   const now = isoNow();
   const installationPayload = {
     connection_id: connectionId,
@@ -63,6 +70,6 @@ export async function POST(req: NextRequest) {
     ok: true,
     installation: (data ?? [])[0] ?? null,
     config_version: config.version,
-    config: config.config_json,
+    config: normalizedConfig,
   });
 }

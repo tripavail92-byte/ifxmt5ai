@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { placeManualTrade, activateTradeNow } from "./actions";
+import { placeManualTrade, activateTradeNow, saveTrackedSetup } from "./actions";
 import { createClient } from "@/utils/supabase/client";
 import { usePriceFeed } from "@/hooks/usePriceFeed";
 
@@ -239,7 +239,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     lastClose,
     symbols: liveSymbols,
     isConnected,
-  } = usePriceFeed(autoConn?.id);
+  } = usePriceFeed(autoConn?.id, formSymbol || undefined);
 
   // Hydrate from localStorage on first render
   useEffect(() => {
@@ -404,40 +404,21 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     setSetupSaving(true);
     setSetupResult(null);
     try {
-      const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Not authenticated");
-
-      const payloadV2 = {
-        p_user_id:        user.id,
-        p_connection_id:  autoConn.id,
-        p_symbol:         formSymbol,
-        p_side:           side,
-        p_entry_price:    ep,
-        p_zone_percent:   zonePercent,
-        p_timeframe:      getSelectedSetupTimeframe(),
-        p_ai_sensitivity: aiSensitivity,
-        p_setup_id:       slotSetupIds[formSymbol] ?? null,
-      };
-
-      let { data: newId, error } = await supabase.rpc("upsert_trading_setup", payloadV2);
-
-      // Backward-compatible fallback: if DB/RPC hasn't been migrated yet, retry without p_ai_sensitivity.
-      if (error) {
-        const msg = String((error as { message?: unknown })?.message ?? error);
-        if (msg.toLowerCase().includes("p_ai_sensitivity") || msg.toLowerCase().includes("function")) {
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          const { p_ai_sensitivity: _ignored, ...payloadV1 } = payloadV2;
-          ({ data: newId, error } = await supabase.rpc("upsert_trading_setup", payloadV1));
-        }
-      }
-
-      if (error) throw error;
-      setSlotSetupIds(prev => ({ ...prev, [formSymbol]: newId as string }));
+      const newId = await saveTrackedSetup({
+        connection_id: autoConn.id,
+        symbol: formSymbol,
+        side,
+        entry_price: ep,
+        zone_percent: zonePercent,
+        timeframe: getSelectedSetupTimeframe(),
+        ai_sensitivity: aiSensitivity,
+        setup_id: slotSetupIds[formSymbol] ?? null,
+      });
+      setSlotSetupIds(prev => ({ ...prev, [formSymbol]: newId }));
       setSetupsBySymbol(prev => ({
         ...prev,
         [formSymbol]: {
-          id: newId as string,
+          id: newId,
           symbol: formSymbol,
           side,
           entry_price: ep,

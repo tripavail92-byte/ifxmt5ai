@@ -1,6 +1,7 @@
 import { createClient } from "@/utils/supabase/server";
 import { ManualTradeCard } from "./ManualTradeCard";
 import { SetupStatePanel } from "./SetupStatePanel";
+import { EaLivePanel } from "./EaLivePanel";
 
 export default async function StrategiesPage() {
   const supabase = await createClient();
@@ -34,6 +35,9 @@ export default async function StrategiesPage() {
   return (
     <div className="space-y-4">
       <ManualTradeCard connections={ranked} />
+      {firstConn && (
+        <EaLivePanel connectionId={firstConn.id} />
+      )}
       {firstConn && (
         <SetupStatePanel connectionId={firstConn.id} />
       )}
