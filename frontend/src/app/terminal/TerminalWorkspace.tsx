@@ -25,8 +25,9 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { activateTradeNow, placeManualTrade } from "@/app/(dashboard)/strategies/actions";
-import { closeTradeJob, saveTerminalSettings } from "@/app/terminal/actions";
+import { activateTradeNow, placeManualTrade, saveTrackedSetup } from "@/app/(dashboard)/strategies/actions";
+import { closeTradeJob, getConnectionExecutionModeAction, saveConnectionExecutionMode, saveTerminalSettings } from "@/app/terminal/actions";
+import type { EaExecutionMode } from "@/lib/ea-config";
 import { CandlestickChart as CandlestickChartType } from "@/components/chart/CandlestickChart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -50,6 +51,8 @@ const CandlestickChart = dynamic(
   { ssr: false, loading: () => <div className="h-[320px] rounded-xl border border-[#242424] bg-[#0b0b0b] animate-pulse" /> }
 ) as typeof CandlestickChartType;
 
+const SELECTED_QUOTE_FRESH_MS = 1_500;
+
 type TerminalTab = "ai-trading" | "positions" | "copy-trading" | "manual-trades";
 type SetupState = "IDLE" | "STALKING" | "PURGATORY" | "DEAD";
 
@@ -71,8 +74,13 @@ type SetupRow = {
   id: string;
   symbol: string;
   side: "buy" | "sell";
-  entry_price: number;
-  zone_percent: number;
+  entry_price: number | null;
+  zone_percent: number | null;
+  pivot?: number | null;
+  tp1?: number | null;
+  tp2?: number | null;
+  atr_zone_pct?: number | null;
+  sl_pad_mult?: number | null;
   timeframe: string;
   ai_sensitivity?: number;
   trade_now_active?: boolean;
@@ -136,9 +144,50 @@ type RuntimeEventRow = {
   } | null;
 };
 
+type EaCommandRow = {
+  id: string;
+  connection_id: string;
+  command_type: string;
+  payload_json?: Record<string, unknown> | null;
+  sequence_no: number;
+  idempotency_key?: string | null;
+  status: string;
+  created_at: string;
+  expires_at?: string | null;
+};
+
+type EaCommandAckRow = {
+  id: string;
+  command_id: string;
+  connection_id: string;
+  sequence_no: number;
+  status: string;
+  ack_payload_json?: Record<string, unknown> | null;
+  acknowledged_at: string;
+  created_at: string;
+};
+
+type EaRuntimeEventRow = {
+  id: number;
+  connection_id: string;
+  event_type: string;
+  payload?: Record<string, unknown> | null;
+  created_at: string;
+};
+
+type ExecutionStreamItem = {
+  id: string;
+  source: "job" | "command" | "ack" | "event";
+  title: string;
+  detail: string;
+  status: string;
+  timestamp: string;
+  error?: string | null;
+};
+
 const SUBSCRIBED_DEFAULT_SYMBOLS = [
-  "EURUSDm", "BTCUSDm", "ETHUSDm", "GBPUSDm", "USDJPYm", "XAUUSDm",
-  "USDCADm", "AUDUSDm", "NZDUSDm", "USDCHFm", "EURGBPm", "USOILm",
+  "EURUSD", "BTCUSD", "ETHUSD", "GBPUSD", "USDJPY", "XAUUSD",
+  "USDCAD", "AUDUSD", "NZDUSD", "USDCHF", "EURGBP", "USOIL",
 ];
 
 type SetupDraft = {
@@ -157,6 +206,7 @@ type DynamicStopState = {
 
 type SymbolTradeSpec = {
   symbol: string;
+  resolved_symbol?: string | null;
   digits?: number | null;
   point?: number | null;
   trade_tick_size?: number | null;
@@ -499,8 +549,11 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
   const [symbols, setSymbols] = useState<SymbolRow[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState<string>(isAuthenticated ? "" : SUBSCRIBED_DEFAULT_SYMBOLS[0]);
   const [side, setSide] = useState<"buy" | "sell">("buy");
-  const [entryPrice, setEntryPrice] = useState<string>("");
-  const [zonePercent, setZonePercent] = useState<number>(ZONE_DEFAULT_FALLBACK);
+  const [pivot, setPivot] = useState<string>("");
+  const [tp1, setTp1] = useState<string>("");
+  const [tp2, setTp2] = useState<string>("");
+  const [atrZonePct, setAtrZonePct] = useState<number>(ZONE_DEFAULT_FALLBACK);
+  const [slPadMult, setSlPadMult] = useState<number>(2.0);
   const [showEntryZones, setShowEntryZones] = useState(true);
   const [showTPZones, setShowTPZones] = useState(true);
   const [stopMode, setStopMode] = useState<StopMode>("manual");
@@ -513,6 +566,11 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
   const [tradeNowBySymbol, setTradeNowBySymbol] = useState<Record<string, boolean>>({});
   const [accountHeartbeat, setAccountHeartbeat] = useState<HeartbeatRow | null>(null);
   const [recentJobs, setRecentJobs] = useState<TradeJobRow[]>([]);
+  const [recentCommands, setRecentCommands] = useState<EaCommandRow[]>([]);
+  const [recentCommandAcks, setRecentCommandAcks] = useState<EaCommandAckRow[]>([]);
+  const [recentEaEvents, setRecentEaEvents] = useState<EaRuntimeEventRow[]>([]);
+  const [executionMode, setExecutionMode] = useState<EaExecutionMode>("legacy-worker");
+  const [executionModeSaving, setExecutionModeSaving] = useState(false);
   const [manualResult, setManualResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [setupResult, setSetupResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [tradeNowResult, setTradeNowResult] = useState<{ ok: boolean; msg: string } | null>(null);
@@ -570,7 +628,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     lastClose,
     symbols: liveSymbols,
     transportMode,
-  } = usePriceFeed(selectedConnectionId || undefined);
+  } = usePriceFeed(selectedConnectionId || undefined, selectedSymbol || undefined);
 
   const selectedConnection = useMemo(
     () => connections.find((conn) => conn.id === selectedConnectionId) ?? null,
@@ -585,15 +643,16 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     () => resolveLiveSymbolMatch(selectedSymbol || undefined, [...liveQuoteSymbols, ...(liveSymbols ?? [])]),
     [selectedSymbol, liveQuoteSymbols, liveSymbols]
   );
-  const displaySymbol = selectedSymbol || resolvedSelectedSymbol || liveQuoteSymbols[0] || liveSymbols[0] || SUBSCRIBED_DEFAULT_SYMBOLS[0];
+  const displaySymbol = resolvedSelectedSymbol || selectedSymbol || liveQuoteSymbols[0] || liveSymbols[0] || SUBSCRIBED_DEFAULT_SYMBOLS[0];
   const liveQuoteSymbol = resolvedSelectedSymbol ?? (selectedSymbol && prices[selectedSymbol] ? selectedSymbol : undefined) ?? liveQuoteSymbols[0] ?? liveSymbols[0] ?? displaySymbol;
   const livePrice = liveQuoteSymbol ? prices[liveQuoteSymbol] : undefined;
-  const parsedEntry = parseFloat(entryPrice);
+  const parsedEntry = parseFloat(pivot);
   const validEntry = Number.isFinite(parsedEntry) && parsedEntry > 0;
-  const zone = useMemo(
-    () => (validEntry ? calcZone(parsedEntry, zonePercent) : null),
-    [parsedEntry, validEntry, zonePercent]
-  );
+  const zone = useMemo(() => {
+    if (!validEntry) return null;
+    const thick = parsedEntry * (atrZonePct / 100);
+    return { low: parsedEntry - thick * 0.5, high: parsedEntry + thick * 0.5 };
+  }, [parsedEntry, validEntry, atrZonePct]);
   const activeSymbol = displaySymbol;
   const aiManagedExecution = stopMode === "ai_dynamic";
   const effectiveStop = useMemo(() => {
@@ -687,6 +746,74 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
         && created.getDate() === today.getDate();
     }).length;
   }, [recentJobs]);
+  const executionStreamItems = useMemo<ExecutionStreamItem[]>(() => {
+    if (executionMode === "legacy-worker") {
+      return recentJobs.map((job) => ({
+        id: `job-${job.id}`,
+        source: "job",
+        title: job.symbol,
+        detail: `${job.side.toUpperCase()} · ${job.volume} lots`,
+        status: job.status,
+        timestamp: job.created_at,
+        error: job.error ?? null,
+      }));
+    }
+
+    const commands = recentCommands.map((command) => {
+      const payload = (command.payload_json ?? {}) as Record<string, unknown>;
+      const symbol = typeof payload.symbol === "string" ? payload.symbol : command.command_type;
+      const side = typeof payload.side === "string" ? payload.side.toUpperCase() : command.command_type;
+      const volume = typeof payload.volume === "number" ? ` · ${payload.volume} lots` : "";
+      return {
+        id: `command-${command.id}`,
+        source: "command" as const,
+        title: symbol,
+        detail: `${side}${volume} · seq ${command.sequence_no}`,
+        status: command.status,
+        timestamp: command.created_at,
+        error: null,
+      };
+    });
+
+    const acks = recentCommandAcks.map((ack) => {
+      const payload = (ack.ack_payload_json ?? {}) as Record<string, unknown>;
+      const reason = typeof payload.reason === "string" ? payload.reason : null;
+      return {
+        id: `ack-${ack.id}`,
+        source: "ack" as const,
+        title: `Ack #${ack.sequence_no}`,
+        detail: reason ? `${ack.status} · ${reason}` : `${ack.status} · command ${ack.command_id}`,
+        status: ack.status,
+        timestamp: ack.acknowledged_at || ack.created_at,
+        error: ack.status === "rejected" ? reason : null,
+      };
+    });
+
+    const events = recentEaEvents.map((event) => {
+      const payload = (event.payload ?? {}) as Record<string, unknown>;
+      const symbol = typeof payload.symbol === "string" ? payload.symbol : event.event_type;
+      const reason = typeof payload.reason === "string" ? payload.reason : "EA runtime event";
+      const status = typeof payload.status === "string" ? payload.status : event.event_type;
+      return {
+        id: `event-${event.id}`,
+        source: "event" as const,
+        title: symbol,
+        detail: reason,
+        status,
+        timestamp: event.created_at,
+        error: status === "rejected" ? reason : null,
+      };
+    });
+
+    return [...commands, ...acks, ...events]
+      .sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime())
+      .slice(0, 30);
+  }, [executionMode, recentCommandAcks, recentCommands, recentEaEvents, recentJobs]);
+  const latestCommandAck = useMemo(() => {
+    if (!recentCommandAcks.length) return null;
+    return [...recentCommandAcks]
+      .sort((left, right) => new Date(right.acknowledged_at || right.created_at).getTime() - new Date(left.acknowledged_at || left.created_at).getTime())[0] ?? null;
+  }, [recentCommandAcks]);
   const executionBlocker = useMemo(() => {
     if (!isAuthenticated) return "Sign in to queue trades, arm Trade Now, or save monitored setups to your MT5 connection.";
     if (!termsAccepted) return "Accept the current terminal terms before queueing live MT5 execution.";
@@ -860,6 +987,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     const timeout = window.setTimeout(() => {
       setSettingsSyncState("saving");
       void saveTerminalSettings({
+        connectionId: selectedConnectionId,
         preferences: {
           riskMode,
           riskPercent,
@@ -922,6 +1050,9 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       setSelectedSymbol("");
       setAccountHeartbeat(null);
       setRecentJobs([]);
+      setRecentCommands([]);
+      setRecentCommandAcks([]);
+      setRecentEaEvents([]);
       setSetupsBySymbol({});
       setSetupIdsBySymbol({});
       setTradeNowBySymbol({});
@@ -932,6 +1063,9 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       setSymbols([]);
       setAccountHeartbeat(null);
       setRecentJobs([]);
+      setRecentCommands([]);
+      setRecentCommandAcks([]);
+      setRecentEaEvents([]);
       setSetupsBySymbol({});
       setSetupIdsBySymbol({});
       setTradeNowBySymbol({});
@@ -940,8 +1074,16 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     }
     let cancelled = false;
 
+    void getConnectionExecutionModeAction(selectedConnectionId)
+      .then((mode) => {
+        if (!cancelled) setExecutionMode(mode);
+      })
+      .catch(() => {
+        if (!cancelled) setExecutionMode("legacy-worker");
+      });
+
     const load = async () => {
-      const [{ data: symbolRows }, { data: setupRows }, { data: setupFlags }, { data: heartbeatRow }, { data: jobs }] = await Promise.all([
+      const [{ data: symbolRows }, { data: setupRows }, { data: setupFlags }, { data: heartbeatRow }, { data: jobs }, { data: commands }, { data: commandAcks }, { data: eaEvents }] = await Promise.all([
         supabase.from("mt5_symbols").select("symbol, description, category").eq("connection_id", selectedConnectionId).order("symbol"),
         supabase.rpc("get_setups_for_connection", { p_connection_id: selectedConnectionId }),
         supabase
@@ -951,12 +1093,18 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
           .eq("is_active", true),
         supabase.from("mt5_worker_heartbeats").select("connection_id, status, last_seen_at, last_metrics").eq("connection_id", selectedConnectionId).maybeSingle(),
         supabase.from("trade_jobs").select("id, connection_id, symbol, side, volume, sl, tp, status, created_at, idempotency_key, error, result").eq("connection_id", selectedConnectionId).order("created_at", { ascending: false }).limit(30),
+        supabase.from("ea_commands").select("id, connection_id, command_type, payload_json, sequence_no, idempotency_key, status, created_at, expires_at").eq("connection_id", selectedConnectionId).order("created_at", { ascending: false }).limit(30),
+        supabase.from("ea_command_acks").select("id, command_id, connection_id, sequence_no, status, ack_payload_json, acknowledged_at, created_at").eq("connection_id", selectedConnectionId).order("acknowledged_at", { ascending: false }).limit(30),
+        supabase.from("ea_runtime_events").select("id, connection_id, event_type, payload, created_at").eq("connection_id", selectedConnectionId).order("created_at", { ascending: false }).limit(30),
       ]);
 
       if (cancelled) return;
       setSymbols((symbolRows ?? []) as SymbolRow[]);
       setAccountHeartbeat((heartbeatRow ?? null) as HeartbeatRow | null);
       setRecentJobs((jobs ?? []) as TradeJobRow[]);
+      setRecentCommands((commands ?? []) as EaCommandRow[]);
+      setRecentCommandAcks((commandAcks ?? []) as EaCommandAckRow[]);
+      setRecentEaEvents((eaEvents ?? []) as EaRuntimeEventRow[]);
 
       const rows = (setupRows ?? []) as SetupRow[];
       const flagsBySymbol = new Map(
@@ -1012,8 +1160,11 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     const setup = setupsBySymbol[selectedSymbol];
     if (setup) {
       setSide(setup.side);
-      setEntryPrice(String(setup.entry_price));
-      setZonePercent(Number(setup.zone_percent) || getZoneDefault(selectedSymbol));
+      setPivot(String(setup.pivot ?? setup.entry_price ?? ""));
+      setTp1(setup.tp1 != null ? String(setup.tp1) : "");
+      setTp2(setup.tp2 != null ? String(setup.tp2) : "");
+      setAtrZonePct(Number(setup.atr_zone_pct ?? setup.zone_percent) || getZoneDefault(selectedSymbol));
+      setSlPadMult(Number(setup.sl_pad_mult) || 2.0);
       setAiSensitivity(Number(setup.ai_sensitivity ?? 5));
       setActiveSetupState((setup.state as SetupState | undefined) ?? null);
       return;
@@ -1021,32 +1172,35 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
 
     const draft = loadDraft(selectedSymbol);
     setSide(draft.side ?? "buy");
-    setEntryPrice(draft.entryPrice ?? "");
-    setZonePercent(typeof draft.zonePercent === "number" ? draft.zonePercent : getZoneDefault(selectedSymbol));
+    setPivot(draft.entryPrice ?? "");
+    setTp1("");
+    setTp2("");
+    setAtrZonePct(typeof draft.zonePercent === "number" ? draft.zonePercent : getZoneDefault(selectedSymbol));
+    setSlPadMult(2.0);
     setAiSensitivity(typeof draft.aiSensitivity === "number" ? draft.aiSensitivity : 5);
     setActiveSetupState(null);
   }, [selectedSymbol, setupsBySymbol]);
 
   useEffect(() => {
     if (!selectedSymbol) return;
-    if (entryPrice) return;
+    if (pivot) return;
     if (!livePrice) return;
     const setup = setupsBySymbol[selectedSymbol];
     if (setup) return;
     const draft = loadDraft(selectedSymbol);
     if (draft.entryPrice) return;
-    setEntryPrice(String(livePrice.bid));
-  }, [selectedSymbol, entryPrice, livePrice, setupsBySymbol]);
+    setPivot(String(livePrice.bid));
+  }, [selectedSymbol, pivot, livePrice, setupsBySymbol]);
 
   useEffect(() => {
     if (!selectedSymbol) return;
     saveDraft(selectedSymbol, {
-      entryPrice,
-      zonePercent,
+      entryPrice: pivot,
+      zonePercent: atrZonePct,
       side,
       aiSensitivity,
     });
-  }, [selectedSymbol, entryPrice, zonePercent, side, aiSensitivity]);
+  }, [selectedSymbol, pivot, atrZonePct, side, aiSensitivity]);
 
 
   useEffect(() => {
@@ -1089,6 +1243,10 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
         if (!resp.ok || data.error) {
           setSymbolTradeSpec(null);
           return;
+        }
+        const resolvedSymbol = typeof data.resolved_symbol === "string" ? data.resolved_symbol : null;
+        if (resolvedSymbol && resolvedSymbol !== selectedSymbol) {
+          setSelectedSymbol((current) => (current === selectedSymbol ? resolvedSymbol : current));
         }
         setSymbolTradeSpec(data);
       } catch {
@@ -1217,6 +1375,37 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       )
       .on(
         "postgres_changes",
+        { event: "*", schema: "public", table: "ea_commands", filter: `connection_id=eq.${selectedConnectionId}` },
+        (payload) => {
+          if (payload.eventType === "INSERT") {
+            const inserted = payload.new as EaCommandRow;
+            setRecentCommands((prev) => [inserted, ...prev].slice(0, 30));
+          }
+          if (payload.eventType === "UPDATE") {
+            setRecentCommands((prev) => prev.map((row) => (row.id === payload.new.id ? { ...row, ...(payload.new as EaCommandRow) } : row)));
+          }
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "ea_command_acks", filter: `connection_id=eq.${selectedConnectionId}` },
+        (payload) => {
+          if (payload.eventType === "INSERT") {
+            const inserted = payload.new as EaCommandAckRow;
+            setRecentCommandAcks((prev) => [inserted, ...prev].slice(0, 30));
+            if (inserted.status === "rejected") {
+              const ackPayload = (inserted.ack_payload_json ?? {}) as Record<string, unknown>;
+              const reason = typeof ackPayload.reason === "string" ? ackPayload.reason : "The EA rejected the command.";
+              toast.error(reason);
+            }
+          }
+          if (payload.eventType === "UPDATE") {
+            setRecentCommandAcks((prev) => prev.map((row) => (row.id === payload.new.id ? { ...row, ...(payload.new as EaCommandAckRow) } : row)));
+          }
+        }
+      )
+      .on(
+        "postgres_changes",
         { event: "*", schema: "public", table: "trading_setups", filter: `connection_id=eq.${selectedConnectionId}` },
         (payload) => {
           const row = payload.new as Partial<SetupRow> & { id?: string; symbol?: string; trade_now_active?: boolean; state?: string };
@@ -1248,6 +1437,33 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       )
       .on(
         "postgres_changes",
+        { event: "INSERT", schema: "public", table: "ea_runtime_events", filter: `connection_id=eq.${selectedConnectionId}` },
+        (payload) => {
+          const event = payload.new as EaRuntimeEventRow;
+          setRecentEaEvents((prev) => [event, ...prev].slice(0, 30));
+          const eventPayload = (event.payload ?? {}) as Record<string, unknown>;
+          const reason = typeof eventPayload.reason === "string" && eventPayload.reason.trim()
+            ? eventPayload.reason.trim()
+            : "AI system conditions were no longer valid for execution.";
+          const symbol = typeof eventPayload.symbol === "string" ? eventPayload.symbol : null;
+
+          if (event.event_type === "trade_now_rejected" && symbol) {
+            const msg = `AI system trigger skipped for ${symbol} — ${reason}`;
+            setTradeNowResult({ ok: false, msg });
+            toast.error(msg);
+          }
+
+          if (event.event_type === "command_processed") {
+            const status = typeof eventPayload.status === "string" ? eventPayload.status : "processed";
+            const message = symbol
+              ? `${symbol} command ${status}${reason ? ` — ${reason}` : ""}`
+              : `EA command ${status}${reason ? ` — ${reason}` : ""}`;
+            if (status === "rejected") toast.error(message);
+          }
+        }
+      )
+      .on(
+        "postgres_changes",
         { event: "*", schema: "public", table: "mt5_worker_heartbeats", filter: `connection_id=eq.${selectedConnectionId}` },
         (payload) => setAccountHeartbeat(payload.new as HeartbeatRow)
       )
@@ -1275,44 +1491,38 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     setSetupSaving(true);
     setSetupResult(null);
     try {
-      const { data: auth } = await supabase.auth.getUser();
-      const user = auth.user;
-      if (!user) throw new Error("Unauthorized");
-
-      const payloadV2 = {
-        p_user_id: user.id,
-        p_connection_id: selectedConnectionId,
-        p_symbol: selectedSymbol,
-        p_side: side,
-        p_entry_price: parsedEntry,
-        p_zone_percent: zonePercent,
-        p_timeframe: getSelectedSetupTimeframe(),
-        p_ai_sensitivity: aiSensitivity,
-        p_setup_id: setupIdsBySymbol[selectedSymbol] ?? null,
-      };
-
-      let { data: newId, error } = await supabase.rpc("upsert_trading_setup", payloadV2);
-      if (error) {
-        const msg = String((error as { message?: unknown })?.message ?? error);
-        if (msg.toLowerCase().includes("p_ai_sensitivity") || msg.toLowerCase().includes("function")) {
-          const payloadV1 = { ...payloadV2 };
-          delete (payloadV1 as { p_ai_sensitivity?: number }).p_ai_sensitivity;
-          ({ data: newId, error } = await supabase.rpc("upsert_trading_setup", payloadV1));
-        }
-      }
-      if (error) throw error;
-
-      const nextSetup: SetupRow = {
-        id: newId as string,
+      const newId = await saveTrackedSetup({
+        connection_id: selectedConnectionId,
         symbol: selectedSymbol,
         side,
         entry_price: parsedEntry,
-        zone_percent: zonePercent,
+        zone_percent: atrZonePct,
+        timeframe: getSelectedSetupTimeframe(),
+        ai_sensitivity: aiSensitivity,
+        setup_id: setupIdsBySymbol[selectedSymbol] ?? null,
+        pivot: parsedEntry,
+        tp1: parseFloat(tp1) || null,
+        tp2: parseFloat(tp2) || null,
+        atr_zone_pct: atrZonePct,
+        sl_pad_mult: slPadMult,
+      });
+
+      const nextSetup: SetupRow = {
+        id: newId,
+        symbol: selectedSymbol,
+        side,
+        entry_price: parsedEntry,
+        zone_percent: atrZonePct,
+        pivot: parsedEntry,
+        tp1: parseFloat(tp1) || null,
+        tp2: parseFloat(tp2) || null,
+        atr_zone_pct: atrZonePct,
+        sl_pad_mult: slPadMult,
         timeframe: getSelectedSetupTimeframe(),
         ai_sensitivity: aiSensitivity,
         state: "IDLE",
       };
-      setSetupIdsBySymbol((prev) => ({ ...prev, [selectedSymbol]: newId as string }));
+      setSetupIdsBySymbol((prev) => ({ ...prev, [selectedSymbol]: newId }));
       setSetupsBySymbol((prev) => ({ ...prev, [selectedSymbol]: nextSetup }));
       setActiveSetupState("IDLE");
       setSetupResult({ ok: true, msg: `MONITORING ACTIVE — ${selectedSymbol} is now under state + structure tracking.` });
@@ -1361,11 +1571,16 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
         symbol: selectedSymbol,
         side,
         entry_price: parsedEntry,
-        zone_percent: zonePercent,
+        zone_percent: atrZonePct,
         timeframe: getSelectedSetupTimeframe(),
         ai_sensitivity: aiSensitivity,
         trade_plan_notes: tradePlanNotes,
         setup_id: setupIdsBySymbol[selectedSymbol] ?? null,
+        pivot: parsedEntry,
+        tp1: parseFloat(tp1) || null,
+        tp2: parseFloat(tp2) || null,
+        atr_zone_pct: atrZonePct,
+        sl_pad_mult: slPadMult,
       });
       setSetupIdsBySymbol((prev) => ({ ...prev, [selectedSymbol]: setupId }));
       setTradeNowBySymbol((prev) => ({ ...prev, [selectedSymbol]: true }));
@@ -1529,7 +1744,12 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
   const quoteBid = livePrice ? livePrice.bid.toFixed(quoteDigits) : "—";
   const quoteAsk = livePrice ? livePrice.ask.toFixed(quoteDigits) : "—";
   const selectedPriceAgeMs = livePrice?.ts_ms ? Date.now() - livePrice.ts_ms : Number.POSITIVE_INFINITY;
-  const hasFreshSelectedQuote = Boolean(livePrice && selectedPriceAgeMs <= 3_000);
+  const hasFreshSelectedQuote = Boolean(livePrice && selectedPriceAgeMs <= SELECTED_QUOTE_FRESH_MS);
+  const selectedQuoteAgeLabel = Number.isFinite(selectedPriceAgeMs)
+    ? selectedPriceAgeMs >= 10_000
+      ? `${(selectedPriceAgeMs / 1000).toFixed(0)}s old`
+      : `${(selectedPriceAgeMs / 1000).toFixed(1)}s old`
+    : null;
   const isPairSwitchLoading = Boolean(
     selectedConnectionId
     && selectedSymbol
@@ -1541,7 +1761,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
         dot: "bg-emerald-400 animate-pulse",
         label: "WebSocket live",
         tone: "text-emerald-300",
-        detail: "Primary stream active",
+        detail: hasFreshSelectedQuote ? "Primary stream active" : "Transport live, quote refreshing",
       }
     : transportMode === "polling"
       ? {
@@ -1669,49 +1889,63 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                 </div>
 
                 <div>
-                  <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">Entry Price</Label>
+                  <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">Pivot Level</Label>
                   <Input
                     type="number"
                     step="any"
-                    value={entryPrice}
-                    onChange={(e) => setEntryPrice(e.target.value)}
+                    value={pivot}
+                    onChange={(e) => setPivot(e.target.value)}
                     placeholder={livePrice ? String(livePrice.bid) : "0.00000"}
                     className="h-10 border-[#2b2b2b] bg-[#0f0f0f] text-white"
                   />
                 </div>
 
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">TP1</Label>
+                    <Input type="number" step="any" value={tp1} onChange={(e) => setTp1(e.target.value)} placeholder="0.00000" className="h-10 border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+                  </div>
+                  <div>
+                    <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">TP2</Label>
+                    <Input type="number" step="any" value={tp2} onChange={(e) => setTp2(e.target.value)} placeholder="0.00000" className="h-10 border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">ATR Zone %</Label>
+                    <Input type="number" step="0.1" value={atrZonePct} onChange={(e) => setAtrZonePct(parseFloat(e.target.value) || 0)} className="h-10 border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+                  </div>
+                  <div>
+                    <Label className="mb-1.5 block text-[11px] uppercase tracking-wide text-gray-500">SL Pad ×</Label>
+                    <Input type="number" step="0.1" value={slPadMult} onChange={(e) => setSlPadMult(parseFloat(e.target.value) || 0)} className="h-10 border-[#2b2b2b] bg-[#0f0f0f] text-white" />
+                  </div>
+                </div>
+
                 {zone && (
                   <div className="space-y-1 rounded-lg bg-[#0f0f0f] p-3 text-xs">
                     <div className="flex items-center justify-between text-gray-500">
-                      <span>Suggested Entry Zone</span>
-                      <span className="font-mono text-blue-400">{fmtPrice(zone.low, selectedSymbol)} - {fmtPrice(zone.high, selectedSymbol)}</span>
+                      <span>Entry Zone</span>
+                      <span className="font-mono text-blue-400">{fmtPrice(zone.low, selectedSymbol)} – {fmtPrice(zone.high, selectedSymbol)}</span>
                     </div>
+                    {parseFloat(tp1) > 0 && (
+                      <div className="flex items-center justify-between text-gray-500">
+                        <span>TP1</span>
+                        <span className="font-mono text-emerald-400">{fmtPrice(parseFloat(tp1), selectedSymbol)}</span>
+                      </div>
+                    )}
+                    {parseFloat(tp2) > 0 && (
+                      <div className="flex items-center justify-between text-gray-500">
+                        <span>TP2</span>
+                        <span className="font-mono text-emerald-300">{fmtPrice(parseFloat(tp2), selectedSymbol)}</span>
+                      </div>
+                    )}
                     <div className="flex items-center justify-between text-gray-500">
                       <span>Loss Edge</span>
                       <span className="font-mono text-red-400">{fmtPrice(side === "buy" ? zone.low : zone.high, selectedSymbol)}</span>
                     </div>
-                    <div className="flex items-center justify-between text-gray-500">
-                      <span>Target</span>
-                      <span className="font-mono text-emerald-400">{fmtPrice(side === "buy" ? zone.high : zone.low, selectedSymbol)}</span>
-                    </div>
                   </div>
                 )}
-
-                <div className="space-y-2 rounded-lg bg-[#0f0f0f] p-3">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-gray-400">Zone Percent</span>
-                    <span className="font-semibold text-blue-400">{zonePercent.toFixed(2)}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={5}
-                    step={0.01}
-                    value={zonePercent}
-                    onChange={(e) => setZonePercent(parseFloat(e.target.value))}
-                    className="w-full accent-blue-500"
-                  />
-                </div>
 
                 <div className="space-y-2 rounded-lg bg-[#0f0f0f] p-3">
                   <div className="flex items-center justify-between text-xs">
@@ -1902,6 +2136,12 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                     <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold ${side === "buy" ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
                       {side.toUpperCase()} ready
                     </span>
+                    {!hasFreshSelectedQuote ? (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300">
+                        <AlertTriangle className="h-3 w-3" />
+                        Quote stale{selectedQuoteAgeLabel ? ` ${selectedQuoteAgeLabel}` : ""}
+                      </span>
+                    ) : null}
                     {tradeNowArmed ? (
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-orange-500/15 px-2 py-0.5 text-[10px] font-semibold text-orange-300">
                         ARMED setup
@@ -2053,14 +2293,35 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
               <div className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-gray-500">
                 <History className="size-4" /> Runtime Snapshot
               </div>
+              <div className="mb-3 rounded-lg border border-[#202020] bg-[#0f0f0f] p-3">
+                <div className="mb-2 flex items-center justify-between gap-3 text-[11px] uppercase tracking-[0.18em] text-gray-500">
+                  <span>Execution Mode</span>
+                  <span className="text-[10px] text-gray-600">per connection</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {(["legacy-worker", "ea-first"] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => void handleExecutionModeChange(mode)}
+                      disabled={!selectedConnectionId || executionModeSaving || mode === executionMode}
+                      className={`rounded-lg border px-3 py-2 text-xs font-semibold transition-colors ${executionMode === mode ? "border-orange-500 bg-orange-500/15 text-orange-200" : "border-[#252525] bg-[#121212] text-gray-400 hover:text-white"}`}
+                    >
+                      {mode === "legacy-worker" ? "Legacy Worker" : "EA First"}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <dl className="space-y-2 text-xs">
                 <MetricRow label="Last heartbeat" value={timeAgo(accountHeartbeat?.last_seen_at)} />
                 <MetricRow label="Free margin" value={fmtCurrency(freeMargin)} />
                 <MetricRow label="Margin used" value={fmtCurrency(margin)} />
-                <MetricRow label="Recent jobs" value={String(recentJobs.length)} />
+                <MetricRow label={executionMode === "legacy-worker" ? "Recent jobs" : "Recent command events"} value={String(executionStreamItems.length)} />
               </dl>
               <div className="mt-4 rounded-lg border border-blue-500/20 bg-blue-500/10 p-3 text-xs leading-relaxed text-blue-200">
-                The live MT5 runtime is already wired here: this terminal submits `trade_jobs`, reads live candles/prices, tracks setup states, and shows worker heartbeat data.
+                {executionMode === "legacy-worker"
+                  ? "This connection is using the legacy worker path: the terminal submits queued trade jobs, reads live candles and prices, tracks setup states, and shows worker heartbeat data."
+                  : "This connection is using the EA-first path: the terminal publishes commands, listens for acknowledgements and EA runtime events, and keeps config in sync through the control plane."}
               </div>
             </div>
           </div>
@@ -2373,6 +2634,27 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     }
   }
 
+  async function handleExecutionModeChange(nextMode: EaExecutionMode) {
+    if (!selectedConnectionId || executionModeSaving || nextMode === executionMode) return;
+    if (!requireAuthenticated("change execution mode")) return;
+
+    setExecutionModeSaving(true);
+    try {
+      const result = await saveConnectionExecutionMode({
+        connectionId: selectedConnectionId,
+        executionMode: nextMode,
+      });
+      if (result.ok) {
+        setExecutionMode(result.executionMode);
+        toast.success(`Execution mode set to ${result.executionMode}`);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update execution mode");
+    } finally {
+      setExecutionModeSaving(false);
+    }
+  }
+
   function renderPositions() {
     const totalProfit = openPositions.reduce((sum, p) => sum + p.profit + p.swap, 0);
     const profitColor = totalProfit >= 0 ? "text-emerald-300" : "text-red-300";
@@ -2556,25 +2838,25 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
             <div className="flex items-center gap-2 text-sm font-semibold text-gray-200">
               <History className="size-4 text-orange-400" /> Execution Stream
             </div>
-            <span className="text-xs text-gray-500">{recentJobs.length} recent jobs</span>
+            <span className="text-xs text-gray-500">{executionStreamItems.length} recent {executionMode === "legacy-worker" ? "jobs" : "events"}</span>
           </div>
           <div className="space-y-3">
-            {recentJobs.length ? recentJobs.map((job) => (
-              <div key={job.id} className="rounded-lg border border-[#202020] bg-[#151515] p-3">
+            {executionStreamItems.length ? executionStreamItems.map((item) => (
+              <div key={item.id} className="rounded-lg border border-[#202020] bg-[#151515] p-3">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <div className="font-mono text-sm font-semibold text-white">{job.symbol}</div>
-                    <div className="text-xs text-gray-500">{job.side.toUpperCase()} · {job.volume} lots</div>
+                    <div className="font-mono text-sm font-semibold text-white">{item.title}</div>
+                    <div className="text-xs text-gray-500">{item.detail}</div>
                   </div>
-                  <StatusBadge status={job.status} />
+                  <StatusBadge status={item.status} />
                 </div>
                 <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
-                  <span>{new Date(job.created_at).toLocaleString()}</span>
-                  <span>{job.sl ? `SL ${job.sl}` : "No SL"} · {job.tp ? `TP ${job.tp}` : "No TP"}</span>
+                  <span>{new Date(item.timestamp).toLocaleString()}</span>
+                  <span>{item.source === "job" ? "worker" : item.source === "command" ? "command" : item.source === "ack" ? "ack" : "ea-event"}</span>
                 </div>
-                {job.error ? <div className="mt-2 text-xs text-red-300">{job.error}</div> : null}
+                {item.error ? <div className="mt-2 text-xs text-red-300">{item.error}</div> : null}
               </div>
-            )) : <EmptyState title="No trade jobs yet" description="Queued and executed MT5 jobs will stream here in real time." icon={History} />}
+            )) : <EmptyState title={executionMode === "legacy-worker" ? "No trade jobs yet" : "No EA command activity yet"} description={executionMode === "legacy-worker" ? "Queued and executed MT5 jobs will stream here in real time." : "Queued commands, acknowledgements, and EA runtime events will stream here in real time."} icon={History} />}
           </div>
         </div>
       </div>
@@ -2631,7 +2913,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
         <div className="rounded-xl border border-[#1f1f1f] bg-[#101010] p-5 space-y-4">
           <div>
             <div className="text-xs uppercase tracking-[0.2em] text-gray-500">Manual Trade Queue</div>
-            <div className="mt-1 text-sm text-gray-300">This uses the same live `trade_jobs` path as the existing strategies page.</div>
+            <div className="mt-1 text-sm text-gray-300">{executionMode === "legacy-worker" ? "This uses the live worker trade job queue." : "This sends control-plane commands and waits for EA acknowledgements."}</div>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Connection" value={selectedConnection ? `${selectedConnection.account_login} · ${selectedConnection.broker_server}` : "No connection"} />
@@ -2677,6 +2959,14 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
               <div>
                 <div className="text-xl font-semibold">IFX Manual Terminal</div>
                 <div className="text-xs text-gray-500">Live route wired to MT5 runtime, chart feed, setup monitor, and trade queue</div>
+                {executionMode === "ea-first" ? (
+                  <div className="mt-2 flex items-center gap-2">
+                    <Badge className={latestCommandAck?.status === "rejected" ? "border-red-500/30 bg-red-500/15 text-red-200" : latestCommandAck ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-200" : "border-gray-500/30 bg-gray-500/10 text-gray-300"}>
+                      {latestCommandAck ? `EA ack: ${latestCommandAck.status}` : "EA ack: waiting"}
+                    </Badge>
+                    <span className="text-[11px] text-gray-500">{latestCommandAck ? timeAgo(latestCommandAck.acknowledged_at || latestCommandAck.created_at) : "No acknowledgements yet"}</span>
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>
@@ -2704,6 +2994,14 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
               <div>
                 <div className="text-sm font-semibold">IFX Terminal</div>
                 <div className="text-[10px] text-gray-500">Live MT5 terminal route</div>
+                {executionMode === "ea-first" ? (
+                  <div className="mt-1 flex items-center gap-2">
+                    <Badge className={latestCommandAck?.status === "rejected" ? "border-red-500/30 bg-red-500/15 text-red-200" : latestCommandAck ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-200" : "border-gray-500/30 bg-gray-500/10 text-gray-300"}>
+                      {latestCommandAck ? latestCommandAck.status : "waiting"}
+                    </Badge>
+                    <span className="text-[10px] text-gray-500">{latestCommandAck ? timeAgo(latestCommandAck.acknowledged_at || latestCommandAck.created_at) : "No ack"}</span>
+                  </div>
+                ) : null}
               </div>
             </div>
             <div className="text-right text-xs">
