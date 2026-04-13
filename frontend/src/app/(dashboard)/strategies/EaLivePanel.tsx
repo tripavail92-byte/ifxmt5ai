@@ -195,13 +195,17 @@ function TradeAuditLog({ connectionId }: { connectionId: string }) {
   const [expanded,   setExpanded]   = useState(false);
 
   const load = useCallback(async (cursor?: string) => {
-    const url = `/api/ea/trade-audit?connection_id=${connectionId}&limit=20${cursor ? `&cursor=${cursor}` : ""}`;
-    const res = await fetch(url);
-    if (!res.ok) { setLoading(false); return; }
-    const json = await res.json() as { rows: TradeAuditRow[]; next_cursor: string | null };
-    setRows(prev => cursor ? [...prev, ...json.rows] : json.rows);
-    setNextCursor(json.next_cursor);
-    setLoading(false);
+    setLoading(true);
+    try {
+      const url = `/api/ea/trade-audit?connection_id=${connectionId}&limit=20${cursor ? `&cursor=${cursor}` : ""}`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const json = await res.json() as { rows: TradeAuditRow[]; next_cursor: string | null };
+      setRows(prev => cursor ? [...prev, ...json.rows] : json.rows);
+      setNextCursor(json.next_cursor);
+    } finally {
+      setLoading(false);
+    }
   }, [connectionId]);
 
   useEffect(() => { load(); }, [load]);
@@ -263,9 +267,10 @@ function TradeAuditLog({ connectionId }: { connectionId: string }) {
           {nextCursor && (
             <button
               onClick={() => load(nextCursor)}
-              className="text-[9px] text-gray-600 hover:text-gray-400 font-mono pt-1"
+              disabled={loading}
+              className="text-[9px] text-gray-600 hover:text-gray-400 disabled:opacity-40 font-mono pt-1"
             >
-              load more ↓
+              {loading ? "loading…" : "load more ↓"}
             </button>
           )}
         </div>
