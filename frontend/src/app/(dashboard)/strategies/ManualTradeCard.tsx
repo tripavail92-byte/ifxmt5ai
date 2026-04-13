@@ -109,12 +109,14 @@ function getDecimals(sym: string): number {
   return 5;
 }
 
+// calcZone kept for legacy reference only — active code uses pivot ± atrZonePct
 function calcZone(ep: number, zp: number) {
   return {
     low:  ep * (1 - zp / 100),
     high: ep * (1 + zp / 100),
   };
 }
+void calcZone;
 
 function loadStoredSymbols(): [string, string] {
   if (typeof window === "undefined") return DEFAULT_SYMBOLS as [string, string];
@@ -199,9 +201,12 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   const [orderType, setOrderType] = useState<"market" | "limit" | "stop">("market");
   const [pendingPrice, setPendingPrice] = useState<string>("");
 
-  // Zone state
-  const [entryPrice, setEntryPrice] = useState<string>("");
-  const [zonePercent, setZonePercent] = useState<number>(ZONE_DEFAULT_FALLBACK);
+  // Zone state — v9.30 fields
+  const [pivot, setPivot] = useState<string>("");
+  const [tp1, setTp1] = useState<string>("");
+  const [tp2, setTp2] = useState<string>("");
+  const [atrZonePct, setAtrZonePct] = useState<number>(10.0);
+  const [slPadMult, setSlPadMult] = useState<number>(2.0);
   const [showEntryZones, setShowEntryZones] = useState<boolean>(true);
   const [showTPZones, setShowTPZones] = useState<boolean>(true);
 
@@ -225,8 +230,14 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     id: string;
     symbol: string;
     side: "buy" | "sell";
-    entry_price: number;
-    zone_percent: number;
+    entry_price: number | null;
+    zone_percent: number | null;
+    pivot: number | null;
+    tp1: number | null;
+    tp2: number | null;
+    bias: string | null;
+    atr_zone_pct: number | null;
+    sl_pad_mult: number | null;
     timeframe: string;
     ai_sensitivity?: number;
     trade_now_active?: boolean;
@@ -295,8 +306,14 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
           id: string;
           symbol: string;
           side: "buy" | "sell";
-          entry_price: number;
-          zone_percent: number;
+          entry_price: number | null;
+          zone_percent: number | null;
+          pivot: number | null;
+          tp1: number | null;
+          tp2: number | null;
+          bias: string | null;
+          atr_zone_pct: number | null;
+          sl_pad_mult: number | null;
           timeframe: string;
           ai_sensitivity?: number;
           trade_now_active?: boolean;
@@ -400,19 +417,29 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   }
 
   async function handleTrackSetup() {
-    if (!validEp || !autoConn) return;
+    if (!validPivot || !autoConn) return;
     setSetupSaving(true);
     setSetupResult(null);
+    const pivotVal = parseFloat(pivot);
+    const tp1Val = parseFloat(tp1);
+    const tp2Val = parseFloat(tp2);
     try {
+      const biasStr = side === "buy" ? "buy" : "sell";
       const newId = await saveTrackedSetup({
         connection_id: autoConn.id,
         symbol: formSymbol,
         side,
-        entry_price: ep,
-        zone_percent: zonePercent,
+        entry_price: pivotVal,
+        zone_percent: atrZonePct,
         timeframe: getSelectedSetupTimeframe(),
         ai_sensitivity: aiSensitivity,
         setup_id: slotSetupIds[formSymbol] ?? null,
+        pivot: pivotVal,
+        tp1: isNaN(tp1Val) ? null : tp1Val,
+        tp2: isNaN(tp2Val) ? null : tp2Val,
+        bias: biasStr,
+        atr_zone_pct: atrZonePct,
+        sl_pad_mult: slPadMult,
       });
       setSlotSetupIds(prev => ({ ...prev, [formSymbol]: newId }));
       setSetupsBySymbol(prev => ({
@@ -421,8 +448,14 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
           id: newId,
           symbol: formSymbol,
           side,
-          entry_price: ep,
-          zone_percent: zonePercent,
+          entry_price: pivotVal,
+          zone_percent: atrZonePct,
+          pivot: pivotVal,
+          tp1: isNaN(tp1Val) ? null : tp1Val,
+          tp2: isNaN(tp2Val) ? null : tp2Val,
+          bias: biasStr,
+          atr_zone_pct: atrZonePct,
+          sl_pad_mult: slPadMult,
           timeframe: getSelectedSetupTimeframe(),
           ai_sensitivity: aiSensitivity,
         },
@@ -436,7 +469,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   }
 
   async function handleTradeNow() {
-    if (!validEp || !autoConn) return;
+    if (!autoConn) return;
     if (activeSetupState === "DEAD") {
       setTradeNowResult({
         ok: false,
@@ -451,15 +484,25 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
 
+      const pivotVal2 = parseFloat(pivot);
+      const tp1Val2   = parseFloat(tp1);
+      const tp2Val2   = parseFloat(tp2);
+      const biasStr2  = side === "buy" ? "buy" : "sell";
       const setupId = await activateTradeNow({
         connection_id:  autoConn.id,
         symbol:         formSymbol,
         side,
-        entry_price:    ep,
-        zone_percent:   zonePercent,
+        entry_price:    validPivot ? pivotVal2 : 0,
+        zone_percent:   atrZonePct,
         timeframe:      getSelectedSetupTimeframe(),
         ai_sensitivity: aiSensitivity,
         setup_id:       slotSetupIds[formSymbol] ?? null,
+        pivot:          validPivot ? pivotVal2 : null,
+        tp1:            isNaN(tp1Val2) ? null : tp1Val2,
+        tp2:            isNaN(tp2Val2) ? null : tp2Val2,
+        bias:           biasStr2,
+        atr_zone_pct:   atrZonePct,
+        sl_pad_mult:    slPadMult,
       });
 
       // Update local IDs so the monitoring strip appears
@@ -470,8 +513,14 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
           id: setupId,
           symbol: formSymbol,
           side,
-          entry_price: ep,
-          zone_percent: zonePercent,
+          entry_price: validPivot ? pivotVal2 : null,
+          zone_percent: atrZonePct,
+          pivot: validPivot ? pivotVal2 : null,
+          tp1: isNaN(tp1Val2) ? null : tp1Val2,
+          tp2: isNaN(tp2Val2) ? null : tp2Val2,
+          bias: biasStr2,
+          atr_zone_pct: atrZonePct,
+          sl_pad_mult: slPadMult,
           timeframe: getSelectedSetupTimeframe(),
           ai_sensitivity: aiSensitivity,
           trade_now_active: true,
@@ -499,8 +548,11 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     if (db) {
       setFormSymbol(sym);
       setSide(db.side);
-      setZonePercent(Number(db.zone_percent) || getZoneDefault(sym));
-      setEntryPrice(String(db.entry_price ?? ""));
+      setPivot(db.pivot != null ? String(db.pivot) : String(db.entry_price ?? ""));
+      setTp1(db.tp1 != null ? String(db.tp1) : "");
+      setTp2(db.tp2 != null ? String(db.tp2) : "");
+      setAtrZonePct(db.atr_zone_pct != null ? Number(db.atr_zone_pct) : 10.0);
+      setSlPadMult(db.sl_pad_mult != null ? Number(db.sl_pad_mult) : 2.0);
       const sens = Number(db.ai_sensitivity ?? 5);
       setAiSensitivity(Number.isFinite(sens) ? Math.min(10, Math.max(1, sens)) : 5);
       setSetupResult(null);
@@ -511,8 +563,11 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     const draft = loadDraft(sym);
     setFormSymbol(sym);
     setSide(draft.side ?? "buy");
-    setZonePercent(typeof draft.zonePercent === "number" ? draft.zonePercent : getZoneDefault(sym));
-    setEntryPrice(draft.entryPrice ?? "");
+    setPivot(draft.entryPrice ?? "");
+    setTp1("");
+    setTp2("");
+    setAtrZonePct(typeof draft.zonePercent === "number" ? draft.zonePercent : 10.0);
+    setSlPadMult(2.0);
     const sens = typeof draft.aiSensitivity === "number" ? draft.aiSensitivity : 5;
     setAiSensitivity(Math.min(10, Math.max(1, sens)));
     setSetupResult(null);
@@ -524,12 +579,12 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     if (!hydrated) return;
     if (!formSymbol) return;
     saveDraft(formSymbol, {
-      entryPrice,
-      zonePercent,
+      entryPrice: pivot,
+      zonePercent: atrZonePct,
       side,
       aiSensitivity,
     });
-  }, [hydrated, formSymbol, entryPrice, zonePercent, side, aiSensitivity]);
+  }, [hydrated, formSymbol, pivot, atrZonePct, side, aiSensitivity]);
 
   // Subscribe to state-machine updates for the currently tracked setup
   useEffect(() => {
@@ -619,27 +674,30 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   const chartSym   = slots[activeSlot];
   const livePrice  = prices[chartSym];
 
-  // Zone computation
-  const ep = parseFloat(entryPrice);
-  const validEp = !isNaN(ep) && ep > 0;
-  const zone = useMemo(
-    () => (validEp ? calcZone(ep, zonePercent) : null),
-    [validEp, ep, zonePercent]
-  );
+  // Zone computation — v9.30: zone centred on pivot, thickness = pivot * atrZonePct/100
+  const ep = parseFloat(pivot);
+  const validPivot = !isNaN(ep) && ep > 0;
+  const zone = useMemo(() => {
+    if (!validPivot) return null;
+    const thick = ep * (atrZonePct / 100);
+    return { low: ep - thick * 0.5, high: ep + thick * 0.5 };
+  }, [validPivot, ep, atrZonePct]);
   const dec = getDecimals(chartSym);
   const fmtZ = (v: number) => v.toFixed(dec);
 
   // Auto-fill SL / TP whenever zone or side changes
   useEffect(() => {
     if (!zone) return;
+    const tp1Val = parseFloat(tp1);
+    const tp1OrHigh = (!isNaN(tp1Val) && tp1Val > 0) ? tp1Val : zone.high;
     if (side === "buy") {
       setSlValue(parseFloat(zone.low.toFixed(dec)));
-      setTpValue(parseFloat(zone.high.toFixed(dec)));
+      setTpValue(parseFloat(tp1OrHigh.toFixed(dec)));
     } else {
       setSlValue(parseFloat(zone.high.toFixed(dec)));
       setTpValue(parseFloat(zone.low.toFixed(dec)));
     }
-  }, [zone?.low, zone?.high, side]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [zone?.low, zone?.high, side, tp1]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="rounded-xl border border-[#1e1e1e] bg-[#0a0a0a] overflow-hidden shadow-2xl">
@@ -726,20 +784,70 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
               <Target className="size-3" /> Entry Settings
             </div>
             <div>
-              <label className="block text-[10px] text-gray-600 mb-1">Entry Price</label>
+              <label className="block text-[10px] text-gray-600 mb-1">Pivot Level</label>
               <input
                 type="number"
                 step="any"
                 placeholder={livePrice ? livePrice.bid.toFixed(dec) : "0.00000"}
-                value={entryPrice}
-                onChange={(e) => setEntryPrice(e.target.value)}
+                value={pivot}
+                onChange={(e) => setPivot(e.target.value)}
                 className="w-full h-8 rounded border border-[#2a2a2a] bg-[#111] text-xs text-white font-mono px-2.5 focus:outline-none focus:border-orange-500/50 placeholder:text-gray-700"
               />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[10px] text-gray-600 mb-1">TP1</label>
+                <input
+                  type="number"
+                  step="any"
+                  placeholder="0.00"
+                  value={tp1}
+                  onChange={(e) => setTp1(e.target.value)}
+                  className="w-full h-8 rounded border border-[#2a2a2a] bg-[#111] text-xs text-white font-mono px-2.5 focus:outline-none focus:border-emerald-500/50 placeholder:text-gray-700"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] text-gray-600 mb-1">TP2</label>
+                <input
+                  type="number"
+                  step="any"
+                  placeholder="0.00"
+                  value={tp2}
+                  onChange={(e) => setTp2(e.target.value)}
+                  className="w-full h-8 rounded border border-[#2a2a2a] bg-[#111] text-xs text-white font-mono px-2.5 focus:outline-none focus:border-emerald-500/50 placeholder:text-gray-700"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[10px] text-gray-600 mb-1">ATR Zone %</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0.1"
+                  max="100"
+                  value={atrZonePct}
+                  onChange={(e) => setAtrZonePct(parseFloat(e.target.value) || 10)}
+                  className="w-full h-8 rounded border border-[#2a2a2a] bg-[#111] text-xs text-white font-mono px-2.5 focus:outline-none focus:border-blue-500/50"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] text-gray-600 mb-1">SL Pad ×</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0.5"
+                  max="10"
+                  value={slPadMult}
+                  onChange={(e) => setSlPadMult(parseFloat(e.target.value) || 2)}
+                  className="w-full h-8 rounded border border-[#2a2a2a] bg-[#111] text-xs text-white font-mono px-2.5 focus:outline-none focus:border-blue-500/50"
+                />
+              </div>
             </div>
             {zone && (
               <div className="bg-[#141414] rounded-lg p-2.5 space-y-1.5">
                 <div className="flex justify-between items-center">
-                  <span className="text-[10px] text-gray-500">Suggested Entry Zone</span>
+                  <span className="text-[10px] text-gray-500">Entry Zone</span>
                   <div className="flex items-center gap-1.5">
                     {slotSetupIds[formSymbol] && (
                       <span className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/20 font-semibold">MONITORING</span>
@@ -749,16 +857,22 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                     </span>
                   </div>
                 </div>
+                {tp1 && !isNaN(parseFloat(tp1)) && parseFloat(tp1) > 0 && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] text-gray-500">TP1</span>
+                    <span className="text-[10px] font-mono font-semibold text-emerald-400">{parseFloat(tp1).toFixed(dec)}</span>
+                  </div>
+                )}
+                {tp2 && !isNaN(parseFloat(tp2)) && parseFloat(tp2) > 0 && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] text-gray-500">TP2</span>
+                    <span className="text-[10px] font-mono font-semibold text-emerald-300">{parseFloat(tp2).toFixed(dec)}</span>
+                  </div>
+                )}
                 <div className="flex justify-between items-center">
                   <span className="text-[10px] text-gray-500">Loss Edge (SL)</span>
                   <span className="text-[10px] font-mono font-semibold text-red-400">
                     {side === "buy" ? fmtZ(zone.low) : fmtZ(zone.high)}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-[10px] text-gray-500">Target (TP)</span>
-                  <span className="text-[10px] font-mono font-semibold text-emerald-400">
-                    {side === "buy" ? fmtZ(zone.high) : fmtZ(zone.low)}
                   </span>
                 </div>
               </div>
@@ -823,7 +937,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
             )}
 
             {/* Track Setup button */}
-            {validEp && (
+            {validPivot && (
               <>
                 <p className="text-[10px] text-gray-600 mb-2">
                   Signals are generated using your broker’s MT5 candle data. Different brokers may produce slightly different structure signals.
@@ -858,7 +972,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
             )}
 
             {/* ── TRADE NOW ─────────────────────────────────────────────────── */}
-            {validEp && (
+            {validPivot && (
               <div className="mt-1 space-y-1.5 pt-2 border-t border-[#1e1e1e]">
                 {/* Armed status strip — visible while Trade Now is active */}
                 {tradeNowBySymbol[formSymbol] && (
@@ -931,34 +1045,19 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                 className="size-3.5 accent-blue-500"
               />
             </label>
-            <div className="p-2.5 bg-[#141414] rounded-lg space-y-2">
+<div className="p-2.5 bg-[#141414] rounded-lg space-y-1">
               <div className="flex justify-between items-center">
-                <div>
-                  <span className="text-xs text-gray-300">Zone Percent</span>
-                  <span className="block text-[10px] text-gray-600">Default: {getZoneDefault(chartSym).toFixed(2)}%</span>
-                </div>
-                <span className="text-xs font-semibold text-blue-400">{zonePercent.toFixed(2)}%</span>
+                <span className="text-xs text-gray-300">ATR Zone %</span>
+                <span className="text-xs font-semibold text-blue-400">{atrZonePct.toFixed(1)}%</span>
               </div>
-              <input
-                type="range"
-                min="0"
-                max="5"
-                step="0.01"
-                value={zonePercent}
-                onChange={(e) => setZonePercent(parseFloat(e.target.value))}
-                className="w-full h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
-              />
-              <div className="flex justify-between text-[10px] text-gray-600">
-                <span>0%</span>
-                <span>5%</span>
-              </div>
+              <p className="text-[10px] text-gray-600">Zone thickness = pivot × {atrZonePct.toFixed(1)}%</p>
             </div>
 
-            {/* Prompt to monitor when entry is entered but not yet tracked */}
-            {validEp && !slotSetupIds[formSymbol] && (
+            {/* Prompt to monitor when pivot is entered but not yet tracked */}
+            {validPivot && !slotSetupIds[formSymbol] && (
               <div className="rounded-lg border border-dashed border-[#2a2a2a] p-2.5">
                 <p className="text-[10px] text-gray-700 text-center">
-                  Enter entry price and click Monitor Zone to activate state machine
+                  Enter pivot level and click Monitor Zone to activate state machine
                 </p>
               </div>
             )}

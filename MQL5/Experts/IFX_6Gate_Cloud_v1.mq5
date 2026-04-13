@@ -142,6 +142,234 @@ double       s_calc_inval             = 0.0;
 bool         s_zone_valid             = false;
 int          s_atr_handle             = INVALID_HANDLE;
 
+// Phase 4: command polling + live-state push
+long         s_cmd_cursor             = 0;    // highest sequence_no acked so far
+datetime     s_last_cmd_poll          = 0;    // last command poll attempt
+datetime     s_last_hud_push          = 0;    // last live-state POST attempt
+
+//==========================================================================
+// CMD_PollAndExecute — polls /api/ea/commands and executes each command
+// Called every ~5 seconds from OnTimer (STATE_READY only).
+//==========================================================================
+void CMD_PollAndExecute(const string frontend_url, const string conn_id, const string install_token)
+{
+   if(StringLen(frontend_url) == 0 || StringLen(conn_id) == 0 || StringLen(install_token) == 0) return;
+
+   // Build URL: GET /api/ea/commands?connection_id=...&cursor=...
+   string url = frontend_url + "/api/ea/commands"
+                + "?connection_id=" + conn_id
+                + "&cursor="        + IntegerToString(s_cmd_cursor)
+                + "&limit=20";
+
+   string headers = "Content-Type: application/json\r\nX-IFX-INSTALL-TOKEN: " + install_token + "\r\n";
+   uchar  empty[];
+   ArrayResize(empty, 0);
+   uchar  result[];
+   string result_headers = "";
+
+   ResetLastError();
+   int status = WebRequest("GET", url, headers, 5000, empty, result, result_headers);
+   if(status < 200 || status >= 300)
+   {
+      // Silent — avoid log spam on transient failures
+      return;
+   }
+
+   string resp = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+
+   // Quick sanity: must contain "commands"
+   if(StringFind(resp, "\"commands\"") < 0) return;
+
+   // Iterate over command objects.  We do a simple sequential scan rather than
+   // a full JSON parser — commands array is small (<= 20 items) and predictable.
+   int pos = StringFind(resp, "\"commands\"");
+   int arr_open = StringFind(resp, "[", pos);
+   if(arr_open < 0) return;
+
+   int depth    = 0;
+   int obj_open = -1;
+
+   for(int i = arr_open; i < StringLen(resp); i++)
+   {
+      ushort ch = StringGetCharacter(resp, i);
+
+      if(ch == '{')
+      {
+         if(depth == 1) obj_open = i;  // start of a command object at depth 1
+         depth++;
+      }
+      else if(ch == '}')
+      {
+         depth--;
+         if(depth == 1 && obj_open >= 0)
+         {
+            // Extract the command object substring
+            string cmd_json = StringSubstr(resp, obj_open, i - obj_open + 1);
+
+            // Parse fields we need
+            string cmd_id   = RC_JsonExtractStringAfter(cmd_json, 0, "id");
+            string cmd_type = RC_JsonExtractStringAfter(cmd_json, 0, "command_type");
+            int    seq_no   = 0;
+            {
+               int sn_key = StringFind(cmd_json, "\"sequence_no\"");
+               if(sn_key >= 0)
+               {
+                  int colon = StringFind(cmd_json, ":", sn_key);
+                  if(colon >= 0) seq_no = (int)StringToInteger(StringSubstr(cmd_json, colon + 1, 20));
+               }
+            }
+
+            if(StringLen(cmd_id) == 0 || StringLen(cmd_type) == 0) { obj_open = -1; continue; }
+
+            // ── Execute command ───────────────────────────────────────────
+            string ack_status = "acknowledged";
+
+            if(cmd_type == "close_position")
+            {
+               if(RE_CountOpenPositions(g_cfg) > 0)
+               {
+                  TE_CloseAllPositions(g_cfg);
+                  Print("🛑 [CMD] close_position executed. id=", cmd_id);
+               }
+            }
+            else if(cmd_type == "sync_config")
+            {
+               // Force immediate config re-fetch on the next poll cycle
+               s_last_cfg_poll = 0;
+               Print("🔄 [CMD] sync_config — forced re-fetch. id=", cmd_id);
+            }
+            else if(cmd_type == "arm_trade" || cmd_type == "set_setup")
+            {
+               // Extract payload fields for pivot/tp1/tp2/bias — update live config
+               // Only applied when no position is open (safe to change setup mid-session)
+               if(RE_CountOpenPositions(g_cfg) == 0)
+               {
+                  int pay_pos = StringFind(cmd_json, "\"payload\"");
+                  if(pay_pos >= 0)
+                  {
+                     string bias_val  = RC_JsonExtractStringAfter(cmd_json, pay_pos, "bias");
+                     string pivot_str = RC_JsonExtractStringAfter(cmd_json, pay_pos, "pivot");
+                     string tp1_str   = RC_JsonExtractStringAfter(cmd_json, pay_pos, "tp1");
+                     string tp2_str   = RC_JsonExtractStringAfter(cmd_json, pay_pos, "tp2");
+
+                     // Use field directly too (bare numeric): re-scan for "entry_price" legacy
+                     if(StringLen(pivot_str) == 0)
+                        pivot_str = RC_JsonExtractStringAfter(cmd_json, pay_pos, "entry_price");
+
+                     if(StringLen(bias_val) > 0)
+                     {
+                        string b = bias_val;
+                        StringToUpper(b);
+                        if(b == "BUY" || b == "LONG")        g_cfg.bias = "Long";
+                        else if(b == "SELL" || b == "SHORT") g_cfg.bias = "Short";
+                        else                                  g_cfg.bias = "Neutral";
+                     }
+                     if(StringLen(pivot_str) > 0 && StringToDouble(pivot_str) > 0.0)
+                        g_cfg.pivot = StringToDouble(pivot_str);
+                     if(StringLen(tp1_str) > 0 && StringToDouble(tp1_str) > 0.0)
+                        g_cfg.tp1 = StringToDouble(tp1_str);
+                     if(StringLen(tp2_str) > 0 && StringToDouble(tp2_str) > 0.0)
+                        g_cfg.tp2 = StringToDouble(tp2_str);
+
+                     RecalcZone();
+                     Print("\U0001F3AF [CMD] arm_trade applied. bias=", g_cfg.bias,
+                           " pivot=", DoubleToString(g_cfg.pivot, _Digits),
+                           "  id=", cmd_id);
+                  }
+               }
+               else
+               {
+                  // Trade active — cannot change setup mid-position
+                  Print("ℹ️ [CMD] arm_trade deferred — trade open. id=", cmd_id);
+                  ack_status = "failed";
+               }
+            }
+            else if(cmd_type == "cancel_trade")
+            {
+               // Reset pivot so the EA stops watching this zone
+               g_cfg.pivot = 0.0;
+               s_zone_valid = false;
+               Print("\U0001F6AB [CMD] cancel_trade \u2014 pivot cleared. id=", cmd_id);
+            }
+            else
+            {
+               Print("ℹ️ [CMD] unknown command_type=", cmd_type, " id=", cmd_id);
+            }
+
+            // ── ACK ─────────────────────────────────────────────────────
+            string ack_url  = frontend_url + "/api/ea/commands/ack";
+            string ack_json = "{";
+            ack_json += "\"connection_id\":\"" + RC_EscapeJson(conn_id) + "\",";
+            ack_json += "\"command_id\":\""    + RC_EscapeJson(cmd_id)  + "\",";
+            ack_json += "\"sequence_no\":"     + IntegerToString(seq_no) + ",";
+            ack_json += "\"status\":\""        + RC_EscapeJson(ack_status) + "\"";
+            ack_json += "}";
+
+            string ack_resp = "";
+            RC_ControlPlanePost(ack_url, ack_json, ack_resp, 5000);
+
+            // Advance cursor to highest processed sequence_no
+            if(seq_no > s_cmd_cursor) s_cmd_cursor = seq_no;
+
+            obj_open = -1;
+         }
+      }
+      else if(ch == ']' && depth == 1)
+      {
+         // End of commands array
+         break;
+      }
+   }
+}
+
+//==========================================================================
+// HUD_PushLiveState — POSTs current HUD + position state to /api/ea/live-state
+// Called every ~15 seconds from OnTimer (STATE_READY only).
+//==========================================================================
+void HUD_PushLiveState(
+   const string frontend_url, const string conn_id, const string install_token,
+   const string hud_status,   bool in_zone,         bool be_secured,
+   int daily_cnt)
+{
+   if(StringLen(frontend_url) == 0 || StringLen(conn_id) == 0 || StringLen(install_token) == 0) return;
+
+   // Gather position data
+   double live_sl   = TE_GetLiveSL(g_cfg);
+   double live_lots = TE_GetLiveLots(g_cfg);
+   double unrealised_pnl = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(PositionGetString(t, POSITION_SYMBOL) != _Symbol) continue;
+      long mg = PositionGetInteger(t, POSITION_MAGIC);
+      if(mg < g_cfg.base_magic || mg > g_cfg.base_magic + 50) continue;
+      unrealised_pnl += PositionGetDouble(t, POSITION_PROFIT);
+   }
+
+   // Build JSON
+   string j = "{";
+   j += "\"connection_id\":\""   + RC_EscapeJson(conn_id) + "\",";
+   j += "\"hud_status\":\""      + RC_EscapeJson(hud_status) + "\",";
+   j += "\"sys_bias\":\""        + RC_EscapeJson(g_cfg.bias) + "\",";
+   j += "\"sys_pivot\":"         + DoubleToString(g_cfg.pivot, _Digits) + ",";
+   j += "\"sys_tp1\":"           + DoubleToString(g_cfg.tp1,   _Digits) + ",";
+   j += "\"sys_tp2\":"           + DoubleToString(g_cfg.tp2,   _Digits) + ",";
+   j += "\"invalidation_lvl\":"  + DoubleToString(s_calc_inval, _Digits) + ",";
+   j += "\"live_sl\":"           + DoubleToString(live_sl,   _Digits) + ",";
+   j += "\"live_lots\":"         + DoubleToString(live_lots, 2)        + ",";
+   j += "\"is_inside_zone\":"    + (in_zone    ? "true" : "false") + ",";
+   j += "\"is_be_secured\":"     + (be_secured ? "true" : "false") + ",";
+   j += "\"unrealised_pnl\":"    + DoubleToString(unrealised_pnl, 2) + ",";
+   j += "\"daily_trades\":"      + IntegerToString(daily_cnt) + ",";
+   j += "\"daily_pnl_usd\":"     + DoubleToString(0.0, 2) + ",";  // 0 until HistoryDeals tracked
+   j += "\"top_ledger\":[]";
+   j += "}";
+
+   string url = frontend_url + "/api/ea/live-state";
+   string resp = "";
+   RC_ControlPlanePost(url, j, resp, 5000);
+}
+
 //==========================================================================
 // ZONE CALCULATION
 // Zone is centred on pivot, thickness = ATR(D1,14) × atr_zone_pct / 100
@@ -706,6 +934,21 @@ void OnTimer()
    }
 
    if(SE_NeedsRedraw()) ChartRedraw(0);
+
+   // ── Phase 4: command polling (every 5 s) ──────────────────────────────
+   if(StringLen(i_frontendUrl) > 0 && TimeCurrent() - s_last_cmd_poll >= 5)
+   {
+      s_last_cmd_poll = TimeCurrent();
+      CMD_PollAndExecute(i_frontendUrl, g_cfg.connection_id, RelayClient_GetInstallToken());
+   }
+
+   // ── Phase 4: live-state push (every 15 s) ─────────────────────────────
+   if(StringLen(i_frontendUrl) > 0 && TimeCurrent() - s_last_hud_push >= 15)
+   {
+      s_last_hud_push = TimeCurrent();
+      HUD_PushLiveState(i_frontendUrl, g_cfg.connection_id, RelayClient_GetInstallToken(),
+                        hud_status, in_zone, te_be_secured, daily_cnt);
+   }
 }
 
 //==========================================================================

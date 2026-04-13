@@ -159,6 +159,13 @@ export async function saveTrackedSetup(params: {
   ai_sensitivity: number;
   trade_plan_notes?: string | null;
   setup_id?: string | null;
+  // v9.30 fields
+  pivot?: number | null;
+  tp1?: number | null;
+  tp2?: number | null;
+  bias?: string | null;
+  atr_zone_pct?: number | null;
+  sl_pad_mult?: number | null;
 }): Promise<string> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -192,6 +199,24 @@ export async function saveTrackedSetup(params: {
 
   const admin = createAdminClient();
   await assertConnectionOwnership(admin, user.id, params.connection_id);
+
+  // Patch v9.30 fields onto the setup row (non-breaking — columns added by phase1 migration)
+  const v930Patch: Record<string, unknown> = {};
+  if (params.pivot != null)        v930Patch.pivot        = params.pivot;
+  if (params.tp1 != null)          v930Patch.tp1          = params.tp1;
+  if (params.tp2 != null)          v930Patch.tp2          = params.tp2;
+  if (params.bias != null)         v930Patch.bias         = params.bias;
+  if (params.atr_zone_pct != null) v930Patch.atr_zone_pct = params.atr_zone_pct;
+  if (params.sl_pad_mult != null)  v930Patch.sl_pad_mult  = params.sl_pad_mult;
+
+  if (Object.keys(v930Patch).length > 0) {
+    const service = createServiceClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    );
+    await service.from("trading_setups").update(v930Patch).eq("id", String(newId));
+  }
+
   await publishEaConfigForConnection(admin, params.connection_id);
 
   return String(newId);
@@ -287,6 +312,13 @@ export async function activateTradeNow(params: {
   ai_sensitivity: number;
   trade_plan_notes?: string | null;
   setup_id?: string | null;
+  // v9.30 fields
+  pivot?: number | null;
+  tp1?: number | null;
+  tp2?: number | null;
+  bias?: string | null;
+  atr_zone_pct?: number | null;
+  sl_pad_mult?: number | null;
 }): Promise<string> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -313,6 +345,23 @@ export async function activateTradeNow(params: {
   if (upsertErr) throw new Error(upsertErr.message);
   const setupId = newId as string;
 
+  // Patch v9.30 fields onto the setup row
+  const v930Patch: Record<string, unknown> = {};
+  if (params.pivot != null)        v930Patch.pivot        = params.pivot;
+  if (params.tp1 != null)          v930Patch.tp1          = params.tp1;
+  if (params.tp2 != null)          v930Patch.tp2          = params.tp2;
+  if (params.bias != null)         v930Patch.bias         = params.bias;
+  if (params.atr_zone_pct != null) v930Patch.atr_zone_pct = params.atr_zone_pct;
+  if (params.sl_pad_mult != null)  v930Patch.sl_pad_mult  = params.sl_pad_mult;
+
+  if (Object.keys(v930Patch).length > 0) {
+    const serviceV930 = createServiceClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    );
+    await serviceV930.from("trading_setups").update(v930Patch).eq("id", setupId);
+  }
+
   const { data: conn } = await supabase
     .from("mt5_user_connections")
     .select("id")
@@ -337,6 +386,13 @@ export async function activateTradeNow(params: {
         timeframe: params.timeframe,
         ai_sensitivity: params.ai_sensitivity,
         trade_plan_notes: params.trade_plan_notes ?? null,
+        // v9.30 fields
+        pivot:        params.pivot        ?? null,
+        tp1:          params.tp1          ?? null,
+        tp2:          params.tp2          ?? null,
+        bias:         params.bias         ?? null,
+        atr_zone_pct: params.atr_zone_pct ?? null,
+        sl_pad_mult:  params.sl_pad_mult  ?? null,
       },
       idempotencyKey: `arm_trade:${params.connection_id}:${setupId}`,
       expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
