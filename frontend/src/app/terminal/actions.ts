@@ -1,12 +1,16 @@
 "use server";
 
+import { createAdminClient } from "@/utils/supabase/admin";
+import { assertConnectionOwnership, enqueueEaCommand, getConnectionExecutionMode, publishEaConfigForConnection, setConnectionExecutionMode } from "@/lib/ea-control-plane";
 import { createClient } from "@/utils/supabase/server";
+import type { EaExecutionMode } from "@/lib/ea-config";
 import type { PersistedTerminalSettings, TerminalPreferences } from "@/app/terminal/types";
 
 export async function saveTerminalSettings(input: {
   preferences: TerminalPreferences;
   termsVersion: string | null;
   termsAccepted: boolean;
+  connectionId?: string | null;
 }) {
   const supabase = await createClient();
   const {
@@ -35,6 +39,13 @@ export async function saveTerminalSettings(input: {
       return { ok: false as const, reason: "missing_table" as const };
     }
     throw new Error(`Failed to save terminal settings: ${error.message}`);
+  }
+
+  const connectionId = (input.connectionId ?? "").trim();
+  if (connectionId) {
+    const admin = createAdminClient();
+    await assertConnectionOwnership(admin, user.id, connectionId);
+    await publishEaConfigForConnection(admin, connectionId);
   }
 
   return { ok: true as const };
@@ -75,6 +86,45 @@ export async function getTerminalSettings(): Promise<PersistedTerminalSettings |
   };
 }
 
+export async function getConnectionExecutionModeAction(connectionId: string): Promise<EaExecutionMode> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) throw new Error("Unauthorized");
+
+  const admin = createAdminClient();
+  await assertConnectionOwnership(admin, user.id, connectionId);
+  return getConnectionExecutionMode(admin, connectionId);
+}
+
+export async function saveConnectionExecutionMode(input: { connectionId: string; executionMode: EaExecutionMode }) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) throw new Error("Unauthorized");
+
+  const admin = createAdminClient();
+  await assertConnectionOwnership(admin, user.id, input.connectionId);
+  const result = await setConnectionExecutionMode(admin, input.connectionId, input.executionMode);
+
+  if (input.executionMode === "ea-first") {
+    await enqueueEaCommand(admin, {
+      connectionId: input.connectionId,
+      userId: user.id,
+      commandType: "sync_config",
+      payloadJson: { reason: "execution_mode_changed", execution_mode: input.executionMode },
+      idempotencyKey: `sync_config:${input.connectionId}:${Date.now()}`,
+      expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    });
+  }
+
+  return { ok: true as const, changed: result.changed, executionMode: input.executionMode };
+}
+
 export async function closeTradeJob(input: {
   connectionId: string;
   ticket: number;
@@ -88,6 +138,27 @@ export async function closeTradeJob(input: {
   } = await supabase.auth.getUser();
 
   if (!user) throw new Error("Unauthorized");
+
+  const admin = createAdminClient();
+  await assertConnectionOwnership(admin, user.id, input.connectionId);
+  const executionMode = await getConnectionExecutionMode(admin, input.connectionId);
+
+  if (executionMode === "ea-first") {
+    const command = await enqueueEaCommand(admin, {
+      connectionId: input.connectionId,
+      userId: user.id,
+      commandType: "close_position",
+      payloadJson: {
+        ticket: input.ticket,
+        symbol: input.symbol,
+        volume: input.volume,
+        side: input.side,
+      },
+      idempotencyKey: `close:${input.connectionId}:${input.ticket}`,
+    });
+
+    return { ok: true as const, commandId: String(command?.id ?? "") };
+  }
 
   // Verify the connection belongs to this user
   const { data: conn } = await supabase
