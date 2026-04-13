@@ -147,6 +147,9 @@ long         s_cmd_cursor             = 0;    // highest sequence_no acked so fa
 datetime     s_last_cmd_poll          = 0;    // last command poll attempt
 datetime     s_last_hud_push          = 0;    // last live-state POST attempt
 
+// Phase 5: trade audit
+datetime     s_last_audit_check       = 0;    // last closed-trade scan
+
 //==========================================================================
 // CMD_PollAndExecute — polls /api/ea/commands and executes each command
 // Called every ~5 seconds from OnTimer (STATE_READY only).
@@ -546,6 +549,8 @@ int OnInit()
             s_cfg_retry_count     = 0;
             s_locked_conn_id      = g_cfg.connection_id;
             s_last_valid_cfg_time = TimeCurrent();
+            if(StringLen(i_frontendUrl) > 0)
+               TE_InitAuditContext(i_frontendUrl, g_cfg.connection_id, RelayClient_GetInstallToken());
          }
          else
          {
@@ -565,6 +570,7 @@ int OnInit()
          g_ea_state            = STATE_READY;
          s_locked_conn_id      = g_cfg.connection_id;
          s_last_valid_cfg_time = TimeCurrent();
+         // no audit context when running without cloud URL
       }
       else
       {
@@ -753,6 +759,8 @@ void OnTimer()
                s_last_valid_cfg_time   = TimeCurrent();
                s_hot_reload_fail_count = 0;
                RecalcZone();
+               if(StringLen(i_frontendUrl) > 0)
+                  TE_InitAuditContext(i_frontendUrl, g_cfg.connection_id, RelayClient_GetInstallToken());
                Print("✅ [TIMER] Config loaded and validated — STATE_READY");
             }
             else
@@ -949,7 +957,12 @@ void OnTimer()
       HUD_PushLiveState(i_frontendUrl, g_cfg.connection_id, RelayClient_GetInstallToken(),
                         hud_status, in_zone, te_be_secured, daily_cnt);
    }
-}
+   // ── Phase 5: closed-trade audit scan (every 60 s) ──────────────────────
+   if(StringLen(i_frontendUrl) > 0 && TimeCurrent() - s_last_audit_check >= 60)
+   {
+      s_last_audit_check = TimeCurrent();
+      TE_AuditScanClosedTrades(g_cfg);
+   }}
 
 //==========================================================================
 // OnChartEvent — button clicks handled by TradeExecutor flags

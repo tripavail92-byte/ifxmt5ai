@@ -1,7 +1,62 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createAdminClient } from "@/utils/supabase/admin";
+import { createClient } from "@/utils/supabase/server";
 import { isoNow, parseJsonBody, requireEaAuth } from "@/lib/ea-control-plane";
 
 export const runtime = "nodejs";
+
+// GET /api/ea/trade-audit?connection_id=...&limit=50&cursor=<iso>
+// Called by the dashboard (user session cookie auth) to paginate trade audit rows.
+export async function GET(req: NextRequest) {
+  const params       = req.nextUrl.searchParams;
+  const connectionId = (params.get("connection_id") ?? "").trim();
+  const limit        = Math.min(parseInt(params.get("limit") ?? "50", 10), 200);
+  const cursor       = params.get("cursor"); // ISO timestamp: return rows before this
+
+  if (!connectionId) {
+    return NextResponse.json({ error: "connection_id required" }, { status: 400 });
+  }
+
+  // Verify authenticated user owns this connection
+  const userClient = await createClient();
+  const { data: { user } } = await userClient.auth.getUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const admin = createAdminClient();
+  const { data: conn } = await admin
+    .from("mt5_user_connections")
+    .select("id")
+    .eq("id", connectionId)
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (!conn) {
+    return NextResponse.json({ error: "Connection not found" }, { status: 404 });
+  }
+
+  let query = admin
+    .from("ea_trade_audit")
+    .select("id, symbol, side, entry, sl, tp, volume, broker_ticket, status, decision_reason, payload, created_at")
+    .eq("connection_id", connectionId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (cursor) {
+    query = query.lt("created_at", cursor);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  const rows = data ?? [];
+  const nextCursor = rows.length === limit ? rows[rows.length - 1].created_at : null;
+  return NextResponse.json({ rows, next_cursor: nextCursor });
+}
 
 export async function POST(req: NextRequest) {
   const body = await parseJsonBody<{

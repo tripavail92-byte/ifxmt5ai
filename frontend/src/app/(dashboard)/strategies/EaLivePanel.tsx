@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/utils/supabase/client";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -46,6 +46,21 @@ interface EaLiveState {
   daily_pnl_usd:    number;
   top_ledger:       LedgerEntry[];
   updated_at:       string;
+}
+
+interface TradeAuditRow {
+  id:              string;
+  symbol:          string;
+  side:            string;
+  entry:           number | null;
+  sl:              number | null;
+  tp:              number | null;
+  volume:          number | null;
+  broker_ticket:   string | null;
+  status:          string;
+  decision_reason: string | null;
+  payload:         Record<string, unknown>;
+  created_at:      string;
 }
 
 // ─── HUD status config ────────────────────────────────────────────────────────
@@ -167,6 +182,94 @@ function NoDataCard() {
       <div className="text-center py-6 text-gray-700 text-xs">
         EA not yet connected — no live state received
       </div>
+    </div>
+  );
+}
+
+// ─── Trade Audit Log ──────────────────────────────────────────────────────────
+
+function TradeAuditLog({ connectionId }: { connectionId: string }) {
+  const [rows,       setRows]       = useState<TradeAuditRow[]>([]);
+  const [loading,    setLoading]    = useState(true);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [expanded,   setExpanded]   = useState(false);
+
+  const load = useCallback(async (cursor?: string) => {
+    const url = `/api/ea/trade-audit?connection_id=${connectionId}&limit=20${cursor ? `&cursor=${cursor}` : ""}`;
+    const res = await fetch(url);
+    if (!res.ok) { setLoading(false); return; }
+    const json = await res.json() as { rows: TradeAuditRow[]; next_cursor: string | null };
+    setRows(prev => cursor ? [...prev, ...json.rows] : json.rows);
+    setNextCursor(json.next_cursor);
+    setLoading(false);
+  }, [connectionId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const sideColor = (side: string) => {
+    const s = side.toLowerCase();
+    if (s.includes("buy") && !s.includes("close")) return "text-emerald-400";
+    if (s.includes("sell") && !s.includes("close")) return "text-red-400";
+    return "text-gray-500";
+  };
+
+  const statusBadge = (status: string) => {
+    if (status === "open")   return "text-blue-400 border-blue-500/30 bg-blue-500/10";
+    if (status === "closed") return "text-gray-400 border-gray-600/30 bg-gray-700/10";
+    if (status === "failed") return "text-red-400 border-red-500/30 bg-red-500/10";
+    return "text-gray-600 border-gray-700/20 bg-transparent";
+  };
+
+  const pnlFromPayload = (row: TradeAuditRow) => {
+    const pnl = typeof row.payload?.pnl === "number" ? row.payload.pnl : null;
+    if (pnl == null) return null;
+    return { value: pnl, cls: pnl >= 0 ? "text-emerald-400" : "text-red-400" };
+  };
+
+  return (
+    <div className="border-t border-[#1a1a1a] pt-3">
+      <button
+        onClick={() => setExpanded(e => !e)}
+        className="flex items-center justify-between w-full text-left mb-2"
+      >
+        <span className="text-[9px] text-gray-600 uppercase tracking-widest">Trade Audit</span>
+        <span className="text-[9px] text-gray-700 font-mono">{expanded ? "▲ hide" : "▼ show"}</span>
+      </button>
+
+      {expanded && (
+        <div className="space-y-1">
+          {loading && (
+            <div className="text-[10px] text-gray-700 font-mono">loading…</div>
+          )}
+          {!loading && rows.length === 0 && (
+            <div className="text-[10px] text-gray-700 font-mono">No trades recorded yet</div>
+          )}
+          {rows.map(row => {
+            const pnl = pnlFromPayload(row);
+            return (
+              <div key={row.id} className="grid grid-cols-[70px_55px_55px_50px_1fr_60px] gap-x-1.5 items-center text-[10px] font-mono border-b border-[#131313] pb-1 last:border-0">
+                <span className="text-gray-400 truncate">{row.symbol}</span>
+                <span className={sideColor(row.side)}>{row.side.replace("_close", "↩").toUpperCase()}</span>
+                <span className="text-gray-500">{row.entry != null ? fmtLevels(row.entry, row.symbol) : "—"}</span>
+                <span className={`text-[9px] px-1 py-0.5 rounded border font-semibold ${statusBadge(row.status)}`}>{row.status}</span>
+                <span className="text-gray-700 truncate text-[9px]">{row.broker_ticket ?? "—"}</span>
+                {pnl != null
+                  ? <span className={`text-right font-semibold ${pnl.cls}`}>{pnl.value >= 0 ? "+" : ""}${pnl.value.toFixed(2)}</span>
+                  : <span className="text-gray-700 text-right">—</span>
+                }
+              </div>
+            );
+          })}
+          {nextCursor && (
+            <button
+              onClick={() => load(nextCursor)}
+              className="text-[9px] text-gray-600 hover:text-gray-400 font-mono pt-1"
+            >
+              load more ↓
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -396,6 +499,9 @@ export function EaLivePanel({ connectionId }: { connectionId: string }) {
           </div>
         </div>
       )}
+
+      {/* ── Trade Audit Log ──────────────────────────────────────────── */}
+      <TradeAuditLog connectionId={connectionId} />
     </div>
   );
 }

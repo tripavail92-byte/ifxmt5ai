@@ -36,6 +36,125 @@ bool te_req_discord_report     = false;
 bool te_report_sent_today      = false;
 datetime te_last_report_day    = 0;
 
+// ── Phase 5: cloud audit context ──────────────────────────────────────────
+string   te_audit_url         = "";         // frontend_url + /api/ea/trade-audit
+string   te_audit_conn_id     = "";         // connection_id for this EA instance
+string   te_audit_token       = "";         // install token for X-IFX-INSTALL-TOKEN header
+datetime te_last_audit_scan   = 0;          // last time we scanned history for closed deals
+
+//──────────────────────────────────────────────────────────────────────────
+// TE_InitAuditContext — call once after config is loaded (STATE_READY).
+// Stores the cloud endpoint and auth token so audit helpers can use them.
+//──────────────────────────────────────────────────────────────────────────
+void TE_InitAuditContext(const string frontend_url, const string conn_id, const string install_token)
+{
+   te_audit_url     = frontend_url + "/api/ea/trade-audit";
+   te_audit_conn_id = conn_id;
+   te_audit_token   = install_token;
+   te_last_audit_scan = TimeCurrent();
+   Print("✅ [AUDIT] Context initialised — endpoint=", te_audit_url);
+}
+
+//──────────────────────────────────────────────────────────────────────────
+// TE_AuditPushOpen — POST a trade-open event to cloud immediately after fill.
+// broker_ticket from te_trade.ResultDeal() — call right after TE_SendOrder().
+//──────────────────────────────────────────────────────────────────────────
+void TE_AuditPushOpen(const string side,   double entry_price, double sl,
+                      double tp,           double volume,       const string reason)
+{
+   if(StringLen(te_audit_url) == 0 || StringLen(te_audit_conn_id) == 0) return;
+
+   ulong broker_ticket = te_trade.ResultDeal();
+
+   string j = "{";
+   j += "\"connection_id\":\"" + te_audit_conn_id + "\",";
+   j += "\"symbol\":\""        + _Symbol          + "\",";
+   j += "\"side\":\""          + side             + "\",";
+   j += "\"entry\":"           + DoubleToString(entry_price, _Digits) + ",";
+   j += "\"sl\":"              + DoubleToString(sl,          _Digits) + ",";
+   j += "\"tp\":"              + DoubleToString(tp,          _Digits) + ",";
+   j += "\"volume\":"          + DoubleToString(volume, 2)            + ",";
+   j += "\"broker_ticket\":\"" + IntegerToString((long)broker_ticket) + "\",";
+   j += "\"status\":\"open\",";
+   j += "\"decision_reason\":\"" + reason + "\"";
+   j += "}";
+
+   uchar post_data[], result[];
+   string resp_headers;
+   StringToCharArray(j, post_data, 0, StringLen(j), CP_UTF8);
+   string headers = "Content-Type: application/json\r\nX-IFX-INSTALL-TOKEN: " + te_audit_token + "\r\n";
+   int code = WebRequest("POST", te_audit_url, headers, 5000, post_data, result, resp_headers);
+   if(code < 200 || code >= 300)
+      Print("⚠️ [AUDIT] trade-open push failed code=", code, " ticket=", broker_ticket);
+   else
+      Print("📋 [AUDIT] trade-open pushed ticket=", broker_ticket, " side=", side);
+}
+
+//──────────────────────────────────────────────────────────────────────────
+// TE_AuditScanClosedTrades — scans deal history since last call.
+// Call from OnTimer every 60 s in STATE_READY.
+// Detects any DEAL_ENTRY_OUT (TP/SL/manual close) and posts to cloud.
+//──────────────────────────────────────────────────────────────────────────
+void TE_AuditScanClosedTrades(const IFX_EaConfig &cfg)
+{
+   if(StringLen(te_audit_url) == 0 || StringLen(te_audit_conn_id) == 0) return;
+
+   datetime scan_from     = te_last_audit_scan;
+   datetime scan_to       = TimeCurrent();
+   te_last_audit_scan     = scan_to;
+
+   if(!HistorySelect(scan_from, scan_to)) return;
+
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+   {
+      ulong deal = HistoryDealGetTicket(i);
+      if(HistoryDealGetString(deal,  DEAL_SYMBOL) != _Symbol)         continue;
+      if(HistoryDealGetInteger(deal, DEAL_ENTRY)  != DEAL_ENTRY_OUT)  continue;
+      long magic = HistoryDealGetInteger(deal, DEAL_MAGIC);
+      if(magic < cfg.base_magic || magic > cfg.base_magic + 50)       continue;
+
+      double pnl     = HistoryDealGetDouble(deal,  DEAL_PROFIT);
+      double price   = HistoryDealGetDouble(deal,  DEAL_PRICE);
+      double volume  = HistoryDealGetDouble(deal,  DEAL_VOLUME);
+      long   dtype   = HistoryDealGetInteger(deal, DEAL_TYPE);
+      string comment = HistoryDealGetString(deal,  DEAL_COMMENT);
+
+      // side: the deal type on close is opposite to position type
+      string side = (dtype == DEAL_TYPE_SELL) ? "buy_close" : "sell_close";
+
+      // Determine close reason from deal comment
+      string reason = "closed";
+      string cmtLow = comment;
+      StringToLower(cmtLow);
+      if(StringFind(cmtLow, "sl")  >= 0) reason = "stop_loss";
+      else if(StringFind(cmtLow, "tp")  >= 0) reason = "take_profit";
+      else if(StringFind(cmtLow, "eod") >= 0) reason = "eod_close";
+
+      string j = "{";
+      j += "\"connection_id\":\"" + te_audit_conn_id                 + "\",";
+      j += "\"symbol\":\""        + _Symbol                          + "\",";
+      j += "\"side\":\""          + side                             + "\",";
+      j += "\"entry\":"           + DoubleToString(price, _Digits)   + ",";
+      j += "\"volume\":"          + DoubleToString(volume, 2)        + ",";
+      j += "\"broker_ticket\":\"" + IntegerToString((long)deal)      + "\",";
+      j += "\"status\":\"closed\",";
+      j += "\"decision_reason\":\"" + reason + "\",";
+      j += "\"payload\":{\"pnl\":" + DoubleToString(pnl, 2) + "}";
+      j += "}";
+
+      uchar post_data[], result[];
+      string resp_headers;
+      StringToCharArray(j, post_data, 0, StringLen(j), CP_UTF8);
+      string headers = "Content-Type: application/json\r\nX-IFX-INSTALL-TOKEN: " + te_audit_token + "\r\n";
+      int code = WebRequest("POST", te_audit_url, headers, 5000, post_data, result, resp_headers);
+      if(code >= 200 && code < 300)
+         Print("📋 [AUDIT] trade-close pushed deal=", deal, " reason=", reason, " pnl=", DoubleToString(pnl, 2));
+      else
+         Print("⚠️ [AUDIT] trade-close push failed code=", code, " deal=", deal);
+   }
+}
+
 //==========================================================================
 // SECTION A — DISCORD HELPERS
 //==========================================================================
@@ -217,6 +336,9 @@ bool TE_TryEntryLong(
                    " | TP2: "   + DoubleToString(cfg.tp2, _Digits) +
                    " | Lots: "  + DoubleToString(total_lots, 2);
       TE_SendDiscordAlert(cfg, msg);
+      // Phase 5: push open audit to cloud
+      TE_AuditPushOpen("buy", entry_price, sl_raw, cfg.tp2, total_lots,
+                       "zone_entry_long|pivot=" + DoubleToString(cfg.pivot, _Digits));
    }
 
    return success;
@@ -287,6 +409,9 @@ bool TE_TryEntryShort(
                    " | TP2: "   + DoubleToString(cfg.tp2, _Digits) +
                    " | Lots: "  + DoubleToString(total_lots, 2);
       TE_SendDiscordAlert(cfg, msg);
+      // Phase 5: push open audit to cloud
+      TE_AuditPushOpen("sell", entry_price, sl_raw, cfg.tp2, total_lots,
+                       "zone_entry_short|pivot=" + DoubleToString(cfg.pivot, _Digits));
    }
 
    return success;
