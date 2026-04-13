@@ -58,7 +58,12 @@ alter table public.ea_commands      enable row level security;
 alter table public.ea_command_acks  enable row level security;
 
 -- Service role bypasses RLS; restrict authenticated users to their own connections
-create policy if not exists "ea_commands: owner read"
+-- (CREATE POLICY has no IF NOT EXISTS — drop first for idempotency)
+drop policy if exists "ea_commands: owner read"   on public.ea_commands;
+drop policy if exists "ea_commands: owner insert" on public.ea_commands;
+drop policy if exists "ea_command_acks: owner read" on public.ea_command_acks;
+
+create policy "ea_commands: owner read"
   on public.ea_commands
   for select
   to authenticated
@@ -68,7 +73,7 @@ create policy if not exists "ea_commands: owner read"
     )
   );
 
-create policy if not exists "ea_commands: owner insert"
+create policy "ea_commands: owner insert"
   on public.ea_commands
   for insert
   to authenticated
@@ -78,7 +83,7 @@ create policy if not exists "ea_commands: owner insert"
     )
   );
 
-create policy if not exists "ea_command_acks: owner read"
+create policy "ea_command_acks: owner read"
   on public.ea_command_acks
   for select
   to authenticated
