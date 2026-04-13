@@ -132,7 +132,12 @@ function appendFormingBar(
 }
 
 function normalizeAliasCandidate(symbol: string) {
-  return symbol.replace(/[^a-z0-9]/gi, "").toUpperCase();
+  return symbol
+    .trim()
+    .replace(/[._-]?(micro|mini)$/i, "")
+    .replace(/m$/i, "")
+    .replace(/[^a-z0-9]/gi, "")
+    .toUpperCase();
 }
 
 async function resolveConnectionSymbol(connId: string, requestedSymbol: string) {
@@ -153,7 +158,8 @@ async function resolveConnectionSymbol(connId: string, requestedSymbol: string) 
   return candidates.find((symbol) => {
     const normalizedCandidate = normalizeAliasCandidate(symbol);
     if (normalizedCandidate === normalizedRequested) return true;
-    return normalizedCandidate.startsWith(normalizedRequested) && (normalizedCandidate.length - normalizedRequested.length) <= 4;
+    if (normalizedCandidate.startsWith(normalizedRequested) && (normalizedCandidate.length - normalizedRequested.length) <= 4) return true;
+    return normalizedRequested.startsWith(normalizedCandidate) && (normalizedRequested.length - normalizedCandidate.length) <= 4;
   }) ?? requested;
 }
 

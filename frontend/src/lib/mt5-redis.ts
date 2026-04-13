@@ -236,6 +236,14 @@ export async function getRedisPrices(connId: string): Promise<Record<string, Pri
   return out;
 }
 
+export async function getRedisPrice(connId: string, symbol: string): Promise<PriceSnapshot | null> {
+  const redis = await getRedis();
+  if (!redis) return null;
+
+  const raw = await redis.hGet(pricesKey(connId), symbol);
+  return parseJson<PriceSnapshot>(raw);
+}
+
 export async function getRedisForming(connId: string): Promise<Record<string, CandleBar>> {
   const redis = await getRedis();
   if (!redis) return {};
@@ -247,6 +255,14 @@ export async function getRedisForming(connId: string): Promise<Record<string, Ca
     if (parsed) out[symbol] = parsed;
   }
   return out;
+}
+
+export async function getRedisFormingSymbol(connId: string, symbol: string): Promise<CandleBar | null> {
+  const redis = await getRedis();
+  if (!redis) return null;
+
+  const raw = await redis.hGet(formingKey(connId), symbol);
+  return parseJson<CandleBar>(raw);
 }
 
 export async function getRedisSymbols(connId: string): Promise<string[]> {

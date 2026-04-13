@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SERVER_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
-import { getRedisSymbols } from "@/lib/mt5-redis";
+import { getRedisPrices, getRedisSymbols } from "@/lib/mt5-redis";
 import { mt5State } from "@/lib/mt5-state";
 
 export const runtime = "nodejs";
@@ -19,7 +19,7 @@ function inferDigits(symbol: string): number {
   return 5;
 }
 
-function fallbackSpec(symbol: string) {
+function fallbackSpec(symbol: string, livePrice?: { bid?: number | null; ask?: number | null }) {
   const digits = inferDigits(symbol);
   const point = 1 / 10 ** digits;
   return {
@@ -31,12 +31,36 @@ function fallbackSpec(symbol: string) {
     volume_min: 0.01,
     volume_max: 100,
     volume_step: 0.01,
+    bid: livePrice?.bid ?? null,
+    ask: livePrice?.ask ?? null,
+    resolved_symbol: symbol,
     source: "fallback",
   };
 }
 
+async function resolveLivePrice(connId: string, symbol: string) {
+  const redisPrices = await getRedisPrices(connId);
+  const redisQuote = redisPrices[symbol];
+  if (redisQuote) {
+    return { bid: redisQuote.bid, ask: redisQuote.ask };
+  }
+
+  const memoryPrices = mt5State.getPrices(connId);
+  const memoryQuote = memoryPrices[symbol];
+  if (memoryQuote) {
+    return { bid: memoryQuote.bid, ask: memoryQuote.ask };
+  }
+
+  return { bid: null, ask: null };
+}
+
 function normalizeAliasCandidate(symbol: string) {
-  return symbol.replace(/[^a-z0-9]/gi, "").toUpperCase();
+  return symbol
+    .trim()
+    .replace(/[._-]?(micro|mini)$/i, "")
+    .replace(/m$/i, "")
+    .replace(/[^a-z0-9]/gi, "")
+    .toUpperCase();
 }
 
 async function resolveConnectionSymbol(connId: string, requestedSymbol: string) {
@@ -57,7 +81,8 @@ async function resolveConnectionSymbol(connId: string, requestedSymbol: string) 
   return candidates.find((symbol) => {
     const normalizedCandidate = normalizeAliasCandidate(symbol);
     if (normalizedCandidate === normalizedRequested) return true;
-    return normalizedCandidate.startsWith(normalizedRequested) && (normalizedCandidate.length - normalizedRequested.length) <= 4;
+    if (normalizedCandidate.startsWith(normalizedRequested) && (normalizedCandidate.length - normalizedRequested.length) <= 4) return true;
+    return normalizedRequested.startsWith(normalizedCandidate) && (normalizedRequested.length - normalizedCandidate.length) <= 4;
   }) ?? requested;
 }
 
@@ -68,9 +93,6 @@ export async function GET(req: NextRequest) {
 
   if (!symbol) {
     return NextResponse.json({ error: "symbol required" }, { status: 400 });
-  }
-  if (!PRICE_RELAY_URL) {
-    return NextResponse.json({ error: "PRICE_RELAY_URL not configured" }, { status: 503 });
   }
 
   const access = await resolveTerminalAccess(requestedConnId || undefined);
@@ -86,6 +108,13 @@ export async function GET(req: NextRequest) {
   }
 
   const effectiveSymbol = await resolveConnectionSymbol(stateConnId, symbol);
+  const livePrice = await resolveLivePrice(stateConnId, effectiveSymbol);
+
+  if (!PRICE_RELAY_URL) {
+    return NextResponse.json(fallbackSpec(effectiveSymbol, livePrice), {
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
 
   const url = new URL("/symbol-spec", PRICE_RELAY_URL);
   url.searchParams.set("symbol", effectiveSymbol);
@@ -102,12 +131,18 @@ export async function GET(req: NextRequest) {
     });
 
     const data = (await resp.json()) as Record<string, unknown>;
-    return NextResponse.json(data, {
-      status: resp.ok ? 200 : resp.status,
+    if (!resp.ok || data.error) {
+      return NextResponse.json(fallbackSpec(effectiveSymbol, livePrice), {
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+
+    return NextResponse.json({ ...data, resolved_symbol: effectiveSymbol }, {
+      status: 200,
       headers: { "Cache-Control": "no-store" },
     });
   } catch (err) {
-    return NextResponse.json(fallbackSpec(effectiveSymbol), {
+    return NextResponse.json(fallbackSpec(effectiveSymbol, livePrice), {
       headers: { "Cache-Control": "no-store" },
     });
   } finally {

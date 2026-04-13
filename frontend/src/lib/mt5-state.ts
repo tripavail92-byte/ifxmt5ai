@@ -292,6 +292,19 @@ class Mt5State {
     return out;
   }
 
+  getPrice(connId: string | undefined, symbol: string): PriceSnapshot | null {
+    if (connId) {
+      return this.prices.get(connId)?.get(symbol) ?? null;
+    }
+
+    for (const [, priceMap] of this.prices) {
+      const price = priceMap.get(symbol);
+      if (price) return price;
+    }
+
+    return null;
+  }
+
   getForming(connId?: string): Record<string, CandleBar> {
     const out: Record<string, CandleBar> = {};
     if (connId) {
@@ -301,6 +314,19 @@ class Mt5State {
       this.forming.forEach(m => m.forEach((v, k) => { out[k] = v; }));
     }
     return out;
+  }
+
+  getFormingSymbol(connId: string | undefined, symbol: string): CandleBar | null {
+    if (connId) {
+      return this.forming.get(connId)?.get(symbol) ?? null;
+    }
+
+    for (const [, formingMap] of this.forming) {
+      const bar = formingMap.get(symbol);
+      if (bar) return bar;
+    }
+
+    return null;
   }
 
   getSymbols(connId?: string): string[] {

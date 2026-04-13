@@ -11,7 +11,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { mt5State } from "@/lib/mt5-state";
 import { PUBLIC_PRICE_RELAY_URL, SERVER_PRICE_RELAY_URL, relayConnectionId } from "@/lib/price-relay";
-import { getRedisForming, getRedisPrices, getRedisSymbols } from "@/lib/mt5-redis";
+import { getRedisForming, getRedisFormingSymbol, getRedisPrice, getRedisPrices, getRedisSymbols } from "@/lib/mt5-redis";
 import { resolveTerminalAccess } from "@/lib/terminal-access";
 
 export const runtime = "nodejs";
@@ -47,6 +47,7 @@ function reconcilePricesFromForming(
 ) {
   const merged = { ...prices };
   let updatedCount = 0;
+  const observedAtMs = Date.now();
 
   for (const [symbol, bar] of Object.entries(forming)) {
     const formingTsMs = Number(bar?.t ?? 0) * 1000;
@@ -55,7 +56,7 @@ function reconcilePricesFromForming(
 
     const prev = merged[symbol];
     const prevTsMs = Number(prev?.ts_ms ?? 0);
-    if (prevTsMs >= formingTsMs) continue;
+    if (prevTsMs >= observedAtMs) continue;
 
     const spread = prev && Number.isFinite(prev.ask - prev.bid) && (prev.ask - prev.bid) >= 0
       ? prev.ask - prev.bid
@@ -64,7 +65,8 @@ function reconcilePricesFromForming(
     merged[symbol] = {
       bid: close,
       ask: close + spread,
-      ts_ms: formingTsMs,
+      // A forming candle is the current live bar; its open time is not a freshness timestamp.
+      ts_ms: observedAtMs,
     };
     updatedCount += 1;
   }
@@ -123,6 +125,12 @@ async function fetchRelayPrices(connId?: string): Promise<Record<string, { bid: 
   return null;
 }
 
+async function fetchRelayPrice(connId: string | undefined, symbol: string) {
+  const relayPrices = await fetchRelayPrices(connId);
+  if (!relayPrices) return null;
+  return relayPrices[symbol] ? { [symbol]: relayPrices[symbol] } : {};
+}
+
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const requestedConnId = searchParams.get("conn_id") ?? undefined;
@@ -137,12 +145,38 @@ export async function GET(req: NextRequest) {
   const stateConnId = access.connId || undefined;
   const relayConnId = relayConnectionId(stateConnId);
 
-  const redisPrices = stateConnId ? await getRedisPrices(stateConnId) : {};
-  const redisForming = stateConnId ? await getRedisForming(stateConnId) : {};
-  const memoryPrices = mt5State.getPrices(stateConnId);
-  const memoryForming = mt5State.getForming(stateConnId);
-  const mergedBasePrices = Object.keys(redisPrices).length ? redisPrices : memoryPrices;
-  const mergedBaseForming = Object.keys(redisForming).length ? redisForming : memoryForming;
+  const redisPrices = stateConnId
+    ? symbol
+      ? (() => {
+          const single = getRedisPrice(stateConnId, symbol);
+          return single.then((snap) => (snap ? { [symbol]: snap } : {}));
+        })()
+      : getRedisPrices(stateConnId)
+    : Promise.resolve({});
+  const redisForming = stateConnId
+    ? symbol
+      ? (() => {
+          const single = getRedisFormingSymbol(stateConnId, symbol);
+          return single.then((bar) => (bar ? { [symbol]: bar } : {}));
+        })()
+      : getRedisForming(stateConnId)
+    : Promise.resolve({});
+  const memoryPrices = symbol
+    ? (() => {
+        const single = mt5State.getPrice(stateConnId, symbol);
+        return single ? { [symbol]: single } : {};
+      })()
+    : mt5State.getPrices(stateConnId);
+  const memoryForming = symbol
+    ? (() => {
+        const single = mt5State.getFormingSymbol(stateConnId, symbol);
+        return single ? { [symbol]: single } : {};
+      })()
+    : mt5State.getForming(stateConnId);
+  const resolvedRedisPrices = await redisPrices;
+  const resolvedRedisForming = await redisForming;
+  const mergedBasePrices = Object.keys(resolvedRedisPrices).length ? resolvedRedisPrices : memoryPrices;
+  const mergedBaseForming = Object.keys(resolvedRedisForming).length ? resolvedRedisForming : memoryForming;
 
   const reconciledState = reconcilePricesFromForming(mergedBasePrices, mergedBaseForming);
   const stateAll = reconciledState.prices;
@@ -156,7 +190,7 @@ export async function GET(req: NextRequest) {
 
   // If this instance has cold or stale in-memory state, prefer relay data when available.
   if (!Object.keys(prices).length || !stateIsFresh) {
-    const relayPrices = await fetchRelayPrices(relayConnId);
+    const relayPrices = symbol ? await fetchRelayPrice(relayConnId, symbol) : await fetchRelayPrices(relayConnId);
     if (relayPrices && Object.keys(relayPrices).length) {
       relayNewest = newestPriceTs(relayPrices);
       const stateNewest = newestPriceTs(stateAll);
@@ -168,9 +202,11 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const redisSymbols = stateConnId ? await getRedisSymbols(stateConnId) : [];
-  const stateSymbols = stateConnId ? mt5State.getSymbols(stateConnId) : mt5State.getSymbols();
-  const symbols = [...new Set([...redisSymbols, ...stateSymbols, ...Object.keys(all)])];
+  const redisSymbols = symbol ? [] : stateConnId ? await getRedisSymbols(stateConnId) : [];
+  const stateSymbols = symbol ? [] : stateConnId ? mt5State.getSymbols(stateConnId) : mt5State.getSymbols();
+  const symbols = symbol
+    ? [...new Set([symbol, ...Object.keys(all)].filter(Boolean))]
+    : [...new Set([...redisSymbols, ...stateSymbols, ...Object.keys(all)])];
 
   return NextResponse.json(
     debug
@@ -180,8 +216,8 @@ export async function GET(req: NextRequest) {
           debug: {
             instance: INSTANCE_ID,
             source: selectedSource,
-            redis_prices: Object.keys(redisPrices).length,
-            redis_forming: Object.keys(redisForming).length,
+            redis_prices: Object.keys(resolvedRedisPrices).length,
+            redis_forming: Object.keys(resolvedRedisForming).length,
             state_conn_id: stateConnId,
             relay_conn_id: relayConnId,
             state_is_fresh: stateIsFresh,

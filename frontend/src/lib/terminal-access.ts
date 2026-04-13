@@ -25,6 +25,10 @@ export const PUBLIC_TERMINAL_CONNECTION: TerminalConnectionSummary = {
   is_active: true,
 };
 
+function excludePublicConnection(connections: TerminalConnectionSummary[]) {
+  return connections.filter((connection) => connection.id !== PUBLIC_TERMINAL_CONN_ID);
+}
+
 export async function enforceSingleActiveConnection(
   supabase: ServerSupabaseClient,
   userId: string,
@@ -41,11 +45,13 @@ export async function enforceSingleActiveConnection(
   }
 
   const connections = (data ?? []) as TerminalConnectionSummary[];
-  if (connections.length <= 1) {
-    return connections;
+  const privateConnections = excludePublicConnection(connections);
+
+  if (privateConnections.length <= 1) {
+    return privateConnections;
   }
 
-  const staleIds = connections.slice(1).map((connection) => connection.id);
+  const staleIds = privateConnections.slice(1).map((connection) => connection.id);
   const { error: cleanupError } = await supabase
     .from("mt5_user_connections")
     .delete()
@@ -56,7 +62,7 @@ export async function enforceSingleActiveConnection(
     console.error("Failed to remove duplicate MT5 connections:", cleanupError);
   }
 
-  return connections.slice(0, 1);
+  return privateConnections.slice(0, 1);
 }
 
 export async function resolveTerminalAccess(requestedConnId?: string) {
