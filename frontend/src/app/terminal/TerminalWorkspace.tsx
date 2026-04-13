@@ -1651,7 +1651,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     return Object.values(setupsBySymbol)
       .filter((setup) => Boolean(setup?.symbol) && Boolean(tradeNowBySymbol[setup.symbol] || setup.trade_now_active))
       .map((setup) => {
-        const setupZone = calcZone(setup.entry_price, Number(setup.zone_percent) || getZoneDefault(setup.symbol));
+        const setupZone = calcZone(setup.pivot ?? setup.entry_price ?? 0, Number(setup.atr_zone_pct ?? setup.zone_percent) || getZoneDefault(setup.symbol));
         const setupPrice = prices[setup.symbol];
         const displayState = deriveDisplaySetupState({
           runtimeState: (setup.state as SetupState | undefined) ?? null,
@@ -2734,7 +2734,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                     <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-5">
                       <div className="rounded-lg bg-[#0f0f0f] p-3">
                         <div className="text-gray-500">Entry</div>
-                        <div className="mt-1 font-mono text-white">{setup.entry_price.toFixed(digits)}</div>
+                        <div className="mt-1 font-mono text-white">{(setup.pivot ?? setup.entry_price ?? 0).toFixed(digits)}</div>
                       </div>
                       <div className="rounded-lg bg-[#0f0f0f] p-3">
                         <div className="text-gray-500">Zone</div>
