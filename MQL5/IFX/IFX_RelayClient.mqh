@@ -280,6 +280,36 @@ string RC_JsonExtractStringAfter(const string json, int from_pos, const string k
    return StringSubstr(json, start, finish - start);
 }
 
+// RC_JsonExtractRaw — extract an unquoted JSON value (number, bool, null) for a key.
+// Returns the raw token as a string, e.g. "true", "false", "1.5", "null", or "" if absent.
+string RC_JsonExtractRaw(const string json, int from_pos, const string key)
+{
+   string marker = "\"" + key + "\"";
+   int key_pos = StringFind(json, marker, from_pos);
+   if(key_pos < 0) return "";
+   int colon_pos = StringFind(json, ":", key_pos + StringLen(marker));
+   if(colon_pos < 0) return "";
+   int start = colon_pos + 1;
+   while(start < StringLen(json))
+   {
+      ushort ch = StringGetCharacter(json, start);
+      if(ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') { start++; continue; }
+      break;
+   }
+   if(start >= StringLen(json)) return "";
+   ushort first = StringGetCharacter(json, start);
+   if(first == '"') return "";   // it's a quoted string — use RC_JsonExtractStringAfter instead
+   int finish = start;
+   while(finish < StringLen(json))
+   {
+      ushort ch = StringGetCharacter(json, finish);
+      if(ch == ',' || ch == '}' || ch == ']' || ch == ' ' || ch == '\r' || ch == '\n') break;
+      finish++;
+   }
+   if(finish <= start) return "";
+   return StringSubstr(json, start, finish - start);
+}
+
 bool RC_ReadTextFileUtf8(const string relative_path, string &content)
 {
    content = "";

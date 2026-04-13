@@ -251,13 +251,16 @@ void CMD_PollAndExecute(const string frontend_url, const string conn_id, const s
                   if(pay_pos >= 0)
                   {
                      string bias_val  = RC_JsonExtractStringAfter(cmd_json, pay_pos, "bias");
-                     string pivot_str = RC_JsonExtractStringAfter(cmd_json, pay_pos, "pivot");
-                     string tp1_str   = RC_JsonExtractStringAfter(cmd_json, pay_pos, "tp1");
-                     string tp2_str   = RC_JsonExtractStringAfter(cmd_json, pay_pos, "tp2");
+                     string pivot_str   = RC_JsonExtractRaw(cmd_json, pay_pos, "pivot");
+                     string tp1_str     = RC_JsonExtractRaw(cmd_json, pay_pos, "tp1");
+                     string tp2_str     = RC_JsonExtractRaw(cmd_json, pay_pos, "tp2");
+                     string uar_str     = RC_JsonExtractRaw(cmd_json, pay_pos, "use_auto_rr");
+                     string rr1_str     = RC_JsonExtractRaw(cmd_json, pay_pos, "auto_rr1");
+                     string rr2_str     = RC_JsonExtractRaw(cmd_json, pay_pos, "auto_rr2");
 
                      // Use field directly too (bare numeric): re-scan for "entry_price" legacy
                      if(StringLen(pivot_str) == 0)
-                        pivot_str = RC_JsonExtractStringAfter(cmd_json, pay_pos, "entry_price");
+                        pivot_str = RC_JsonExtractRaw(cmd_json, pay_pos, "entry_price");
 
                      if(StringLen(bias_val) > 0)
                      {
@@ -269,14 +272,26 @@ void CMD_PollAndExecute(const string frontend_url, const string conn_id, const s
                      }
                      if(StringLen(pivot_str) > 0 && StringToDouble(pivot_str) > 0.0)
                         g_cfg.pivot = StringToDouble(pivot_str);
-                     if(StringLen(tp1_str) > 0 && StringToDouble(tp1_str) > 0.0)
-                        g_cfg.tp1 = StringToDouble(tp1_str);
-                     if(StringLen(tp2_str) > 0 && StringToDouble(tp2_str) > 0.0)
-                        g_cfg.tp2 = StringToDouble(tp2_str);
+                     // AutoRR — apply before TP1/TP2 so explicit values can override
+                     if(StringLen(uar_str) > 0)
+                        g_cfg.use_auto_rr = (uar_str == "true" || uar_str == "1");
+                     if(StringLen(rr1_str) > 0 && StringToDouble(rr1_str) > 0.0)
+                        g_cfg.auto_rr1 = StringToDouble(rr1_str);
+                     if(StringLen(rr2_str) > 0 && StringToDouble(rr2_str) > 0.0)
+                        g_cfg.auto_rr2 = StringToDouble(rr2_str);
+                     // Explicit TP1/TP2 only applied when AutoRR is off
+                     if(!g_cfg.use_auto_rr)
+                     {
+                        if(StringLen(tp1_str) > 0 && StringToDouble(tp1_str) > 0.0)
+                           g_cfg.tp1 = StringToDouble(tp1_str);
+                        if(StringLen(tp2_str) > 0 && StringToDouble(tp2_str) > 0.0)
+                           g_cfg.tp2 = StringToDouble(tp2_str);
+                     }
 
                      RecalcZone();
                      Print("\U0001F3AF [CMD] arm_trade applied. bias=", g_cfg.bias,
                            " pivot=", DoubleToString(g_cfg.pivot, _Digits),
+                           " use_auto_rr=", g_cfg.use_auto_rr,
                            "  id=", cmd_id);
                   }
                }
