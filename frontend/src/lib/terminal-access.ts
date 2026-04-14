@@ -45,7 +45,11 @@ export async function enforceSingleActiveConnection(
   }
 
   const connections = (data ?? []) as TerminalConnectionSummary[];
-  const privateConnections = excludePublicConnection(connections);
+  // Only exclude the public connection if the user has OTHER private connections too.
+  // If the user's sole connection happens to match PUBLIC_TERMINAL_CONN_ID, keep it.
+  const privateConnections = connections.length > 1
+    ? excludePublicConnection(connections)
+    : connections;
 
   if (privateConnections.length <= 1) {
     return privateConnections;
