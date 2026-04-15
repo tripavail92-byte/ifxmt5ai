@@ -102,6 +102,12 @@ type HeartbeatRow = {
   } | null;
 };
 
+type EaLiveStateRow = {
+  connection_id: string;
+  hud_status: string | null;
+  updated_at: string;
+};
+
 type NewsEvent = {
   id: string;
   currency: string;
@@ -395,14 +401,16 @@ function deriveDisplaySetupState(args: {
   zone: { low: number; high: number } | null;
   price?: { bid: number; ask: number };
 }): SetupState | null {
-  const { runtimeState, zone, price } = args;
-  if (!zone || !price) return runtimeState;
-  if (runtimeState === "PURGATORY" || runtimeState === "DEAD") return runtimeState;
+  return args.runtimeState;
+}
 
-  const spreadTouchesZone = price.bid <= zone.high && price.ask >= zone.low;
-  if (spreadTouchesZone) return "STALKING";
-
-  return runtimeState;
+function hudStatusToSetupState(status: string | null | undefined): SetupState | null {
+  const normalized = typeof status === "string" ? status.trim().toUpperCase() : "";
+  if (normalized === "ASLEEP") return "IDLE";
+  if (normalized === "STALKING") return "STALKING";
+  if (normalized === "PURGATORY") return "PURGATORY";
+  if (normalized === "DEAD") return "DEAD";
+  return null;
 }
 
 function loadDraft(symbol: string): SetupDraft {
@@ -572,6 +580,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
   const [activeSetupState, setActiveSetupState] = useState<SetupState | null>(null);
   const [tradeNowBySymbol, setTradeNowBySymbol] = useState<Record<string, boolean>>({});
   const [accountHeartbeat, setAccountHeartbeat] = useState<HeartbeatRow | null>(null);
+  const [eaLiveState, setEaLiveState] = useState<EaLiveStateRow | null>(null);
   const [recentJobs, setRecentJobs] = useState<TradeJobRow[]>([]);
   const [recentCommands, setRecentCommands] = useState<EaCommandRow[]>([]);
   const [recentCommandAcks, setRecentCommandAcks] = useState<EaCommandAckRow[]>([]);
@@ -821,7 +830,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     return [...recentCommandAcks]
       .sort((left, right) => new Date(right.acknowledged_at || right.created_at).getTime() - new Date(left.acknowledged_at || left.created_at).getTime())[0] ?? null;
   }, [recentCommandAcks]);
-  const executionBlocker = useMemo(() => {
+  const executionGuardPreview = useMemo(() => {
     if (!isAuthenticated) return "Sign in to queue trades, arm Trade Now, or save monitored setups to your MT5 connection.";
     if (!termsAccepted) return "Accept the current terminal terms before queueing live MT5 execution.";
     if (!(riskAmount > 0)) return "Risk amount must be greater than zero.";
@@ -1090,7 +1099,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       });
 
     const load = async () => {
-      const [{ data: symbolRows }, { data: setupRows }, { data: setupFlags }, { data: heartbeatRow }, { data: jobs }, { data: commands }, { data: commandAcks }, { data: eaEvents }] = await Promise.all([
+      const [{ data: symbolRows }, { data: setupRows }, { data: setupFlags }, { data: heartbeatRow }, { data: eaLiveStateRow }, { data: jobs }, { data: commands }, { data: commandAcks }, { data: eaEvents }] = await Promise.all([
         supabase.from("mt5_symbols").select("symbol, description, category").eq("connection_id", selectedConnectionId).order("symbol"),
         supabase.rpc("get_setups_for_connection", { p_connection_id: selectedConnectionId }),
         supabase
@@ -1099,6 +1108,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
           .eq("connection_id", selectedConnectionId)
           .eq("is_active", true),
         supabase.from("mt5_worker_heartbeats").select("connection_id, status, last_seen_at, last_metrics").eq("connection_id", selectedConnectionId).maybeSingle(),
+        supabase.from("ea_live_state").select("connection_id, hud_status, updated_at").eq("connection_id", selectedConnectionId).maybeSingle(),
         supabase.from("trade_jobs").select("id, connection_id, symbol, side, volume, sl, tp, status, created_at, idempotency_key, error, result").eq("connection_id", selectedConnectionId).order("created_at", { ascending: false }).limit(30),
         supabase.from("ea_commands").select("id, connection_id, command_type, payload_json, sequence_no, idempotency_key, status, created_at, expires_at").eq("connection_id", selectedConnectionId).order("created_at", { ascending: false }).limit(30),
         supabase.from("ea_command_acks").select("id, command_id, connection_id, sequence_no, status, ack_payload_json, acknowledged_at, created_at").eq("connection_id", selectedConnectionId).order("acknowledged_at", { ascending: false }).limit(30),
@@ -1108,6 +1118,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       if (cancelled) return;
       setSymbols((symbolRows ?? []) as SymbolRow[]);
       setAccountHeartbeat((heartbeatRow ?? null) as HeartbeatRow | null);
+      setEaLiveState((eaLiveStateRow ?? null) as EaLiveStateRow | null);
       setRecentJobs((jobs ?? []) as TradeJobRow[]);
       setRecentCommands((commands ?? []) as EaCommandRow[]);
       setRecentCommandAcks((commandAcks ?? []) as EaCommandAckRow[]);
@@ -1475,6 +1486,17 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       )
       .on(
         "postgres_changes",
+        { event: "*", schema: "public", table: "ea_live_state", filter: `connection_id=eq.${selectedConnectionId}` },
+        (payload) => {
+          if (payload.eventType === "DELETE") {
+            setEaLiveState(null);
+            return;
+          }
+          setEaLiveState(payload.new as EaLiveStateRow);
+        }
+      )
+      .on(
+        "postgres_changes",
         { event: "*", schema: "public", table: "mt5_worker_heartbeats", filter: `connection_id=eq.${selectedConnectionId}` },
         (payload) => setAccountHeartbeat(payload.new as HeartbeatRow)
       )
@@ -1538,7 +1560,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       };
       setSetupIdsBySymbol((prev) => ({ ...prev, [selectedSymbol]: newId }));
       setSetupsBySymbol((prev) => ({ ...prev, [selectedSymbol]: nextSetup }));
-      setActiveSetupState("IDLE");
+      setActiveSetupState(null);
       setSetupResult({ ok: true, msg: `MONITORING ACTIVE — ${selectedSymbol} is now under state + structure tracking.` });
       toast.success(`Monitoring ${selectedSymbol}`);
     } catch (err) {
@@ -1557,16 +1579,6 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       setTermsOpen(true);
       return;
     }
-    if (tradeNowStateBlocker) {
-      setTradeNowResult({ ok: false, msg: tradeNowStateBlocker });
-      toast.error(tradeNowStateBlocker);
-      return;
-    }
-    if (executionBlocker) {
-      setTradeNowResult({ ok: false, msg: executionBlocker });
-      toast.error(executionBlocker);
-      return;
-    }
     setTradeNowSaving(true);
     setTradeNowResult(null);
     try {
@@ -1580,7 +1592,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
         riskRewardRatio,
         armedEntryPrice: parsedEntry,
       });
-      const setupId = await activateTradeNow({
+      const outcome = await activateTradeNow({
         connection_id: selectedConnectionId,
         symbol: selectedSymbol,
         side,
@@ -1599,6 +1611,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
         auto_rr1: useAutoRR ? autoRR1 : null,
         auto_rr2: useAutoRR ? autoRR2 : null,
       });
+      const setupId = outcome.setupId;
       setSetupIdsBySymbol((prev) => ({ ...prev, [selectedSymbol]: setupId }));
       setTradeNowBySymbol((prev) => ({ ...prev, [selectedSymbol]: true }));
       setTradeNowResult({ ok: true, msg: "ARMED — waiting for STALKING + matching AI system trigger." });
@@ -1623,11 +1636,6 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       const msg = "AI Dynamic mode finalizes SL, TP, and lot size through the AI trigger. Switch Stop Mode to Manual for fixed-value execution.";
       setManualResult({ ok: false, msg });
       toast.error(msg);
-      return;
-    }
-    if (executionBlocker) {
-      setManualResult({ ok: false, msg: executionBlocker });
-      toast.error(executionBlocker);
       return;
     }
     if (!Number.isFinite(lotSuggestion) || lotSuggestion <= 0) {
@@ -1670,11 +1678,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       .map((setup) => {
         const setupZone = calcZone(setup.pivot ?? setup.entry_price ?? 0, Number(setup.atr_zone_pct ?? setup.zone_percent) || getZoneDefault(setup.symbol));
         const setupPrice = prices[setup.symbol];
-        const displayState = deriveDisplaySetupState({
-          runtimeState: (setup.state as SetupState | undefined) ?? null,
-          zone: setupZone,
-          price: setupPrice,
-        });
+        const displayState = (setup.state as SetupState | undefined) ?? null;
         return {
           ...setup,
           displayState,
@@ -1688,45 +1692,33 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
         return a.symbol.localeCompare(b.symbol);
       });
   }, [prices, selectedSymbol, setupsBySymbol, tradeNowBySymbol]);
-  const displaySetupState = deriveDisplaySetupState({
-    runtimeState: activeSetupState,
-    zone,
-    price: livePrice,
-  });
+  const runtimeSetupState = hudStatusToSetupState(eaLiveState?.hud_status);
+  const displaySetupState = deriveDisplaySetupState({ runtimeState: runtimeSetupState ?? activeSetupState, zone, price: livePrice });
   const stateCfg = displaySetupState ? SETUP_STATE_CFG[displaySetupState] : null;
-  const setupStateDerivedFromQuote = Boolean(
-    displaySetupState === "STALKING"
-    && activeSetupState !== "STALKING"
-    && activeSetupState !== "PURGATORY"
-    && activeSetupState !== "DEAD"
-  );
   const validStopLoss = typeof slValue === "number" && Number.isFinite(slValue) && slValue > 0 && stopDistance > 0;
   const validTakeProfit = typeof effectiveTakeProfit === "number" && Number.isFinite(effectiveTakeProfit) && effectiveTakeProfit > 0;
   const aiStructureReady = dynamicStopState.stop != null;
   const liveLotsDisplay = aiManagedExecution ? "AI" : (Number.isFinite(lotSuggestion) && lotSuggestion > 0 ? lotSuggestion.toFixed(2) : "0.01");
   const liveSlDisplay = aiManagedExecution ? "AI" : (slValue ?? "");
   const liveTpDisplay = aiManagedExecution ? "AI" : (effectiveTakeProfit ?? "");
-  const tradeNowStateBlocker = activeSetupState === "DEAD"
-    ? "This setup is DEAD after an H1 close beyond the loss edge. Press Monitor Zone to reset it before arming Trade Now."
-    : null;
   const tradeNowPrereqMsg = !currentSetupId
     ? isAuthenticated
       ? "Press Monitor Zone first so the runtime starts tracking state."
       : "Sign in first, then monitor the setup or connect your MT5 account before arming Trade Now."
-    : tradeNowStateBlocker
-      ? tradeNowStateBlocker
+    : displaySetupState === "DEAD"
+      ? "Runtime currently reports DEAD. You can still arm the command, but the EA remains authoritative and may reject execution until the setup is refreshed."
     : aiManagedExecution
       ? !aiStructureReady
         ? "AI is still reading structure. SL, TP, and lot size will be finalized by AI when the trigger happens."
-        : executionBlocker
-          ? executionBlocker
+        : executionGuardPreview
+          ? `Ready to arm. Server and EA will validate live guardrails at queue time: ${executionGuardPreview}`
           : "Trade Now is ready. AI will finalize SL, TP, and lot size at trigger time."
       : !validStopLoss
         ? "Set a valid stop loss before arming Trade Now."
         : !validTakeProfit
           ? "Risk-reward target is not ready yet. TP is derived automatically from your RR setting once entry and SL are valid."
-          : executionBlocker
-            ? executionBlocker
+          : executionGuardPreview
+            ? `Ready to queue. Server and EA will validate live guardrails at queue time: ${executionGuardPreview}`
             : "Trade Now is ready to arm.";
   const tradeNowCanArm = Boolean(
     currentSetupId
@@ -1737,8 +1729,6 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     && !tradeNowArmed
     && !tradeNowSaving
     && !setupSaving
-    && !tradeNowStateBlocker
-    && !executionBlocker
   );
   const tradeNowButtonEnabled = isAuthenticated
     ? tradeNowCanArm
@@ -2609,7 +2599,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                       <Input type="number" value={newsBeforeMin} onChange={(e) => setNewsBeforeMin(parseInt(e.target.value, 10) || 0)} className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
                       <Input type="number" value={newsAfterMin} onChange={(e) => setNewsAfterMin(parseInt(e.target.value, 10) || 0)} className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
                     </div>
-                    <p className="text-[11px] text-gray-500 leading-snug">The worker blocks MT5 order execution within this window around any HIGH-impact event for the traded symbol&apos;s currencies.</p>
+                    <p className="text-[11px] text-gray-500 leading-snug">The EA/runtime blocks MT5 order execution within this window around any HIGH-impact event for the traded symbol&apos;s currencies.</p>
                   </div>
                 )}
                 {!newsFilter && (

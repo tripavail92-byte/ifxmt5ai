@@ -25,6 +25,8 @@ export type EaConfigJson = {
   };
   /** Zone setup — maps to i_manual_bias, i_manual_pivot, i_manual_tp1/tp2, i_atrPct */
   setup: {
+    /** Raw AI brain text applied after manual/cloud numeric fields — i_ai_text */
+    ai_text: string;
     bias: EaBias;
     pivot: number | null;
     tp1: number | null;
@@ -186,6 +188,7 @@ export function buildDefaultEaConfig(
       high_priority: activeSymbols.slice(0, Math.min(activeSymbols.length, 12)),
     },
     setup: {
+      ai_text: "",
       bias: "neutral",
       pivot: null,
       tp1: null,
@@ -194,15 +197,15 @@ export function buildDefaultEaConfig(
     },
     structure: {
       mode: "fractal",
-      timeframe: "M5",
+      timeframe: "M1",
       boss_timeframe: "H1",
-      sl_timeframe: "M5",
+      sl_timeframe: "M15",
       be_timeframe: "M10",
-      pivot_window: 2,
+      pivot_window: 5,
       bars_to_scan: 120,
     },
     risk: {
-      risk_percent: 1,
+      risk_percent: 2,
       strict_risk: false,
       min_rr: 1.0,
       max_open_trades: 1,
@@ -229,7 +232,7 @@ export function buildDefaultEaConfig(
       use_auto_rr: false,
       auto_rr1: 1.0,
       auto_rr2: 2.0,
-      close_eod: false,
+      close_eod: true,
       eod_time: "23:50",
     },
     visuals: {
@@ -299,6 +302,7 @@ export function normalizeEaConfig(
       high_priority: highPriority,
     },
     setup: {
+      ai_text: asString(setup.ai_text ?? setup.aiText, defaults.setup.ai_text),
       bias: asBias(setup.bias, defaults.setup.bias),
       pivot: asNullableNumber(setup.pivot),
       tp1: asNullableNumber(setup.tp1),

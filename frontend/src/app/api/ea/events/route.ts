@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isoNow, parseJsonBody, requireEaAuth } from "@/lib/ea-control-plane";
+import { persistTradeAuditFromRuntimeEvent } from "@/lib/ea-trade-audit";
 
 export const runtime = "nodejs";
 
@@ -39,9 +40,25 @@ export async function POST(req: NextRequest) {
     created_at: now,
   }));
 
-  const { error } = await auth.admin.from("ea_runtime_events").insert(rows);
+  const { data: insertedRows, error } = await auth.admin
+    .from("ea_runtime_events")
+    .insert(rows)
+    .select("id, connection_id, event_type, payload, created_at");
+
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  try {
+    for (const event of insertedRows ?? []) {
+      await persistTradeAuditFromRuntimeEvent(auth.admin, {
+        connectionId,
+        event,
+      });
+    }
+  } catch (auditError) {
+    const message = auditError instanceof Error ? auditError.message : "Failed to persist trade audit from runtime event";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 
   return NextResponse.json({ ok: true, inserted: rows.length });

@@ -28,6 +28,39 @@ interface Symbol {
   category: string;
 }
 
+type EaCommandAckRow = {
+  id: string;
+  command_id: string;
+  connection_id: string;
+  sequence_no: number;
+  status: string;
+  ack_payload_json?: Record<string, unknown> | null;
+  acknowledged_at?: string | null;
+  created_at: string;
+};
+
+type EaRuntimeEventRow = {
+  id: number;
+  connection_id: string;
+  event_type: string;
+  payload?: Record<string, unknown> | null;
+  created_at: string;
+};
+
+type PendingEaCommandSignal = {
+  commandId: string;
+  sequenceNo: number;
+  symbol: string;
+  commandType: "manual_trade" | "arm_trade";
+  setupId?: string | null;
+};
+
+type EaLiveStateRow = {
+  connection_id: string;
+  hud_status: string | null;
+  updated_at: string;
+};
+
 const STORAGE_KEY_SYMBOLS = "ifx_chart_symbols";
 const STORAGE_KEY_ACTIVE  = "ifx_chart_active";
 const STORAGE_KEY_AI_SENS  = "ifx_ai_sensitivity";
@@ -107,6 +140,19 @@ function getDecimals(sym: string): number {
   if (/JPY|XAU|XAG/i.test(sym)) return 3;
   if (/BTC|ETH|OIL/i.test(sym)) return 2;
   return 5;
+}
+
+function normalizeRuntimeSymbol(symbol: string | null | undefined): string {
+  return typeof symbol === "string" ? symbol.trim().toUpperCase() : "";
+}
+
+function hudStatusToSetupState(status: string | null | undefined): SetupState | null {
+  const normalized = typeof status === "string" ? status.trim().toUpperCase() : "";
+  if (normalized === "ASLEEP") return "IDLE";
+  if (normalized === "STALKING") return "STALKING";
+  if (normalized === "PURGATORY") return "PURGATORY";
+  if (normalized === "DEAD") return "DEAD";
+  return null;
 }
 
 // calcZone kept for legacy reference only — active code uses pivot ± atrZonePct
@@ -220,11 +266,14 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
   const [slotSetupIds, setSlotSetupIds] = useState<Record<string, string>>({});
   // Real-time state of the tracked setup for the active symbol
   const [activeSetupState, setActiveSetupState] = useState<SetupState | null>(null);
+  const [runtimeSetupState, setRuntimeSetupState] = useState<SetupState | null>(null);
 
   // Trade Now: per-symbol armed status + loading + result feedback
   const [tradeNowBySymbol, setTradeNowBySymbol]   = useState<Record<string, boolean>>({});
   const [tradeNowSaving, setTradeNowSaving]         = useState(false);
   const [tradeNowResult, setTradeNowResult]         = useState<{ ok: boolean; msg: string } | null>(null);
+  const [pendingManualSignal, setPendingManualSignal] = useState<PendingEaCommandSignal | null>(null);
+  const [pendingTradeNowSignal, setPendingTradeNowSignal] = useState<PendingEaCommandSignal | null>(null);
 
   const [setupsBySymbol, setSetupsBySymbol] = useState<Record<string, {
     id: string;
@@ -406,11 +455,23 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
     setResult(null);
     startTransition(async () => {
       try {
-        await placeManualTrade(fd);
-        setResult({ ok: true, msg: "Trade queued — check Trades page for status." });
+        const outcome = await placeManualTrade(fd);
+        if (outcome.executionMode === "ea-first") {
+          setPendingManualSignal({
+            commandId: outcome.commandId,
+            sequenceNo: outcome.sequenceNo,
+            symbol: outcome.symbol,
+            commandType: "manual_trade",
+          });
+          setResult({ ok: true, msg: `EA command queued — awaiting ack #${outcome.sequenceNo}.` });
+        } else {
+          setPendingManualSignal(null);
+          setResult({ ok: true, msg: "Trade queued — check Trades page for status." });
+        }
         setSlValue(undefined);
         setTpValue(undefined);
       } catch (err: unknown) {
+        setPendingManualSignal(null);
         setResult({ ok: false, msg: err instanceof Error ? err.message : "Unknown error" });
       }
     });
@@ -470,13 +531,6 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
 
   async function handleTradeNow() {
     if (!autoConn) return;
-    if (activeSetupState === "DEAD") {
-      setTradeNowResult({
-        ok: false,
-        msg: "This setup is DEAD after an H1 close beyond the loss edge. Update the monitor before arming Trade Now.",
-      });
-      return;
-    }
     setTradeNowSaving(true);
     setTradeNowResult(null);
     try {
@@ -488,7 +542,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
       const tp1Val2   = parseFloat(tp1);
       const tp2Val2   = parseFloat(tp2);
       const biasStr2  = side === "buy" ? "buy" : "sell";
-      const setupId = await activateTradeNow({
+      const outcome = await activateTradeNow({
         connection_id:  autoConn.id,
         symbol:         formSymbol,
         side,
@@ -504,6 +558,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
         atr_zone_pct:   atrZonePct,
         sl_pad_mult:    slPadMult,
       });
+      const setupId = outcome.setupId;
 
       // Update local IDs so the monitoring strip appears
       setSlotSetupIds(prev => ({ ...prev, [formSymbol]: setupId }));
@@ -527,11 +582,27 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
         },
       }));
       setTradeNowBySymbol(prev => ({ ...prev, [formSymbol]: true }));
-      setTradeNowResult({
-        ok:  true,
-        msg: "ARMED — waiting for STALKING state + matching AI system trigger",
-      });
+      if (outcome.executionMode === "ea-first") {
+        setPendingTradeNowSignal({
+          commandId: outcome.commandId,
+          sequenceNo: outcome.sequenceNo,
+          symbol: formSymbol,
+          commandType: "arm_trade",
+          setupId,
+        });
+        setTradeNowResult({
+          ok:  true,
+          msg: `ARMED — awaiting EA ack #${outcome.sequenceNo}.`,
+        });
+      } else {
+        setPendingTradeNowSignal(null);
+        setTradeNowResult({
+          ok:  true,
+          msg: "ARMED — waiting for STALKING state + matching AI system trigger",
+        });
+      }
     } catch (err: unknown) {
+      setPendingTradeNowSignal(null);
       setTradeNowResult({ ok: false, msg: err instanceof Error ? err.message : "Arm failed" });
     } finally {
       setTradeNowSaving(false);
@@ -624,21 +695,200 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
           setTradeNowBySymbol(prev => ({ ...prev, [formSymbol]: nowArmed }));
         }
       })
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      sb.removeChannel(channel);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoConn?.id, slotSetupIds[formSymbol], formSymbol]);
+
+  useEffect(() => {
+    if (!autoConn?.id) {
+      setRuntimeSetupState(null);
+      return;
+    }
+
+    const sb = createClient();
+    let cancelled = false;
+
+    sb.from("ea_live_state")
+      .select("connection_id, hud_status, updated_at")
+      .eq("connection_id", autoConn.id)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (!cancelled) {
+          setRuntimeSetupState(hudStatusToSetupState((data as EaLiveStateRow | null)?.hud_status));
+        }
+      });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const channel = (sb as any)
+      .channel(`ea-live-state-${autoConn.id}`)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .on("postgres_changes" as any, {
+        event: "*",
+        schema: "public",
+        table: "ea_live_state",
+        filter: `connection_id=eq.${autoConn.id}`,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }, (payload: any) => {
+        if (payload.eventType === "DELETE") {
+          setRuntimeSetupState(null);
+          return;
+        }
+        setRuntimeSetupState(hudStatusToSetupState((payload.new as EaLiveStateRow | undefined)?.hud_status));
+      })
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      sb.removeChannel(channel);
+    };
+  }, [autoConn?.id]);
+
+  useEffect(() => {
+    if (!autoConn) return;
+    const sb = createClient();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const channel = (sb as any)
+      .channel(`ea-feedback-${autoConn.id}`)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .on("postgres_changes" as any, {
+        event: "*",
+        schema: "public",
+        table: "ea_command_acks",
+        filter: `connection_id=eq.${autoConn.id}`,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }, (payload: any) => {
+        const row = payload.new as EaCommandAckRow;
+        if (!row?.command_id) return;
+        const ackPayload = (row.ack_payload_json ?? {}) as Record<string, unknown>;
+        const reason = typeof ackPayload.reason === "string" && ackPayload.reason.trim()
+          ? ackPayload.reason.trim()
+          : null;
+
+        if (pendingManualSignal?.commandId === row.command_id) {
+          if (row.status === "acknowledged") {
+            setResult({
+              ok: true,
+              msg: `EA acknowledged manual trade #${row.sequence_no}. Monitor the execution stream for terminal-side fill or close events.`,
+            });
+          } else {
+            setResult({
+              ok: false,
+              msg: reason ?? `EA rejected manual trade #${row.sequence_no}.`,
+            });
+          }
+          setPendingManualSignal(null);
+        }
+
+        if (pendingTradeNowSignal?.commandId === row.command_id) {
+          if (row.status === "acknowledged") {
+            setTradeNowResult({
+              ok: true,
+              msg: `ARMED — EA acknowledged arm_trade #${row.sequence_no}. Waiting for trade_armed / armed_trade_executed events.`,
+            });
+          } else {
+            setTradeNowResult({
+              ok: false,
+              msg: reason ?? `EA rejected arm_trade #${row.sequence_no}.`,
+            });
+            setPendingTradeNowSignal(null);
+          }
+        }
+      })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .on("postgres_changes" as any, {
         event: "INSERT",
         schema: "public",
-        table: "trade_jobs",
+        table: "ea_runtime_events",
         filter: `connection_id=eq.${autoConn.id}`,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       }, (payload: any) => {
-        const row = payload.new as { symbol?: string; idempotency_key?: string };
-        if (row.symbol !== formSymbol) return;
-        if (typeof row.idempotency_key === "string" && row.idempotency_key.startsWith("trade_now:")) {
-          setTradeNowResult({
-            ok: true,
-            msg: "TRADE FIRED — risk-based order queued. Check Trades page for status.",
-          });
+        const row = payload.new as EaRuntimeEventRow;
+        const eventPayload = (row.payload ?? {}) as Record<string, unknown>;
+        const nestedPayload = eventPayload.payload && typeof eventPayload.payload === "object"
+          ? (eventPayload.payload as Record<string, unknown>)
+          : null;
+        const eventCommandId = typeof eventPayload.command_id === "string" ? eventPayload.command_id : null;
+        const eventStatus = typeof eventPayload.status === "string" ? eventPayload.status : null;
+        const eventSymbol = normalizeRuntimeSymbol(typeof eventPayload.symbol === "string" ? eventPayload.symbol : null);
+        const eventSetupId = typeof eventPayload.setup_id === "string" ? eventPayload.setup_id : null;
+
+        if (row.event_type === "command_processed") {
+          if (pendingManualSignal?.commandId === eventCommandId) {
+            if (eventStatus === "acknowledged") {
+              setResult({
+                ok: true,
+                msg: `EA acknowledged manual trade #${Number(eventPayload.sequence_no ?? pendingManualSignal.sequenceNo)}. Monitor the execution stream for terminal-side fill or close events.`,
+              });
+            } else {
+              const reason = typeof eventPayload.reason === "string" && eventPayload.reason.trim()
+                ? eventPayload.reason.trim()
+                : "The EA rejected the manual trade command.";
+              setResult({ ok: false, msg: reason });
+            }
+            setPendingManualSignal(null);
+          }
+
+          if (pendingTradeNowSignal?.commandId === eventCommandId) {
+            if (eventStatus === "acknowledged") {
+              setTradeNowResult({
+                ok: true,
+                msg: `ARMED — EA acknowledged arm_trade #${Number(eventPayload.sequence_no ?? pendingTradeNowSignal.sequenceNo)}. Waiting for trade_armed / armed_trade_executed events.`,
+              });
+            } else {
+              const reason = typeof eventPayload.reason === "string" && eventPayload.reason.trim()
+                ? eventPayload.reason.trim()
+                : "The EA rejected the arm_trade command.";
+              setTradeNowResult({ ok: false, msg: reason });
+              setPendingTradeNowSignal(null);
+            }
+          }
+        }
+
+        if (row.event_type === "trade_armed" && pendingTradeNowSignal) {
+          const sameSetup = Boolean(eventSetupId) && eventSetupId === pendingTradeNowSignal.setupId;
+          const sameSymbol = eventSymbol === normalizeRuntimeSymbol(pendingTradeNowSignal.symbol);
+          if (sameSetup || sameSymbol) {
+            setTradeNowResult({
+              ok: true,
+              msg: `ARMED — ${eventPayload.symbol ?? pendingTradeNowSignal.symbol} is now active on the EA and waiting for its trigger.`,
+            });
+          }
+        }
+
+        if (row.event_type === "armed_trade_executed" && pendingTradeNowSignal) {
+          const sameSetup = Boolean(eventSetupId) && eventSetupId === pendingTradeNowSignal.setupId;
+          const sameSymbol = eventSymbol === normalizeRuntimeSymbol(pendingTradeNowSignal.symbol);
+          if (sameSetup || sameSymbol) {
+            const runtimeSide = typeof eventPayload.side === "string" ? eventPayload.side.toUpperCase() : null;
+            const runtimeVolume = typeof nestedPayload?.volume === "number" ? `${nestedPayload.volume} lots` : null;
+            const runtimeSymbol = typeof eventPayload.symbol === "string" ? eventPayload.symbol : pendingTradeNowSignal.symbol;
+            setTradeNowResult({
+              ok: true,
+              msg: ["TRADE FIRED", runtimeSymbol, runtimeSide, runtimeVolume].filter(Boolean).join(" — "),
+            });
+            setPendingTradeNowSignal(null);
+          }
+        }
+
+        if (row.event_type === "trade_now_rejected") {
+          const sameSetup = Boolean(eventSetupId) && eventSetupId === pendingTradeNowSignal?.setupId;
+          const sameSymbol = eventSymbol === normalizeRuntimeSymbol(pendingTradeNowSignal?.symbol);
+          if (sameSetup || sameSymbol) {
+            const reason = typeof eventPayload.reason === "string" && eventPayload.reason.trim()
+              ? eventPayload.reason.trim()
+              : "AI system conditions were no longer valid for execution.";
+            setTradeNowResult({
+              ok: false,
+              msg: `AI trigger skipped — ${reason}`,
+            });
+            setPendingTradeNowSignal(null);
+          }
         }
       })
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -650,7 +900,9 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       }, (payload: any) => {
         const row = payload.new as { details?: { event_kind?: string; symbol?: string; reason?: string } };
-        if (row.details?.event_kind !== "trade_now_rejected" || row.details?.symbol !== formSymbol) return;
+        if (row.details?.event_kind !== "trade_now_rejected") return;
+        const sameSymbol = normalizeRuntimeSymbol(row.details?.symbol) === normalizeRuntimeSymbol(pendingTradeNowSignal?.symbol);
+        if (!sameSymbol) return;
         const reason = typeof row.details?.reason === "string" && row.details.reason.trim()
           ? row.details.reason.trim()
           : "AI system conditions were no longer valid for execution.";
@@ -658,15 +910,16 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
           ok: false,
           msg: `AI trigger skipped — ${reason}`,
         });
+        setPendingTradeNowSignal(null);
       })
       .subscribe();
 
     return () => {
-      cancelled = true;
       sb.removeChannel(channel);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoConn?.id, slotSetupIds[formSymbol], formSymbol]);
+  }, [autoConn, pendingManualSignal, pendingTradeNowSignal]);
+
+  const displaySetupState = runtimeSetupState ?? activeSetupState;
 
   // All subscribed pairs — fall back to known list while SSE connects
   const SUBSCRIBED = ["BTCUSDm","ETHUSDm","EURUSDm","GBPUSDm","USDJPYm","XAUUSDm","USDCADm","AUDUSDm","NZDUSDm","USDCHFm","EURGBPm","USOILm"];
@@ -907,7 +1160,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                 <div className="flex gap-1.5 flex-wrap">
                   {(["IDLE", "STALKING", "PURGATORY", "DEAD"] as SetupState[]).map((s) => {
                     const cfg = SETUP_STATE_CFG[s];
-                    const isActive = activeSetupState === s;
+                    const isActive = displaySetupState === s;
                     return (
                       <div
                         key={s}
@@ -924,13 +1177,13 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                       </div>
                     );
                   })}
-                  {!activeSetupState && (
+                  {!displaySetupState && (
                     <span className="text-[10px] text-gray-700 animate-pulse">Loading…</span>
                   )}
                 </div>
-                {activeSetupState && (
+                {displaySetupState && (
                   <p className="text-[10px] text-gray-600 mt-1.5">
-                    {SETUP_STATE_CFG[activeSetupState].desc}
+                    {SETUP_STATE_CFG[displaySetupState].desc}
                   </p>
                 )}
               </div>
@@ -1005,7 +1258,7 @@ export function ManualTradeCard({ connections }: { connections: Connection[] }) 
                 </button>
 
                 <p className="text-[9px] text-gray-700 text-center px-1">
-                  Fires a risk-based MT5 order when STALKING + CHOCH/BOS matches direction
+                  Fires a risk-based MT5 order when STALKING + CHOCH/BOS matches direction. Runtime state shown here is informational; the EA still decides execution live.
                 </p>
 
                 {tradeNowResult && (

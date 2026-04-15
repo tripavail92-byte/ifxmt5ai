@@ -69,18 +69,18 @@ int RE_CountTodayTrades(const IFX_EaConfig &cfg)
 double RE_CalculateLots(const IFX_EaConfig &cfg, double entry_price, double sl_price)
 {
    double sl_dist = MathAbs(entry_price - sl_price);
-   if(sl_dist <= 0.0) return SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   if(sl_dist <= 0.0) return 0.0;
 
    double tick_size  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    if(tick_size <= 0.0 || tick_value <= 0.0)
    {
       Print("⚠️ [RISK] Invalid tick data for lot calc on ", _Symbol);
-      return SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+      return 0.0;
    }
 
-   double equity       = cfg.strict_risk ? AccountInfoDouble(ACCOUNT_EQUITY) : AccountInfoDouble(ACCOUNT_BALANCE);
-   double risk_amount  = equity * (cfg.risk_pct / 100.0);
+   double equity        = AccountInfoDouble(ACCOUNT_EQUITY);
+   double risk_amount   = equity * (cfg.risk_pct / 100.0);
    double ticks_at_risk = sl_dist / tick_size;
    double raw_lots      = risk_amount / (ticks_at_risk * tick_value);
 
@@ -89,10 +89,15 @@ double RE_CalculateLots(const IFX_EaConfig &cfg, double entry_price, double sl_p
    double step_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
 
    if(step_lot <= 0.0) step_lot = 0.01;
-   raw_lots = MathFloor(raw_lots / step_lot) * step_lot;
-   raw_lots = MathMax(min_lot, MathMin(max_lot, raw_lots));
+   raw_lots = MathFloor((raw_lots + 1e-8) / step_lot) * step_lot;
 
-   return NormalizeDouble(raw_lots, 2);
+   if(raw_lots < min_lot)
+      return cfg.strict_risk ? 0.0 : min_lot;
+   if(raw_lots > max_lot)
+      raw_lots = max_lot;
+
+   int lot_digits = (int)MathMax(0, MathCeil(-MathLog10(step_lot)));
+   return NormalizeDouble(raw_lots, lot_digits);
 }
 
 //==========================================================================

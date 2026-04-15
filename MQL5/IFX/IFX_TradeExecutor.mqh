@@ -18,6 +18,7 @@
 
 #property strict
 #include "IFX_Config.mqh"
+#include "IFX_StructureEngine.mqh"
 #include "IFX_RiskEngine.mqh"
 #include <Trade\Trade.mqh>
 
@@ -237,8 +238,17 @@ void TE_CheckScheduledReport(const IFX_EaConfig &cfg)
 bool TE_SendOrder(ENUM_ORDER_TYPE type, double lots, double price, double sl, double tp, int magic, const string comment)
 {
    te_trade.SetExpertMagicNumber(magic);
-   te_trade.SetDeviationInPoints(30);
-   te_trade.SetTypeFilling(ORDER_FILLING_FOK);
+   int live_spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   int dyn_dev = (live_spread > 0) ? live_spread * 2 : 50;
+   te_trade.SetDeviationInPoints(dyn_dev);
+
+   uint filling = (uint)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   if((filling & SYMBOL_FILLING_FOK) != 0)
+      te_trade.SetTypeFilling(ORDER_FILLING_FOK);
+   else if((filling & SYMBOL_FILLING_IOC) != 0)
+      te_trade.SetTypeFilling(ORDER_FILLING_IOC);
+   else
+      te_trade.SetTypeFilling(ORDER_FILLING_RETURN);
 
    bool res;
    if(type == ORDER_TYPE_BUY)
@@ -266,19 +276,16 @@ bool TE_SendOrder(ENUM_ORDER_TYPE type, double lots, double price, double sl, do
 
 // Attempt a LONG entry.
 // entry_price: ask price
-// zone_low:    used as SL base (padded by sl_pad_mult * point)
-// sl_dist_override: if > 0, uses this exact SL distance instead of zone-based
+// stop_loss:   exact precomputed stop from the v9.30 dynamic stop engine
+// trigger_pivot: structure level used for duplicate-entry lock
 // Returns true if at least one fill succeeded.
 bool TE_TryEntryLong(
    IFX_EaConfig  &cfg,  // non-const: auto-RR modifies tp1/tp2
    double         entry_price,
-   double         zone_low,
-   double         calc_inval)
+   double         stop_loss,
+   double         trigger_pivot)
 {
-   // SL placement: below zone_low (with padding) or below calc_inval
-   double sl_pad = cfg.sl_pad_mult * _Point;
-   double sl_raw = MathMin(zone_low, calc_inval) - sl_pad;
-   sl_raw = NormalizeDouble(sl_raw, _Digits);
+   double sl_raw = NormalizeDouble(stop_loss, _Digits);
 
    double sl_dist = entry_price - sl_raw;
    if(sl_dist <= 0.0)
@@ -326,7 +333,7 @@ bool TE_TryEntryLong(
 
    if(success)
    {
-      te_last_traded_pivot = cfg.pivot;
+      te_last_traded_pivot = trigger_pivot;
       te_tp1_hit           = false;
       te_be_secured        = false;
       string msg = "🟢 **LONG ENTRY** | " + _Symbol +
@@ -348,12 +355,10 @@ bool TE_TryEntryLong(
 bool TE_TryEntryShort(
    IFX_EaConfig  &cfg,
    double         entry_price,
-   double         zone_high,
-   double         calc_inval)
+   double         stop_loss,
+   double         trigger_pivot)
 {
-   double sl_pad = cfg.sl_pad_mult * _Point;
-   double sl_raw = MathMax(zone_high, calc_inval) + sl_pad;
-   sl_raw = NormalizeDouble(sl_raw, _Digits);
+   double sl_raw = NormalizeDouble(stop_loss, _Digits);
 
    double sl_dist = sl_raw - entry_price;
    if(sl_dist <= 0.0)
@@ -399,7 +404,7 @@ bool TE_TryEntryShort(
 
    if(success)
    {
-      te_last_traded_pivot = cfg.pivot;
+      te_last_traded_pivot = trigger_pivot;
       te_tp1_hit           = false;
       te_be_secured        = false;
       string msg = "🔴 **SHORT ENTRY** | " + _Symbol +
@@ -421,114 +426,132 @@ bool TE_TryEntryShort(
 // SECTION D — POSITION MANAGEMENT
 //==========================================================================
 
-// Manages open positions for the current symbol:
-//   1. Detect TP1 hit (partial close via magic+1 position disappearing)
-//   2. After TP1 hit: move SL to break-even on remaining position
-//   3. MTF SL trailing via boss_tf low/high
+// Manages open positions for the current symbol using the original v9.30 flow:
+//   1. Detect TP1 completion from surviving TP2-only position set
+//   2. Trigger BE after TP1 or after tf_be structure confirmation
+//   3. Move SL to exact entry when broker stop/freeze levels allow it
 void TE_ManageOpenPositions(const IFX_EaConfig &cfg)
 {
-   int total_pos = PositionsTotal();
-   if(total_pos == 0) return;
+   double total_open_lots = 0.0;
+   bool tp1_exists = false;
+   bool tp2_exists = false;
 
-   bool found_main  = false;  // magic
-   bool found_split = false;  // magic + 1
-
-   for(int i = total_pos - 1; i >= 0; i--)
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
       if(PositionGetString(ticket, POSITION_SYMBOL) != _Symbol) continue;
       long magic = PositionGetInteger(ticket, POSITION_MAGIC);
-      if(magic == cfg.base_magic)     found_main  = true;
-      if(magic == cfg.base_magic + 1) found_split = true;
+      if(magic < cfg.base_magic || magic > cfg.base_magic + 50) continue;
+
+      double tp = PositionGetDouble(ticket, POSITION_TP);
+      if(cfg.tp1 > 0.0 && tp == cfg.tp1)
+         tp1_exists = true;
+      if(cfg.tp2 > 0.0 && tp == cfg.tp2)
+         tp2_exists = true;
+      total_open_lots += PositionGetDouble(ticket, POSITION_VOLUME);
    }
 
-   // Detect TP1 hit: split position gone, main still alive
-   if(cfg.use_partial && !te_tp1_hit && found_main && !found_split)
+   if(cfg.use_partial && cfg.tp1 > 0.0 && tp2_exists && !tp1_exists && !te_tp1_hit)
    {
       te_tp1_hit = true;
-      Print("✅ [TE] TP1 hit detected — BE trigger armed");
+      TE_SendDiscordAlert(cfg, "✅ VIP PROFIT SECURED | Broker successfully executed TP1 split-order.");
    }
 
-   // Move SL to break-even after TP1
-   if(cfg.be_after_tp1 && te_tp1_hit && !te_be_secured)
+   bool trigger_be = false;
+   if(cfg.be_after_tp1 && te_tp1_hit)
+      trigger_be = true;
+
+   if(cfg.use_be && !trigger_be && tp2_exists)
    {
-      for(int i = total_pos - 1; i >= 0; i--)
+      double ref_entry = 0.0;
+      long ref_type = -1;
+      datetime ref_time = 0;
+
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
       {
          ulong ticket = PositionGetTicket(i);
          if(PositionGetString(ticket, POSITION_SYMBOL) != _Symbol) continue;
-         if(PositionGetInteger(ticket, POSITION_MAGIC) != cfg.base_magic) continue;
+         long magic = PositionGetInteger(ticket, POSITION_MAGIC);
+         if(magic < cfg.base_magic || magic > cfg.base_magic + 50) continue;
 
-         double entry  = PositionGetDouble(ticket, POSITION_PRICE_OPEN);
-         double cur_sl = PositionGetDouble(ticket, POSITION_SL);
-         double tp     = PositionGetDouble(ticket, POSITION_TP);
-         double pos_type = (double)PositionGetInteger(ticket, POSITION_TYPE);
+         ref_entry = PositionGetDouble(ticket, POSITION_PRICE_OPEN);
+         ref_type = PositionGetInteger(ticket, POSITION_TYPE);
+         ref_time = (datetime)PositionGetInteger(ticket, POSITION_TIME);
+         break;
+      }
 
-         double new_sl;
-         if(pos_type == POSITION_TYPE_BUY)
-            new_sl = NormalizeDouble(entry + _Point, _Digits);
-         else
-            new_sl = NormalizeDouble(entry - _Point, _Digits);
+      if(ref_type != -1)
+      {
+         double be_close[];
+         ArraySetAsSeries(be_close, true);
 
-         bool sl_already_at_be = false;
-         if(pos_type == POSITION_TYPE_BUY  && cur_sl >= entry) sl_already_at_be = true;
-         if(pos_type == POSITION_TYPE_SELL && cur_sl <= entry) sl_already_at_be = true;
-
-         if(!sl_already_at_be)
+         if(CopyClose(_Symbol, cfg.tf_be, 0, 1, be_close) > 0)
          {
-            te_trade.SetExpertMagicNumber(cfg.base_magic);
-            if(te_trade.PositionModify(ticket, new_sl, tp))
+            double be_ph, be_pl;
+            datetime t_ph, t_pl;
+            SE_GetActiveStructure(cfg.tf_be, cfg.pivot_len, cfg.smc_lookback, be_ph, be_pl, t_ph, t_pl);
+
+            if(ref_type == POSITION_TYPE_BUY && be_ph != EMPTY_VALUE && be_ph > ref_entry && be_close[0] > ref_entry && t_ph > ref_time)
+               trigger_be = true;
+            if(ref_type == POSITION_TYPE_SELL && be_pl != EMPTY_VALUE && be_pl < ref_entry && be_close[0] < ref_entry && t_pl > ref_time)
+               trigger_be = true;
+         }
+      }
+   }
+
+   if(trigger_be)
+      te_be_secured = true;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionGetString(ticket, POSITION_SYMBOL) != _Symbol) continue;
+      long magic = PositionGetInteger(ticket, POSITION_MAGIC);
+      if(magic < cfg.base_magic || magic > cfg.base_magic + 50) continue;
+
+      double entry = PositionGetDouble(ticket, POSITION_PRICE_OPEN);
+      long type = PositionGetInteger(ticket, POSITION_TYPE);
+      double sl = PositionGetDouble(ticket, POSITION_SL);
+      double tp = PositionGetDouble(ticket, POSITION_TP);
+
+      if(cfg.use_auto_rr && (cfg.tp1 == 0.0 || cfg.tp2 == 0.0))
+      {
+         double risk = MathAbs(entry - sl);
+         if(type == POSITION_TYPE_BUY)
+         {
+            cfg.tp1 = NormalizeDouble(entry + (risk * cfg.auto_rr1), _Digits);
+            cfg.tp2 = NormalizeDouble(entry + (risk * cfg.auto_rr2), _Digits);
+         }
+         else if(type == POSITION_TYPE_SELL)
+         {
+            cfg.tp1 = NormalizeDouble(entry - (risk * cfg.auto_rr1), _Digits);
+            cfg.tp2 = NormalizeDouble(entry - (risk * cfg.auto_rr2), _Digits);
+         }
+      }
+
+      if(te_be_secured)
+      {
+         double new_sl = NormalizeDouble(entry, _Digits);
+         if(MathAbs(sl - new_sl) > _Point * 2)
+         {
+            long stop_level_points = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+            long freeze_level_points = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+            double required_buffer = MathMax(stop_level_points, freeze_level_points) * _Point;
+            double current_price = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+            if(MathAbs(current_price - new_sl) > required_buffer && (tp == 0.0 || MathAbs(current_price - tp) > required_buffer))
             {
-               te_be_secured = true;
-               Print("✅ [TE] Break-even secured at ", DoubleToString(new_sl, _Digits));
+               te_trade.SetExpertMagicNumber((int)magic);
+               te_trade.PositionModify(ticket, new_sl, tp);
             }
          }
-         else
-         {
-            te_be_secured = true;
-         }
       }
    }
 
-   // MTF SL trailing via boss timeframe structure
-   if(cfg.use_mtf_sl && found_main)
+   if(total_open_lots <= 0.0)
    {
-      for(int i = total_pos - 1; i >= 0; i--)
-      {
-         ulong ticket = PositionGetTicket(i);
-         if(PositionGetString(ticket, POSITION_SYMBOL) != _Symbol) continue;
-         if(PositionGetInteger(ticket, POSITION_MAGIC) != cfg.base_magic) continue;
-
-         ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(ticket, POSITION_TYPE);
-         double cur_sl = PositionGetDouble(ticket, POSITION_SL);
-         double cur_tp = PositionGetDouble(ticket, POSITION_TP);
-         double entry  = PositionGetDouble(ticket, POSITION_PRICE_OPEN);
-
-         // Get recent low/high on SL timeframe (5 bars back)
-         double sl_trail;
-         if(pos_type == POSITION_TYPE_BUY)
-         {
-            double tf_low = iLow(_Symbol, cfg.tf_sl, iLowest(_Symbol, cfg.tf_sl, MODE_LOW, 5, 1));
-            double candidate = NormalizeDouble(tf_low - _Point, _Digits);
-            // Only move SL up (trailing), never back down
-            if(candidate > cur_sl && candidate < entry)
-               sl_trail = candidate;
-            else
-               continue;
-         }
-         else
-         {
-            double tf_high = iHigh(_Symbol, cfg.tf_sl, iHighest(_Symbol, cfg.tf_sl, MODE_HIGH, 5, 1));
-            double candidate = NormalizeDouble(tf_high + _Point, _Digits);
-            // Only move SL down (trailing), never back up
-            if(candidate < cur_sl && candidate > entry)
-               sl_trail = candidate;
-            else
-               continue;
-         }
-
-         te_trade.SetExpertMagicNumber(cfg.base_magic);
-         te_trade.PositionModify(ticket, sl_trail, cur_tp);
-      }
+      te_be_secured = false;
+      te_tp1_hit = false;
    }
 }
 

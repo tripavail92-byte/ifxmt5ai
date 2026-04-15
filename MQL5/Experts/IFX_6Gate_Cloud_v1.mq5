@@ -60,7 +60,7 @@ input string             i_nyEnd        = "17:00";          // New York End
 // INPUTS — TIMEFRAMES
 //==========================================================================
 input group              "=== Timeframes ==="
-input ENUM_TIMEFRAMES    i_tfEngine     = PERIOD_M15;       // Engine / Entry Timeframe
+input ENUM_TIMEFRAMES    i_tfEngine     = PERIOD_M1;        // Engine / Entry Timeframe
 input ENUM_TIMEFRAMES    i_tfBoss       = PERIOD_H1;        // Boss / Invalidation Timeframe
 input bool               i_useMtfSL    = true;              // Enable MTF SL Trailing
 input ENUM_TIMEFRAMES    i_tfSL         = PERIOD_M15;       // SL Trailing Timeframe
@@ -85,7 +85,7 @@ input bool               i_useAutoRR    = false;            // Use Auto R:R from
 input double             i_autoRR1      = 1.0;              // Auto RR Multiplier TP1
 input double             i_autoRR2      = 2.0;              // Auto RR Multiplier TP2
 input int                i_baseMagic    = 9180;             // Base Magic Number
-input int                i_pivotLen     = 10;               // Pivot High/Low Lookback (bars)
+input int                i_pivotLen     = 5;                // Pivot High/Low Lookback (bars)
 input bool               i_usePartial   = true;             // Partial Exit at TP1
 input double             i_tp1Pct       = 75.0;             // Lots to Close at TP1 (%)
 input bool               i_useBE        = true;             // Enable Break-Even
@@ -97,7 +97,7 @@ input string             i_eodTime      = "23:50";          // EOD Cutoff Time (
 // INPUTS — VISUALS & DISCORD
 //==========================================================================
 input group              "=== Visuals ==="
-input bool               i_showStruct   = true;             // Draw SMC Structure
+input bool               i_showStruct   = false;            // Draw SMC Structure
 input int                i_smcLookback  = 400;              // SMC Lookback (bars)
 
 input group              "=== Discord ==="
@@ -141,6 +141,11 @@ double       s_zone_low               = 0.0;
 double       s_calc_inval             = 0.0;
 bool         s_zone_valid             = false;
 int          s_atr_handle             = INVALID_HANDLE;
+double       s_live_planned_sl        = 0.0;
+double       s_live_planned_lots      = 0.0;
+bool         s_is_inside_zone         = false;
+bool         s_is_dead_struct         = false;
+bool         s_is_in_purgatory        = false;
 
 // Phase 4: command polling + live-state push
 long         s_cmd_cursor             = 0;    // highest sequence_no acked so far
@@ -435,37 +440,27 @@ void RecalcZone()
 // UNPAIRED / CONFIG_LOADING / ERROR before calling this.
 //==========================================================================
 string GetHudStatus(bool in_session, bool in_zone, bool has_pos,
-                    bool sl_cooling, bool max_reached, bool is_eod)
+                    bool sl_cooling, bool max_reached, bool is_eod,
+                    bool is_dead_struct, bool in_purgatory)
 {
-   if(is_eod)       return "DEAD";
-   if(max_reached)  return "MAX_TRADES";
-   if(sl_cooling)   return "PURGATORY";
-   if(has_pos)
-   {
-      double pnl = 0.0;
-      for(int i = PositionsTotal() - 1; i >= 0; i--)
-      {
-         ulong t  = PositionGetTicket(i);
-         if(PositionGetString(t, POSITION_SYMBOL) != _Symbol) continue;
-         long mg  = PositionGetInteger(t, POSITION_MAGIC);
-         if(mg < g_cfg.base_magic || mg > g_cfg.base_magic + 50) continue;
-         pnl += PositionGetDouble(t, POSITION_PROFIT);
-      }
-      return (pnl < 0.0) ? "BLEEDING" : "IN_TRADE";
-   }
-   if(!in_session)  return "ASLEEP";
-   if(in_zone)      return "STALKING";
+   if(is_eod)          return "DEAD";
+   if(has_pos)         return "IN_TRADE";
+   if(is_dead_struct)  return "DEAD";
+   if(sl_cooling)      return "BLEEDING";
+   if(max_reached)     return "MAX_TRADES";
+   if(in_purgatory)    return "PURGATORY";
+   if(in_session)      return "STALKING";
    return "ASLEEP";
 }
 
 color GetStatusColor(const string status)
 {
-   if(status == "IN_TRADE")      return C'30,100,220';
+   if(status == "IN_TRADE")      return C'111,66,193';
    if(status == "BLEEDING")      return C'180,0,30';
    if(status == "STALKING")      return C'30,140,60';
    if(status == "PURGATORY")     return C'200,100,0';
-   if(status == "DEAD")          return C'60,60,60';
-   if(status == "MAX_TRADES")    return C'60,60,60';
+   if(status == "DEAD")          return C'180,0,30';
+   if(status == "MAX_TRADES")    return C'180,0,30';
    if(status == "UNPAIRED")      return C'120,80,160';
    if(status == "LOADING")       return C'100,130,160';
    if(status == "CONFIG_ERROR")  return C'180,50,50';
@@ -483,6 +478,106 @@ bool IsInsideZone()
    if(g_cfg.bias == "Long")  return (ask >= s_zone_low && ask <= s_zone_high);
    if(g_cfg.bias == "Short") return (bid >= s_zone_low && bid <= s_zone_high);
    return false;
+}
+
+bool ComputeDynamicEntryPlan(IFX_EaConfig &cfg, double &out_sl, double &out_lots)
+{
+   out_sl = 0.0;
+   out_lots = 0.0;
+
+   if(cfg.bias == "Neutral" || cfg.pivot <= 0.0)
+      return false;
+
+   double ph_ltf, pl_ltf, ph_htf, pl_htf;
+   datetime t1, t2;
+   SE_GetActiveStructure(cfg.tf_engine, cfg.pivot_len, cfg.smc_lookback, ph_ltf, pl_ltf, t1, t2);
+
+   double final_anchor = (cfg.bias == "Long") ? pl_ltf : ph_ltf;
+   double engine_close = iClose(_Symbol, cfg.tf_engine, 0);
+
+   if(cfg.use_mtf_sl)
+   {
+      SE_GetActiveStructure(cfg.tf_sl, cfg.pivot_len, cfg.smc_lookback, ph_htf, pl_htf, t1, t2);
+      double htf_anchor = (cfg.bias == "Long") ? pl_htf : ph_htf;
+
+      if(htf_anchor != EMPTY_VALUE)
+      {
+         if(cfg.bias == "Long" && htf_anchor < engine_close)
+            final_anchor = htf_anchor;
+         if(cfg.bias == "Short" && htf_anchor > engine_close)
+            final_anchor = htf_anchor;
+      }
+   }
+
+   if(final_anchor == EMPTY_VALUE || final_anchor == 0.0)
+      return false;
+
+   double dynamic_pad = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point * cfg.sl_pad_mult;
+   out_sl = (cfg.bias == "Long")
+      ? NormalizeDouble(final_anchor - dynamic_pad, _Digits)
+      : NormalizeDouble(final_anchor + dynamic_pad, _Digits);
+
+   double entry_price = (cfg.bias == "Long")
+      ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+      : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double sl_dist = MathAbs(entry_price - out_sl);
+   if(sl_dist <= 0.0)
+      return false;
+
+   RE_CalculateAutoRR(cfg, entry_price, sl_dist, (cfg.bias == "Long") ? +1 : -1);
+   out_lots = RE_CalculateLots(cfg, entry_price, out_sl);
+   return (out_lots > 0.0);
+}
+
+bool IsDeadStructure(const IFX_EaConfig &cfg)
+{
+   if(cfg.bias == "Neutral")
+      return false;
+
+   double boss_close[];
+   ArraySetAsSeries(boss_close, true);
+   if(CopyClose(_Symbol, cfg.tf_boss, 1, 1, boss_close) <= 0)
+      return false;
+
+   if(cfg.bias == "Long" && boss_close[0] < s_calc_inval)
+      return true;
+   if(cfg.bias == "Short" && boss_close[0] > s_calc_inval)
+      return true;
+   return false;
+}
+
+bool IsInPurgatory(const IFX_EaConfig &cfg, bool is_dead_struct)
+{
+   if(is_dead_struct || cfg.bias == "Neutral")
+      return false;
+
+   double engine_close = iClose(_Symbol, cfg.tf_engine, 0);
+   if(cfg.bias == "Long" && engine_close < s_calc_inval)
+      return true;
+   if(cfg.bias == "Short" && engine_close > s_calc_inval)
+      return true;
+   return false;
+}
+
+void RefreshEntryContext(IFX_EaConfig &cfg)
+{
+   s_is_inside_zone = IsInsideZone();
+   s_is_dead_struct = IsDeadStructure(cfg);
+   s_is_in_purgatory = IsInPurgatory(cfg, s_is_dead_struct);
+
+   if(RE_CountOpenPositions(cfg) == 0)
+   {
+      if(!ComputeDynamicEntryPlan(cfg, s_live_planned_sl, s_live_planned_lots))
+      {
+         s_live_planned_sl = 0.0;
+         s_live_planned_lots = 0.0;
+      }
+   }
+   else
+   {
+      s_live_planned_sl = 0.0;
+      s_live_planned_lots = 0.0;
+   }
 }
 
 //==========================================================================
@@ -601,6 +696,7 @@ int OnInit()
 
    // ── 6. Initial zone and invalidation calculation ───────────────────────
    RecalcZone();
+   RefreshEntryContext(g_cfg);
 
    // ── 7. One-second timer (HUD + relay heartbeat) ───────────────────────
    EventSetTimer(1);
@@ -655,6 +751,20 @@ void OnTick()
    // ── Button flags (always) ─────────────────────────────────────────────
    TE_PollButtonFlags(g_cfg);
 
+   if(g_ea_state == STATE_READY)
+   {
+      RecalcZone();
+      RefreshEntryContext(g_cfg);
+   }
+   else
+   {
+      s_is_inside_zone = false;
+      s_is_dead_struct = false;
+      s_is_in_purgatory = false;
+      s_live_planned_sl = 0.0;
+      s_live_planned_lots = 0.0;
+   }
+
    // ── ALWAYS: manage / EOD close regardless of EA state ────────────────
    // We NEVER abandon a live trade, even if config becomes invalid mid-session.
    bool has_pos = (RE_CountOpenPositions(g_cfg) > 0);
@@ -685,7 +795,6 @@ void OnTick()
    bool sl_cooling = RE_CheckHistoricalStopLoss(g_cfg);
    bool max_hit    = (RE_CountTodayTrades(g_cfg) >= g_cfg.max_trades);
    bool in_session = RE_CheckTradingSessions(g_cfg);
-   bool in_zone    = IsInsideZone();
 
    // ── Entry gates ───────────────────────────────────────────────────────
    if(!in_session)      return;   // outside all sessions
@@ -693,18 +802,35 @@ void OnTick()
    if(max_hit)          return;   // daily limit reached
    if(is_eod)           return;   // past EOD cutoff
    if(!s_zone_valid)    return;   // no valid zone yet
-   if(!in_zone)         return;   // price not inside entry zone
-   if(g_cfg.bias == "Neutral") return;   // no directional bias
-   if(g_cfg.pivot == te_last_traded_pivot) return;  // already traded this level
+   if(g_cfg.bias == "Neutral") return;      // no directional bias
+   if(s_is_dead_struct) return;               // invalidated on boss timeframe
+   if(s_is_in_purgatory) return;              // wick through invalidation, wait for reset
+   if(s_live_planned_sl <= 0.0 || s_live_planned_lots <= 0.0) return;
+
+   double engine_close[];
+   ArraySetAsSeries(engine_close, true);
+   if(CopyClose(_Symbol, g_cfg.tf_engine, 0, 3, engine_close) < 3)
+      return;
+
+   bool touching_zone =
+      (iLow(_Symbol, g_cfg.tf_engine, 0) <= s_zone_high && iHigh(_Symbol, g_cfg.tf_engine, 0) >= s_zone_low) ||
+      (iLow(_Symbol, g_cfg.tf_engine, 1) <= s_zone_high && iHigh(_Symbol, g_cfg.tf_engine, 1) >= s_zone_low);
+
+   double act_ph, act_pl;
+   datetime t_ph, t_pl;
+   SE_GetActiveStructure(g_cfg.tf_engine, g_cfg.pivot_len, g_cfg.smc_lookback, act_ph, act_pl, t_ph, t_pl);
+
+   bool bullish_break = (act_ph != EMPTY_VALUE && engine_close[1] > act_ph && engine_close[2] <= act_ph);
+   bool bearish_break = (act_pl != EMPTY_VALUE && engine_close[1] < act_pl && engine_close[2] >= act_pl);
 
    // ── Fire entry ───────────────────────────────────────────────────────
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-   if(g_cfg.bias == "Long")
-      TE_TryEntryLong(g_cfg, ask, s_zone_low,  s_calc_inval);
-   else if(g_cfg.bias == "Short")
-      TE_TryEntryShort(g_cfg, bid, s_zone_high, s_calc_inval);
+   if(g_cfg.bias == "Long" && bullish_break && touching_zone && act_ph != te_last_traded_pivot)
+      TE_TryEntryLong(g_cfg, ask, s_live_planned_sl, act_ph);
+   else if(g_cfg.bias == "Short" && bearish_break && touching_zone && act_pl != te_last_traded_pivot)
+      TE_TryEntryShort(g_cfg, bid, s_live_planned_sl, act_pl);
 }
 
 //==========================================================================
@@ -818,6 +944,7 @@ void OnTimer()
 
    // ── Recalculate zone (cheap — no tick copy, just uses stored ATR) ────
    RecalcZone();
+   RefreshEntryContext(g_cfg);
 
    // ── Apply deferred config (queued while trade was active) ────────────
    if(g_has_pending_cfg && RE_CountOpenPositions(g_cfg) == 0)
@@ -926,10 +1053,11 @@ void OnTimer()
    bool max_hit    = (RE_CountTodayTrades(g_cfg) >= g_cfg.max_trades);
    bool in_session = RE_CheckTradingSessions(g_cfg);
    bool is_eod     = RE_IsEodReached(g_cfg);
-   bool in_zone    = IsInsideZone();
+   bool in_zone    = s_is_inside_zone;
    int  daily_cnt  = RE_CountTodayTrades(g_cfg);
 
-   string hud_status = GetHudStatus(in_session, in_zone, has_pos, sl_cooling, max_hit, is_eod);
+   string hud_status = GetHudStatus(in_session, in_zone, has_pos, sl_cooling, max_hit, is_eod,
+                                    s_is_dead_struct, s_is_in_purgatory);
    color  hud_col    = GetStatusColor(hud_status);
 
    // ── Redraw HUD (dirty-flag prevents unnecessary ChartRedraw calls) ───
@@ -939,8 +1067,8 @@ void OnTimer()
       g_cfg,
       hud_status,      hud_col,
       s_calc_inval,
-      TE_GetLiveSL(g_cfg),
-      TE_GetLiveLots(g_cfg),
+      has_pos ? TE_GetLiveSL(g_cfg) : s_live_planned_sl,
+      has_pos ? TE_GetLiveLots(g_cfg) : s_live_planned_lots,
       in_zone,
       te_be_secured,
       daily_cnt,

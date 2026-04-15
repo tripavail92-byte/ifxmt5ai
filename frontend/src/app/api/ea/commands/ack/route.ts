@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isoNow, parseJsonBody, requireEaAuth } from "@/lib/ea-control-plane";
+import { persistTradeAuditFromCommandAck } from "@/lib/ea-trade-audit";
 
 export const runtime = "nodejs";
 
@@ -83,6 +84,19 @@ export async function POST(req: NextRequest) {
 
   if (installationError) {
     return NextResponse.json({ error: installationError.message }, { status: 500 });
+  }
+
+  try {
+    await persistTradeAuditFromCommandAck(auth.admin, {
+      connectionId,
+      commandId,
+      ackStatus,
+      ackPayload: body?.ack_payload_json ?? {},
+      createdAt: now,
+    });
+  } catch (auditError) {
+    const message = auditError instanceof Error ? auditError.message : "Failed to persist trade audit";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 
   return NextResponse.json({ ok: true, connection_id: connectionId, command_id: commandId, sequence_no: sequenceNo, status: ackStatus });

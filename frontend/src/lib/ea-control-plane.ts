@@ -272,7 +272,7 @@ async function loadUserStrategy(admin: AdminClient, connectionId: string) {
 async function loadLatestTradingSetup(admin: AdminClient, connectionId: string) {
   const { data, error } = await admin
     .from("trading_setups")
-    .select("id, symbol, side, entry_price, pivot, tp1, tp2, bias, ai_text, atr_zone_pct, sl_pad_mult, zone_percent, timeframe, ai_sensitivity, trade_now_active, updated_at")
+    .select("id, symbol, side, entry_price, pivot, tp1, tp2, bias, ai_text, atr_zone_pct, sl_pad_mult, zone_percent, timeframe, ai_sensitivity, trade_now_active, use_auto_rr, auto_rr1, auto_rr2, updated_at")
     .eq("connection_id", connectionId)
     .eq("is_active", true)
     .order("updated_at", { ascending: false })
@@ -318,6 +318,27 @@ function buildSessionsPayload(raw: unknown) {
   };
 }
 
+function readBooleanPref(raw: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    if (typeof raw[key] === "boolean") return raw[key] as boolean;
+  }
+  return undefined;
+}
+
+function readNumberPref(raw: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    if (typeof raw[key] === "number" && Number.isFinite(raw[key])) return raw[key] as number;
+  }
+  return undefined;
+}
+
+function readStringPref(raw: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    if (typeof raw[key] === "string" && raw[key].trim()) return raw[key].trim();
+  }
+  return undefined;
+}
+
 export async function buildEaConfigForConnection(admin: AdminClient, connectionId: string) {
   const connection = await loadConnection(admin, connectionId);
   if (!connection) {
@@ -361,6 +382,7 @@ export async function buildEaConfigForConnection(admin: AdminClient, connectionI
       },
       setup: {
         ...currentConfig.setup,
+        ai_text: typeof setup?.ai_text === "string" ? setup.ai_text : currentConfig.setup.ai_text,
         bias: (setup?.bias === "buy" || setup?.bias === "sell" || setup?.bias === "neutral")
           ? setup.bias
           : (setup?.side === "buy" || setup?.side === "sell")
@@ -378,6 +400,9 @@ export async function buildEaConfigForConnection(admin: AdminClient, connectionI
       structure: {
         ...currentConfig.structure,
         timeframe: typeof setup?.timeframe === "string" && setup.timeframe.trim() ? setup.timeframe.trim() : currentConfig.structure.timeframe,
+        boss_timeframe: readStringPref(prefs, "bossTimeframe", "boss_timeframe") ?? currentConfig.structure.boss_timeframe,
+        sl_timeframe: readStringPref(prefs, "slTimeframe", "sl_timeframe") ?? currentConfig.structure.sl_timeframe,
+        be_timeframe: readStringPref(prefs, "beTimeframe", "be_timeframe") ?? currentConfig.structure.be_timeframe,
         pivot_window: typeof setup?.ai_sensitivity === "number" ? setup.ai_sensitivity : currentConfig.structure.pivot_window,
       },
       risk: {
@@ -387,6 +412,10 @@ export async function buildEaConfigForConnection(admin: AdminClient, connectionI
           : typeof prefs.riskPercent === "number"
             ? prefs.riskPercent
             : currentConfig.risk.risk_percent,
+        min_rr: typeof strategy?.rr_min === "number"
+          ? strategy.rr_min
+          : currentConfig.risk.min_rr,
+        strict_risk: readBooleanPref(prefs, "strictRisk", "strict_risk") ?? currentConfig.risk.strict_risk,
         max_open_trades: typeof strategy?.max_open_trades === "number"
           ? strategy.max_open_trades
           : currentConfig.risk.max_open_trades,
@@ -405,6 +434,34 @@ export async function buildEaConfigForConnection(admin: AdminClient, connectionI
       sessions: buildSessionsPayload(prefs.sessions),
       execution: {
         ...currentConfig.execution,
+        allow_market_orders: readBooleanPref(prefs, "allowMarketOrders", "allow_market_orders") ?? currentConfig.execution.allow_market_orders,
+        sl_pad_mult: typeof setup?.sl_pad_mult === "number"
+          ? setup.sl_pad_mult
+          : currentConfig.execution.sl_pad_mult,
+        use_mtf_sl: readBooleanPref(prefs, "useMtfSl", "use_mtf_sl") ?? currentConfig.execution.use_mtf_sl,
+        use_dead_sl: readBooleanPref(prefs, "useDeadSl", "use_dead_sl") ?? currentConfig.execution.use_dead_sl,
+        sl_cooldown_min: readNumberPref(prefs, "slCooldownMin", "sl_cooldown_min") ?? currentConfig.execution.sl_cooldown_min,
+        base_magic: readNumberPref(prefs, "baseMagic", "base_magic") ?? currentConfig.execution.base_magic,
+        partial_take_profit_enabled: readBooleanPref(prefs, "partialTakeProfitEnabled", "partial_take_profit_enabled") ?? currentConfig.execution.partial_take_profit_enabled,
+        tp1_pct: readNumberPref(prefs, "tp1Pct", "tp1_pct") ?? currentConfig.execution.tp1_pct,
+        break_even_enabled: readBooleanPref(prefs, "breakEvenEnabled", "break_even_enabled") ?? currentConfig.execution.break_even_enabled,
+        break_even_after_tp1: readBooleanPref(prefs, "breakEvenAfterTp1", "break_even_after_tp1") ?? currentConfig.execution.break_even_after_tp1,
+        use_auto_rr: typeof setup?.use_auto_rr === "boolean"
+          ? setup.use_auto_rr
+          : currentConfig.execution.use_auto_rr,
+        auto_rr1: typeof setup?.auto_rr1 === "number"
+          ? setup.auto_rr1
+          : currentConfig.execution.auto_rr1,
+        auto_rr2: typeof setup?.auto_rr2 === "number"
+          ? setup.auto_rr2
+          : currentConfig.execution.auto_rr2,
+        close_eod: readBooleanPref(prefs, "closeEod", "close_eod") ?? currentConfig.execution.close_eod,
+        eod_time: readStringPref(prefs, "eodTime", "eod_time") ?? currentConfig.execution.eod_time,
+      },
+      visuals: {
+        ...currentConfig.visuals,
+        show_struct: readBooleanPref(prefs, "showStruct", "show_struct") ?? currentConfig.visuals.show_struct,
+        smc_lookback: readNumberPref(prefs, "smcLookback", "smc_lookback") ?? currentConfig.visuals.smc_lookback,
       },
     },
     connectionId,
@@ -654,6 +711,52 @@ export async function getReleaseManifest(admin: AdminClient, channel?: string) {
   };
 }
 
+async function connectionRuntimeSignalFresh(admin: AdminClient, connectionId: string) {
+  const freshAfterSec = Math.max(
+    60,
+    Number.parseInt((process.env.TERMINAL_ASSIGNMENT_STALE_SIGNAL_SEC ?? "120").trim(), 10) || 120,
+  );
+  const cutoffMs = Date.now() - freshAfterSec * 1000;
+
+  const [heartbeatResult, installationResult] = await Promise.all([
+    admin
+      .from("mt5_worker_heartbeats")
+      .select("last_seen_at,status,mt5_initialized")
+      .eq("connection_id", connectionId)
+      .order("last_seen_at", { ascending: false })
+      .limit(1),
+    admin
+      .from("ea_installations")
+      .select("last_seen_at,status")
+      .eq("connection_id", connectionId)
+      .order("last_seen_at", { ascending: false })
+      .limit(1),
+  ]);
+
+  if (heartbeatResult.error) {
+    throw new Error(`Failed to load worker heartbeat: ${heartbeatResult.error.message}`);
+  }
+  if (installationResult.error) {
+    throw new Error(`Failed to load EA installation heartbeat: ${installationResult.error.message}`);
+  }
+
+  const heartbeat = (heartbeatResult.data ?? [])[0] as { last_seen_at?: string; status?: string; mt5_initialized?: boolean } | undefined;
+  const installation = (installationResult.data ?? [])[0] as { last_seen_at?: string; status?: string } | undefined;
+
+  const heartbeatSeenAt = Date.parse(String(heartbeat?.last_seen_at ?? ""));
+  const installSeenAt = Date.parse(String(installation?.last_seen_at ?? ""));
+
+  const heartbeatFresh = Number.isFinite(heartbeatSeenAt)
+    && heartbeatSeenAt >= cutoffMs
+    && String(heartbeat?.status ?? "").toLowerCase() !== "error"
+    && Boolean(heartbeat?.mt5_initialized);
+  const installationFresh = Number.isFinite(installSeenAt)
+    && installSeenAt >= cutoffMs
+    && ["online", "starting"].includes(String(installation?.status ?? "").toLowerCase());
+
+  return heartbeatFresh || installationFresh;
+}
+
 export async function ensureBootstrapAssignment(
   admin: AdminClient,
   input: {
@@ -680,6 +783,29 @@ export async function ensureBootstrapAssignment(
 
   const existing = (existingRows ?? [])[0];
   if (existing) {
+    if (["launched", "active"].includes(String(existing.status ?? ""))) {
+      const signalFresh = await connectionRuntimeSignalFresh(admin, input.connectionId);
+      if (!signalFresh) {
+        const { data: requeuedRows, error: requeueError } = await admin
+          .from("terminal_assignments")
+          .update({
+            status: "pending",
+            assigned_at: now,
+            updated_at: now,
+            last_error: "Requeued by bootstrap because no fresh terminal or EA heartbeat was present.",
+          })
+          .eq("id", existing.id)
+          .select("*")
+          .limit(1);
+
+        if (requeueError) {
+          throw new Error(`Failed to requeue stale terminal assignment: ${requeueError.message}`);
+        }
+
+        return (requeuedRows ?? [])[0] ?? existing;
+      }
+    }
+
     return existing;
   }
 

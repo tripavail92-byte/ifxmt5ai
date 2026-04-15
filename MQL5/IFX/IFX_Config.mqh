@@ -418,7 +418,7 @@ void CFG_ApplyAiText(IFX_EaConfig &cfg, const string ai_text)
 // {
 //   "schema_version": 3,
 //   "connection_id": "...",
-//   "setup": { "bias":"Long","pivot":2650.5,"tp1":2680,"tp2":2720,
+//   "setup": { "ai_text":"...","bias":"Long","pivot":2650.5,"tp1":2680,"tp2":2720,
 //               "atr_zone_thickness_pct":10,"sl_pad_mult":2.0 },
 //   "structure": { "boss_timeframe":"H1","sl_timeframe":"M15",
 //                  "be_timeframe":"M10","smc_lookback":400,"show_struct":false },
@@ -441,8 +441,11 @@ void CFG_ParseFromCloudJson(IFX_EaConfig &cfg, const string json)
 
    // setup section
    string setup = CFG_JsonObject(json, "setup");
+   string setup_ai_text = "";
    if(StringLen(setup) > 0)
    {
+      setup_ai_text = CFG_JsonString(setup, "ai_text", "");
+
       string bias_str = CFG_JsonString(setup, "bias", "");
       if(StringLen(bias_str) > 0)
       {
@@ -558,6 +561,9 @@ void CFG_ParseFromCloudJson(IFX_EaConfig &cfg, const string json)
          if(StringLen(arr) > 0) cfg.symbols_csv = arr;
       }
    }
+
+   if(StringLen(setup_ai_text) > 0)
+      CFG_ApplyAiText(cfg, setup_ai_text);
 }
 
 //==========================================================================
