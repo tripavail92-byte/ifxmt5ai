@@ -401,7 +401,14 @@ function deriveDisplaySetupState(args: {
   zone: { low: number; high: number } | null;
   price?: { bid: number; ask: number };
 }): SetupState | null {
-  return args.runtimeState;
+  const { runtimeState, zone, price } = args;
+  if (!zone || !price) return runtimeState;
+  if (runtimeState === "PURGATORY" || runtimeState === "DEAD") return runtimeState;
+
+  const spreadTouchesZone = price.bid <= zone.high && price.ask >= zone.low;
+  if (spreadTouchesZone) return "STALKING";
+
+  return runtimeState;
 }
 
 function hudStatusToSetupState(status: string | null | undefined): SetupState | null {
@@ -1693,8 +1700,61 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       });
   }, [prices, selectedSymbol, setupsBySymbol, tradeNowBySymbol]);
   const runtimeSetupState = hudStatusToSetupState(eaLiveState?.hud_status);
-  const displaySetupState = deriveDisplaySetupState({ runtimeState: runtimeSetupState ?? activeSetupState, zone, price: livePrice });
+  const baseSetupState = runtimeSetupState ?? activeSetupState;
+  const displaySetupState = deriveDisplaySetupState({ runtimeState: baseSetupState, zone, price: livePrice });
+  const setupStateDerivedFromQuote = Boolean(
+    displaySetupState === "STALKING"
+    && baseSetupState !== "STALKING"
+    && baseSetupState !== "PURGATORY"
+    && baseSetupState !== "DEAD"
+  );
   const stateCfg = displaySetupState ? SETUP_STATE_CFG[displaySetupState] : null;
+  const executionBlocker = useMemo(() => {
+    if (!termsAccepted) return "Accept the current terminal terms before queueing live MT5 execution.";
+    if (!(riskAmount > 0)) return "Risk amount must be greater than zero.";
+    if (!aiManagedExecution && lotSizing.minLotExceedsRisk) {
+      return `Minimum broker lot ${lotSizing.volumeMin.toFixed(2)} risks ${fmtCurrency(lotSizing.actualRisk)}, above your selected risk ${fmtCurrency(riskAmount)}.`;
+    }
+    if (maxTradesPerDay > 0 && todaysTradeCount >= maxTradesPerDay) {
+      return `Daily trade limit reached: ${todaysTradeCount}/${maxTradesPerDay}.`;
+    }
+    if (maxPositionSizeLots > 0 && lotSuggestion > maxPositionSizeLots) {
+      return `Lot size ${lotSuggestion.toFixed(2)} exceeds your max position size of ${maxPositionSizeLots} lots.`;
+    }
+
+    const floatingPnl = openPositions.reduce((sum, position) => sum + position.profit + position.swap, 0);
+    if (dailyLossLimitUsd > 0 && floatingPnl < -dailyLossLimitUsd) {
+      return `Daily loss limit of $${dailyLossLimitUsd} reached (floating: ${fmtCurrency(floatingPnl)}).`;
+    }
+    if (dailyProfitTargetUsd > 0 && floatingPnl >= dailyProfitTargetUsd) {
+      return `Daily profit target of $${dailyProfitTargetUsd} reached - trading locked for today.`;
+    }
+    if (maxDrawdownPercent > 0 && accountBalance > 0) {
+      const drawdown = ((accountBalance - accountEquity) / accountBalance) * 100;
+      if (drawdown >= maxDrawdownPercent) {
+        return `Max drawdown of ${maxDrawdownPercent}% reached (current: ${drawdown.toFixed(1)}%).`;
+      }
+    }
+
+    return null;
+  }, [
+    accountBalance,
+    accountEquity,
+    aiManagedExecution,
+    dailyLossLimitUsd,
+    dailyProfitTargetUsd,
+    lotSizing.actualRisk,
+    lotSizing.minLotExceedsRisk,
+    lotSizing.volumeMin,
+    lotSuggestion,
+    maxDrawdownPercent,
+    maxPositionSizeLots,
+    maxTradesPerDay,
+    openPositions,
+    riskAmount,
+    termsAccepted,
+    todaysTradeCount,
+  ]);
   const validStopLoss = typeof slValue === "number" && Number.isFinite(slValue) && slValue > 0 && stopDistance > 0;
   const validTakeProfit = typeof effectiveTakeProfit === "number" && Number.isFinite(effectiveTakeProfit) && effectiveTakeProfit > 0;
   const aiStructureReady = dynamicStopState.stop != null;
