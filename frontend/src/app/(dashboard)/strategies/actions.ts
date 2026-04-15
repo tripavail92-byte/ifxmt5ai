@@ -8,6 +8,33 @@ import { assertConnectionOwnership, enqueueEaCommand, getConnectionExecutionMode
 
 const TERMINAL_TERMS_VERSION = "2026-03-28-v1";
 
+type PlaceManualTradeResult =
+  | {
+      executionMode: "ea-first";
+      commandId: string;
+      sequenceNo: number;
+      commandType: "manual_trade";
+      symbol: string;
+    }
+  | {
+      executionMode: "legacy-worker";
+      queued: true;
+      symbol: string;
+    };
+
+type ActivateTradeNowResult =
+  | {
+      executionMode: "ea-first";
+      setupId: string;
+      commandId: string;
+      sequenceNo: number;
+      commandType: "arm_trade";
+    }
+  | {
+      executionMode: "legacy-worker";
+      setupId: string;
+    };
+
 // ─── Session UTC hour windows ────────────────────────────────────────────────
 // Returns true if the current UTC time falls inside any enabled session.
 // London 08:00–16:30, New York 13:00–21:00, Asia 23:00–08:00 (next day)
@@ -228,7 +255,7 @@ export async function saveTrackedSetup(params: {
   return String(newId);
 }
 
-export async function placeManualTrade(formData: FormData) {
+export async function placeManualTrade(formData: FormData): Promise<PlaceManualTradeResult> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error("Unauthorized");
@@ -260,7 +287,7 @@ export async function placeManualTrade(formData: FormData) {
   await enforceTerminalExecutionGuards(supabase, user.id, connection_id, volume);
 
   if (executionMode === "ea-first") {
-    await enqueueEaCommand(admin, {
+    const command = await enqueueEaCommand(admin, {
       connectionId: connection_id,
       userId: user.id,
       commandType: "manual_trade",
@@ -278,7 +305,13 @@ export async function placeManualTrade(formData: FormData) {
 
     revalidatePath("/trades");
     revalidatePath("/strategies");
-    return;
+    return {
+      executionMode: "ea-first",
+      commandId: String(command?.id ?? ""),
+      sequenceNo: Number(command?.sequence_no ?? 0),
+      commandType: "manual_trade",
+      symbol,
+    };
   }
 
   const service = createServiceClient(
@@ -302,6 +335,11 @@ export async function placeManualTrade(formData: FormData) {
   if (error) throw new Error(`Failed to queue trade: ${error.message}`);
   revalidatePath("/trades");
   revalidatePath("/strategies");
+  return {
+    executionMode: "legacy-worker",
+    queued: true,
+    symbol,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -328,7 +366,7 @@ export async function activateTradeNow(params: {
   use_auto_rr?: boolean | null;
   auto_rr1?: number | null;
   auto_rr2?: number | null;
-}): Promise<string> {
+}): Promise<ActivateTradeNowResult> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error("Unauthorized");
@@ -385,7 +423,7 @@ export async function activateTradeNow(params: {
   await publishEaConfigForConnection(admin, params.connection_id);
 
   if (executionMode === "ea-first") {
-    await enqueueEaCommand(admin, {
+    const command = await enqueueEaCommand(admin, {
       connectionId: params.connection_id,
       userId: user.id,
       commandType: "arm_trade",
@@ -416,7 +454,13 @@ export async function activateTradeNow(params: {
 
     revalidatePath("/strategies");
     revalidatePath("/trades");
-    return setupId;
+    return {
+      executionMode: "ea-first",
+      setupId,
+      commandId: String(command?.id ?? ""),
+      sequenceNo: Number(command?.sequence_no ?? 0),
+      commandType: "arm_trade",
+    };
   }
 
   // 2. Arm the Trade Now flag using service role (bypasses RLS on the update)
@@ -433,5 +477,8 @@ export async function activateTradeNow(params: {
 
   revalidatePath("/strategies");
   revalidatePath("/trades");
-  return setupId;
+  return {
+    executionMode: "legacy-worker",
+    setupId,
+  };
 }

@@ -1,10 +1,10 @@
 const { chromium } = require('playwright');
 
 const BASE_URL = 'https://ifx-mt5-portal-production.up.railway.app';
-const EMAIL = 'testuser@ifxportal.com';
+const EMAIL = 'user3@ifxsystem.com';
 const PASSWORD = 'Demo@ifx2026!';
-const CONNECTION_ID = '200beae4-553b-4607-8653-8a15e5699865';
-const SYMBOL = 'BTCUSDm';
+const CONNECTION_ID = 'c9fc4e21-f284-4c86-999f-ddedd5649734';
+const SYMBOL = 'XAUUSDm';
 const TERMS_VERSION = '2026-03-28-v1';
 
 function extractLastNumber(text) {
@@ -112,7 +112,8 @@ async function signIn(page) {
 }
 
 (async () => {
-  const browser = await chromium.launch({ headless: true });
+  // Switch to headless: false for debugging if needed
+  const browser = await chromium.launch({ headless: false, slowMo: 50 });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1500 } });
 
   await page.addInitScript((version) => {
@@ -131,8 +132,29 @@ async function signIn(page) {
 
   logStep('select connection and symbol');
   const selects = page.locator('select');
+  // Wait for connection select to have options loaded (Railway cold start can take 60s)
+  await page.waitForFunction(
+    (connId) => {
+      const els = document.querySelectorAll('select');
+      if (!els.length) return false;
+      const el = els[0];
+      return el.options.length >= 1 && Array.from(el.options).some(o => o.value === connId);
+    },
+    CONNECTION_ID,
+    { timeout: 60000 }
+  );
   await selects.nth(0).selectOption(CONNECTION_ID);
-  await page.waitForTimeout(2500);
+  await page.waitForTimeout(3000);
+  // Wait for symbol select to have options
+  await page.waitForFunction(
+    (sym) => {
+      const els = document.querySelectorAll('select');
+      if (els.length < 2) return false;
+      return Array.from(els[1].options).some(o => o.value === sym);
+    },
+    SYMBOL,
+    { timeout: 20000 }
+  );
   await selects.nth(1).selectOption(SYMBOL);
   await page.waitForTimeout(2500);
   logStep('wait for live quote');

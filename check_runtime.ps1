@@ -202,8 +202,9 @@ function Get-ControlPlaneTerminalHostStatus {
 $config = Get-DotEnvMap
 $controlPlaneUrl = Get-ConfigValue -Map $config -Name 'CONTROL_PLANE_URL' -Default 'https://ifx-mt5-portal-production.up.railway.app'
 $controlPlaneUrl = $controlPlaneUrl.TrimEnd('/')
-$relayUrl = Get-ConfigValue -Map $config -Name 'EA_BACKEND_RELAY_URL' -Default ($controlPlaneUrl + '/api/mt5')
-$relayUrl = $relayUrl.TrimEnd('/')
+$relayBaseUrl = $controlPlaneUrl + '/api/mt5'
+$relayHealthUrl = $relayBaseUrl + '/health'
+$relaySourceConnectionId = Get-ConfigValue -Map $config -Name 'RELAY_SOURCE_CONNECTION_ID'
 $eaSourcePath = Get-ConfigValue -Map $config -Name 'IFX_EA_SOURCE_PATH' -Default (Join-Path $Root 'IFX_Railway_Bridge_v1.mq5')
 $expectedEaPath = [System.IO.Path]::ChangeExtension($eaSourcePath, '.ex5')
 if ([string]::IsNullOrWhiteSpace($expectedEaPath)) {
@@ -213,9 +214,13 @@ $terminalsDir = Get-ConfigValue -Map $config -Name 'MT5_TERMINALS_DIR' -Default 
 $managerHostName = Get-ConfigValue -Map $config -Name 'TERMINAL_MANAGER_HOST_NAME' -Default $env:COMPUTERNAME
 $expectedEaName = Split-Path -Leaf $expectedEaPath
 
-$legacyRuntimeProcs = @(Get-LogicalPythonProcesses @('price_relay.py', 'main.py supervisor', 'main.py scheduler', 'job_worker.py'))
-$relayHealth = Invoke-JsonHealthCheck -Url ($relayUrl + '/health')
+$relayProcs = @(Get-LogicalPythonProcesses @('price_relay.py'))
+$supervisorProcs = @(Get-LogicalPythonProcesses @('main.py supervisor'))
+$schedulerProcs = @(Get-LogicalPythonProcesses @('main.py scheduler'))
+$workerProcs = @(Get-LogicalPythonProcesses @('job_worker.py'))
+$relayHealth = Invoke-JsonHealthCheck -Url $relayHealthUrl
 $managerHostState = Get-ControlPlaneTerminalHostStatus -Config $config -HostName $managerHostName
+$deprecatedRuntimeProcs = @($relayProcs + $supervisorProcs + $schedulerProcs + $workerProcs)
 
 $terminalProcMap = @{}
 foreach ($proc in Get-CimInstance Win32_Process -Filter "Name='terminal64.exe'") {
@@ -280,11 +285,15 @@ if (-not $managerHostState.Ok) {
 }
 
 if (-not $relayHealth.Ok) {
-    $criticalFindings += "Railway relay health check failed: $($relayHealth.Error)"
+    $criticalFindings += "Public relay health check failed: $($relayHealth.Error)"
 }
 
-if ($legacyRuntimeProcs.Count -gt 0) {
-    $warningFindings += "Deprecated local runtime processes still running: $($legacyRuntimeProcs.Count)"
+if ($deprecatedRuntimeProcs.Count -gt 0) {
+    $warningFindings += "Deprecated local runtime processes are still running: $($deprecatedRuntimeProcs.Count)"
+}
+
+if (-not [string]::IsNullOrWhiteSpace($relaySourceConnectionId)) {
+    $warningFindings += "RELAY_SOURCE_CONNECTION_ID is still set to '$relaySourceConnectionId'. That flag belongs to the retired local relay flow."
 }
 
 $brokenTerminals = @($terminalStates | Where-Object { -not $_.TerminalExe -or -not $_.ExpectedEaPresent -or -not $_.BootstrapPresent -or -not $_.PresetPresent })
@@ -308,7 +317,7 @@ Write-Host ''
 
 Write-Host 'Live path:' -ForegroundColor Cyan
 Write-Host ("  control plane: {0}" -f $controlPlaneUrl)
-Write-Host ("  relay:         {0}" -f $relayUrl)
+Write-Host ("  relay:         {0}" -f $relayBaseUrl)
 Write-Host ("  EA source:     {0}" -f $eaSourcePath)
 Write-Host ("  terminals dir: {0}" -f $terminalsDir)
 Write-Host ''
@@ -325,7 +334,7 @@ if (-not $managerHostState.Ok) {
 }
 Write-Host ''
 
-Write-Host 'Railway relay:' -ForegroundColor Cyan
+Write-Host 'Local relay:' -ForegroundColor Cyan
 if ($relayHealth.Ok) {
     $uptime = $null
     if ($relayHealth.Body -is [pscustomobject]) {
@@ -357,11 +366,13 @@ if ($terminalStates.Count -eq 0) {
 }
 Write-Host ''
 
-Write-Host 'Deprecated local runtime:' -ForegroundColor Cyan
-if ($legacyRuntimeProcs.Count -eq 0) {
+Write-Host 'Deprecated local runtime processes:' -ForegroundColor Cyan
+if ($deprecatedRuntimeProcs.Count -eq 0) {
     Write-Host '  none detected' -ForegroundColor Green
 } else {
-    $legacyRuntimeProcs | Select-Object ProcessId, CommandLine | Format-Table -AutoSize
+    $deprecatedRuntimeProcs |
+        Sort-Object ProcessId -Unique |
+        Select-Object ProcessId, CommandLine | Format-Table -AutoSize
 }
 Write-Host ''
 

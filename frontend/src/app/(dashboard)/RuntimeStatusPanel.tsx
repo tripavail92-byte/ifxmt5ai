@@ -11,12 +11,13 @@ type Finding = {
 type AuditSummary = {
   overall_status?: string;
   relay_ok?: boolean;
-  supervisor_ok?: boolean;
+  terminal_manager_ok?: boolean;
   active_connections?: number;
-  fresh_heartbeats?: number;
-  stale_heartbeats?: number;
-  queued_jobs?: number;
-  stuck_jobs?: number;
+  fresh_terminal_signals?: number;
+  stale_terminal_signals?: number;
+  pending_actions?: number;
+  stuck_actions?: number;
+  deprecated_processes?: number;
   emitted_at?: string;
   findings?: Finding[];
 };
@@ -44,7 +45,7 @@ export function RuntimeStatusPanel({ summary }: { summary: AuditSummary | null }
         <div className="flex items-start justify-between gap-3">
           <div>
             <CardTitle>Runtime Status</CardTitle>
-            <CardDescription>Relay, supervisor, worker heartbeat, and queue health from the latest production audit</CardDescription>
+            <CardDescription>Public relay, terminal manager heartbeat, terminal signals, and pending action health from the latest production audit</CardDescription>
           </div>
           {summary ? (
             <div className="flex items-center gap-2">
@@ -69,12 +70,12 @@ export function RuntimeStatusPanel({ summary }: { summary: AuditSummary | null }
                 </div>
                 <div className="space-y-2 text-sm">
                   <div className="flex items-center justify-between">
-                    <span>Relay</span>
+                    <span>Public Relay</span>
                     <Badge variant={boolVariant(summary.relay_ok)}>{summary.relay_ok ? "online" : "down"}</Badge>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span>Supervisor</span>
-                    <Badge variant={boolVariant(summary.supervisor_ok)}>{summary.supervisor_ok ? "online" : "down"}</Badge>
+                    <span>Terminal Manager</span>
+                    <Badge variant={boolVariant(summary.terminal_manager_ok)}>{summary.terminal_manager_ok ? "online" : "down"}</Badge>
                   </div>
                 </div>
               </div>
@@ -82,24 +83,24 @@ export function RuntimeStatusPanel({ summary }: { summary: AuditSummary | null }
               <div className="rounded-lg border p-4">
                 <div className="mb-2 flex items-center gap-2 text-sm font-medium">
                   <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
-                  Worker Coverage
+                  Terminal Coverage
                 </div>
                 <div className="text-2xl font-bold">
-                  {summary.fresh_heartbeats ?? 0}/{summary.active_connections ?? 0}
+                  {summary.fresh_terminal_signals ?? 0}/{summary.active_connections ?? 0}
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  fresh workers / active connections
+                  fresh terminal signals / active connections
                 </p>
               </div>
 
               <div className="rounded-lg border p-4">
                 <div className="mb-2 flex items-center gap-2 text-sm font-medium">
                   <Clock3 className="h-4 w-4 text-muted-foreground" />
-                  Queue Health
+                  Pending Actions
                 </div>
-                <div className="text-2xl font-bold">{summary.queued_jobs ?? 0}</div>
+                <div className="text-2xl font-bold">{summary.pending_actions ?? 0}</div>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  queued or executing jobs, {summary.stuck_jobs ?? 0} stuck
+                  pending EA commands or legacy jobs, {summary.stuck_actions ?? 0} stuck
                 </p>
               </div>
 

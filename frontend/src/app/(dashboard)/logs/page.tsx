@@ -30,7 +30,7 @@ export default async function LogsPage() {
       <Card className="shadow-sm">
         <CardHeader>
           <CardTitle>Runtime Events</CardTitle>
-          <CardDescription>Live log stream from all MT5 workers and supervisors</CardDescription>
+          <CardDescription>Live log stream from MT5 terminals, EA runtime events, and control-plane audits</CardDescription>
         </CardHeader>
         <CardContent>
           {error ? (

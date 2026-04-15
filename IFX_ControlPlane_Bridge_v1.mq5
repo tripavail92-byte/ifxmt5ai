@@ -97,6 +97,105 @@ string TrimSpaces(const string value)
    return trimmed;
 }
 
+string NormalizeSymbolAlias(const string value)
+{
+   string compact = "";
+   string upper = TrimSpaces(value);
+   StringToUpper(upper);
+
+   for(int i = 0; i < StringLen(upper); i++)
+   {
+      ushort ch = StringGetCharacter(upper, i);
+      bool is_alpha = (ch >= 'A' && ch <= 'Z');
+      bool is_digit = (ch >= '0' && ch <= '9');
+      if(!is_alpha && !is_digit)
+         continue;
+
+      uchar c[] = {(uchar)ch};
+      compact += CharArrayToString(c);
+   }
+
+   int len = StringLen(compact);
+   if(len > 5 && StringSubstr(compact, len - 5) == "MICRO")
+      compact = StringSubstr(compact, 0, len - 5);
+
+   len = StringLen(compact);
+   if(len > 4 && StringSubstr(compact, len - 4) == "MINI")
+      compact = StringSubstr(compact, 0, len - 4);
+
+   len = StringLen(compact);
+   if(len > 6 && StringSubstr(compact, len - 1) == "M")
+      compact = StringSubstr(compact, 0, len - 1);
+
+   return compact;
+}
+
+int SymbolAliasMatchScore(const string requested, const string candidate)
+{
+   string trimmedRequested = TrimSpaces(requested);
+   string trimmedCandidate = TrimSpaces(candidate);
+   if(StringLen(trimmedRequested) == 0 || StringLen(trimmedCandidate) == 0)
+      return -1;
+
+   if(trimmedRequested == trimmedCandidate)
+      return 0;
+
+   string normalizedRequested = NormalizeSymbolAlias(trimmedRequested);
+   string normalizedCandidate = NormalizeSymbolAlias(trimmedCandidate);
+   if(StringLen(normalizedRequested) == 0 || StringLen(normalizedCandidate) == 0)
+      return -1;
+
+   if(normalizedRequested == normalizedCandidate)
+      return 1 + MathAbs(StringLen(trimmedCandidate) - StringLen(trimmedRequested));
+
+   int diff = MathAbs(StringLen(normalizedRequested) - StringLen(normalizedCandidate));
+   if(diff <= 4)
+   {
+      if(StringFind(normalizedCandidate, normalizedRequested) == 0)
+         return 10 + diff;
+      if(StringFind(normalizedRequested, normalizedCandidate) == 0)
+         return 10 + diff;
+   }
+
+   return -1;
+}
+
+bool ResolveBrokerSymbol(const string requested, string &resolved)
+{
+   resolved = TrimSpaces(requested);
+   if(StringLen(resolved) == 0)
+      return false;
+
+   if(SymbolSelect(resolved, true))
+      return true;
+
+   string best = "";
+   int best_score = 1000000;
+
+   for(int pass = 0; pass < 2; pass++)
+   {
+      bool selected_only = (pass == 0);
+      int total = SymbolsTotal(selected_only);
+      for(int i = 0; i < total; i++)
+      {
+         string candidate = SymbolName(i, selected_only);
+         int score = SymbolAliasMatchScore(resolved, candidate);
+         if(score < 0 || score >= best_score)
+            continue;
+         best = candidate;
+         best_score = score;
+      }
+   }
+
+   if(StringLen(best) == 0)
+      return false;
+   if(!SymbolSelect(best, true))
+      return false;
+
+   resolved = best;
+   return true;
+}
+
 bool ActiveArrayContains(const string sym)
 {
    for(int i = 0; i < g_active_symbol_count; i++)
@@ -132,6 +231,34 @@ string EscapeJson(const string value)
    StringReplace(escaped, "\r", "");
    StringReplace(escaped, "\n", " ");
    return escaped;
+}
+
+bool IsFiniteJsonNumber(const double value)
+{
+   return MathIsValidNumber(value);
+}
+
+bool IsValidPriceSnapshot(const double bid, const double ask, const long ts_ms)
+{
+   if(ts_ms <= 0)
+      return false;
+   if(!IsFiniteJsonNumber(bid) || !IsFiniteJsonNumber(ask))
+      return false;
+   if(bid <= 0.0 || ask <= 0.0)
+      return false;
+   return true;
+}
+
+bool IsValidRateBar(const MqlRates &bar)
+{
+   if(bar.time <= 0)
+      return false;
+   if(!IsFiniteJsonNumber(bar.open) || !IsFiniteJsonNumber(bar.high)
+      || !IsFiniteJsonNumber(bar.low) || !IsFiniteJsonNumber(bar.close))
+      return false;
+   if(bar.open <= 0.0 || bar.high <= 0.0 || bar.low <= 0.0 || bar.close <= 0.0)
+      return false;
+   return true;
 }
 
 string JsonExtractStringAfter(const string json, int from_pos, const string key)
@@ -369,9 +496,15 @@ void LoadPreferredActiveSymbols()
    int count = StringSplit(cleaned, ',', parts);
    for(int i = 0; i < count; i++)
    {
-      string sym = TrimSpaces(parts[i]);
-      if(StringLen(sym) == 0)
+      string requested = TrimSpaces(parts[i]);
+      string sym = "";
+      if(StringLen(requested) == 0)
          continue;
+      if(!ResolveBrokerSymbol(requested, sym))
+      {
+         Print("⚠️ [ACTIVE] symbol alias not available: ", requested);
+         continue;
+      }
       if(ActiveArrayContains(sym))
          continue;
       if(g_active_symbol_count >= MAX_ACTIVE_SYMBOLS)
@@ -831,7 +964,7 @@ void FlushTickBatch(ulong now_ms, bool activeSymbols)
    // chart symbols or the lower-priority watchlist symbols.
 
    string json = "{";
-   json += "\"connection_id\":\"" + RuntimeConnectionId() + "\",";
+   json += "\"connection_id\":\"" + EscapeJson(RuntimeConnectionId()) + "\",";
    json += "\"ts_ms\":" + IntegerToString((long)now_ms) + ",";
 
    int sentIdx[];
@@ -846,11 +979,18 @@ void FlushTickBatch(ulong now_ms, bool activeSymbols)
          continue;
       if(!g_pending_dirty[i])
          continue;
+      if(!IsValidPriceSnapshot(g_pending_bid[i], g_pending_ask[i], g_pending_msc[i]))
+      {
+         Print("⚠️ [", g_sym_names[i], "] skipping invalid tick snapshot bid=", DoubleToString(g_pending_bid[i], g_sym_digits[i]),
+               " ask=", DoubleToString(g_pending_ask[i], g_sym_digits[i]), " ts_ms=", IntegerToString(g_pending_msc[i]));
+         g_pending_dirty[i] = false;
+         continue;
+      }
 
       if(tickCount > 0) json += ",";
       int d = g_sym_digits[i];
       json += "{";
-      json += "\"symbol\":\"" + g_sym_names[i] + "\",";
+      json += "\"symbol\":\"" + EscapeJson(g_sym_names[i]) + "\",";
       json += "\"bid\":"     + DoubleToString(g_pending_bid[i], d) + ",";
       json += "\"ask\":"     + DoubleToString(g_pending_ask[i], d) + ",";
       json += "\"ts_ms\":"   + IntegerToString(g_pending_msc[i]);
@@ -875,11 +1015,16 @@ void FlushTickBatch(ulong now_ms, bool activeSymbols)
       ArraySetAsSeries(r, true);
       if(CopyRates(g_sym_names[i], PERIOD_M1, 0, 1, r) <= 0)
          continue;
+      if(!IsValidRateBar(r[0]))
+      {
+         Print("⚠️ [", g_sym_names[i], "] skipping invalid forming candle in tick-batch");
+         continue;
+      }
 
       int d = g_sym_digits[i];
       if(added > 0) json += ",";
       json += "{";
-      json += "\"symbol\":\""  + g_sym_names[i]                          + "\",";
+      json += "\"symbol\":\""  + EscapeJson(g_sym_names[i])               + "\",";
       json += "\"time\":"      + IntegerToString((long)r[0].time)         + ",";
       json += "\"open\":"      + DoubleToString(r[0].open,   d)           + ",";
       json += "\"high\":"      + DoubleToString(r[0].high,   d)           + ",";
@@ -892,7 +1037,7 @@ void FlushTickBatch(ulong now_ms, bool activeSymbols)
    json += "]}";
 
    // Only POST if there are symbols in this group.
-   if(added == 0)
+   if(tickCount == 0 && added == 0)
       return;
 
    if(SignedPost("/tick-batch", json, 3000))
@@ -905,10 +1050,16 @@ void FlushTickBatch(ulong now_ms, bool activeSymbols)
 // Send a single completed bar (called immediately when bar closes)
 bool SendCandleCloseBar(const string symbol, int sym_idx, const MqlRates &bar)
 {
+   if(!IsValidRateBar(bar))
+   {
+      Print("⚠️ [", symbol, "] skipping invalid candle-close payload");
+      return false;
+   }
+
    int d = g_sym_digits[sym_idx];
    string json = "{";
-   json += "\"connection_id\":\"" + RuntimeConnectionId() + "\",";
-   json += "\"symbol\":\""        + symbol                        + "\",";
+   json += "\"connection_id\":\"" + EscapeJson(RuntimeConnectionId()) + "\",";
+   json += "\"symbol\":\""        + EscapeJson(symbol)              + "\",";
    json += "\"timeframe\":\"1m\",";
    json += "\"time\":"            + IntegerToString((long)bar.time) + ",";
    json += "\"open\":"            + DoubleToString(bar.open,  d)    + ",";
@@ -968,14 +1119,18 @@ bool PushHistoricalBulkSymbol(const int sym_idx, int barsRequested)
 
    int d = g_sym_digits[sym_idx];
    string json = "{";
-   json += "\"connection_id\":\"" + RuntimeConnectionId() + "\",";
+   json += "\"connection_id\":\"" + EscapeJson(RuntimeConnectionId()) + "\",";
    json += "\"bars_requested\":"  + IntegerToString(barsRequested) + ",";
    json += "\"symbols\":[{";
-   json += "\"symbol\":\"" + g_sym_names[sym_idx] + "\",\"bars\":[";
+   json += "\"symbol\":\"" + EscapeJson(g_sym_names[sym_idx]) + "\",\"bars\":[";
+
+   int validBars = 0;
 
    for(int j = copied - 1; j >= 0; j--)
    {
-      if(j < copied - 1) json += ",";
+      if(!IsValidRateBar(r[j]))
+         continue;
+      if(validBars > 0) json += ",";
       json += "{";
       json += "\"t\":"  + IntegerToString((long)r[j].time)     + ",";
       json += "\"o\":"  + DoubleToString(r[j].open,  d)         + ",";
@@ -984,10 +1139,17 @@ bool PushHistoricalBulkSymbol(const int sym_idx, int barsRequested)
       json += "\"c\":"  + DoubleToString(r[j].close, d)         + ",";
       json += "\"v\":"  + IntegerToString(r[j].tick_volume);
       json += "}";
+      validBars++;
    }
    json += "]}]}";
 
-   Print("  [", g_sym_names[sym_idx], "] ", copied, " bars ready");
+   if(validBars == 0)
+   {
+      Print("⚠️ [", g_sym_names[sym_idx], "] no valid bars available for historical bulk");
+      return false;
+   }
+
+   Print("  [", g_sym_names[sym_idx], "] ", validBars, " valid bars ready");
 
    if(SignedPost("/historical-bulk", json, 15000))
    {
@@ -1205,11 +1367,11 @@ void FetchConfig()
 
 void InitDefaultSymbols()
 {
-   // Hardcoded fallback — same list as the old EA
+   // Hardcoded fallback uses suffix-neutral aliases and resolves them per broker.
    string defaults[] = {
-      "EURUSDm","GBPUSDm","USDJPYm","USDCADm","AUDUSDm",
-      "NZDUSDm","USDCHFm","EURGBPm","XAUUSDm","BTCUSDm",
-      "ETHUSDm","USOILm"
+      "EURUSD","GBPUSD","USDJPY","USDCAD","AUDUSD",
+      "NZDUSD","USDCHF","EURGBP","XAUUSD","BTCUSD",
+      "ETHUSD","USOIL"
    };
    ApplySymbolList(defaults, ArraySize(defaults));
    Print("ℹ️ [CONFIG] using ", ArraySize(defaults), " default symbols (relay not running)");
@@ -1288,12 +1450,27 @@ void ApplySymbolList(const string &syms[], int count)
    int valid = 0;
    for(int i = 0; i < count; i++)
    {
-      string s = syms[i];
-      if(!SymbolSelect(s, true))
+      string requested = syms[i];
+      string s = "";
+      if(!ResolveBrokerSymbol(requested, s))
       {
-         Print("⚠️ [CONFIG] symbol not available: ", s);
+         Print("⚠️ [CONFIG] symbol alias not available: ", requested);
          continue;
       }
+      if(s != TrimSpaces(requested))
+         Print("ℹ️ [CONFIG] resolved symbol alias ", requested, " -> ", s);
+
+      bool duplicate = false;
+      for(int existing = 0; existing < valid; existing++)
+      {
+         if(g_sym_names[existing] == s)
+         {
+            duplicate = true;
+            break;
+         }
+      }
+      if(duplicate)
+         continue;
 
       int prev_idx = -1;
       for(int j = 0; j < prev_count; j++)
@@ -1397,6 +1574,8 @@ bool SignedPost(const string path, const string json, int timeout_ms)
    else
    {
       Print("❌ POST ", path, " → HTTP ", status, " err=", err, " | ", StringSubstr(resp, 0, 120));
+      if(status == 400)
+         Print("⚠️ POST payload prefix ", path, " => ", StringSubstr(json, 0, 240));
    }
    return false;
 }

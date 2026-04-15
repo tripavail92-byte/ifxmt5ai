@@ -1,0 +1,1591 @@
+//+------------------------------------------------------------------+
+//|                                     IFX_6Gate_Sniper_Turbo.mq5   |
+//|                                   Copyright 2026, IFX Trading    |
+//+------------------------------------------------------------------+
+#property copyright "IFX Trading Academy"
+#property link      ""
+#property version   "9.30"
+
+#include <Trade\Trade.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Trade\SymbolInfo.mqh>
+#include <Trade\AccountInfo.mqh>
+
+CTrade         trade;
+CPositionInfo  posn;
+CSymbolInfo    symb;
+CAccountInfo   acct;
+
+// --- Custom Enumerations ---
+enum ENUM_TRADE_BIAS
+  {
+   BIAS_NEUTRAL, // Neutral
+   BIAS_LONG,    // Long
+   BIAS_SHORT    // Short
+  };
+
+// ============================================================================
+// 1. COMMANDER INPUTS & AI PARSER
+// ============================================================================
+input group "=== 1. AI MASTER BRAIN ==="
+sinput string  i_ai_text      = "";            // 🧠 Paste Master Brain JSON/Text
+input ENUM_TRADE_BIAS i_manual_bias = BIAS_NEUTRAL; // Manual Bias
+input double   i_manual_pivot = 0.0;           // Manual Pivot
+input double   i_manual_tp1   = 0.0;           // Manual Target 1 (Partial)
+input double   i_manual_tp2   = 0.0;           // Manual Target 2 (Final)
+input double   i_atrPct       = 10.0;          // Zone Thickness (% of Daily ATR)
+input double   i_slPadMult    = 2.0;           // Stop Loss Padding (Spread Multiplier)
+
+input group "=== 2. TRADING SESSIONS ==="
+input bool     i_useAsia      = false;
+input string   i_sesAsiaStart = "19:00";
+input string   i_sesAsiaEnd   = "03:00";
+input bool     i_useLon       = true;
+input string   i_sesLonStart  = "03:00";
+input string   i_sesLonEnd    = "11:00";
+input bool     i_useNY        = true;
+input string   i_sesNYStart   = "08:00";
+input string   i_sesNYEnd     = "17:00";
+
+input group "=== 3. SYSTEM TIMEFRAMES ==="
+input ENUM_TIMEFRAMES i_tf_enforce = PERIOD_M1;  // 🚀 ENGINE TF (Independent of Chart TF)
+input ENUM_TIMEFRAMES i_boss_tf    = PERIOD_H1;
+input bool     i_use_mtf_sl    = true;         // Use MTF Stop Loss Anchor
+input ENUM_TIMEFRAMES i_sl_tf      = PERIOD_M15;
+input ENUM_TIMEFRAMES i_be_tf      = PERIOD_M10;
+
+input group "=== 4. RISK, RR & PSYCHOLOGY ==="
+input double   i_riskPct       = 2.0;          // Risk Per Trade (%)
+input bool     i_strictRisk    = false;        // Strict Risk (Abort if < Min Lot)
+input double   i_min_rr        = 1.0;          // Minimum R:R Required
+input int      i_maxTrades     = 3;            // Max Trades Per Day
+input bool     i_useDeadSL     = true;         // Death by SL Cooldown
+input int      i_slCooldown    = 30;           // CD Wait Time (Minutes)
+input bool     i_useAutoRR     = false;        // Enable Auto RR Target Multipliers
+input double   i_autoRR1       = 1.0;          // Auto RR TP1
+input double   i_autoRR2       = 2.0;          // Auto RR TP2
+
+input group "=== 5. TRADE MANAGEMENT ==="
+input int      i_base_magic    = 9180;         // Base Magic ID (Auto-Scales by Timeframe)
+input int      i_pivotLen      = 5;            // Structure Pivot Length
+input bool     i_usePartial    = true;        
+input double   i_tp1_pct       = 75.0;         // Split Order TP1 %
+input bool     i_useBE         = true;         // Enable MTF Break-Even Trailing
+input bool     i_be_after_tp1  = true;         // Move to BE after TP1 Hit
+input bool     i_useEOD        = true;         // Force Close End of Day
+input string   i_eodTime       = "23:50";
+
+input group "=== 6. VISUALS & DISCORD ==="
+input bool     i_show_struct   = false;        // Show Live Structure (SMS/BOS)
+input int      i_smc_lookback  = 400;          // Structure History Lookback (Candles)
+input string   i_discord_url   = "https://discord.com/api/webhooks/1479464055109586997/8dEOR1QBWjYVbqQaYytfcROjY6B90c0LClGBd2oyAA-m6Kjy-g4F3USDukt0DhOeH0k3";
+input int      i_reportHour    = 22;           // Daily Report Hour (0-23)
+input int      i_reportMin     = 0;            // Daily Report Minute (0-59)
+
+// --- Global State Variables ---
+string   sys_bias;
+double   sys_pivot, sys_tp1, sys_tp2;
+double   zoneHigh, zoneLow, calc_inval;
+int      sys_magic;                            
+
+int      daily_trades_count = 0;
+int      last_trade_day = -1;
+bool     isDead_SL = false;
+datetime dead_SL_time = 0;
+bool     isDead_Struct = false;
+bool     report_sent_today = false;
+bool     eod_closed_today = false;
+int      global_atr_handle = INVALID_HANDLE;
+
+// HARDWARE LOCKS FOR BROKER SAFETY & CPU PERFORMANCE
+bool     is_be_secured = false;
+bool     is_partial_taken = false;
+bool     ui_needs_redraw = false;
+int      last_ledger_deals = -1;
+datetime last_smc_bar = 0;
+ulong    last_loss_ticket = 0;
+double   last_traded_pivot = 0.0;
+
+// Realtime Display Variables
+double   live_sl = 0.0;
+double   live_lots = 0.0;
+bool     is_inside_zone = false;
+
+// 🚀 DISCORD QUEUE FLAGS
+bool     req_discord_long   = false;
+bool     req_discord_short  = false;
+bool     req_discord_report = false;
+
+// UI Colors (Matching Pine Script Matrix)
+color c_red = C'220,53,69';
+color c_green = C'40,167,69';
+color c_orange = C'253,126,20';
+color c_purple = C'111,66,193';
+color c_gray = C'108,117,125';
+color c_dark = C'33,37,41';
+
+//+------------------------------------------------------------------+
+int CountOpenPositions()
+  {
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(posn.SelectByIndex(i))
+        {
+         int m_id = (int)posn.Magic();
+         bool is_ifx_trade = (m_id >= i_base_magic && m_id <= i_base_magic + 50);
+         
+         if(posn.Symbol() == _Symbol && is_ifx_trade)
+           {
+            count++;
+           }
+        }
+     }
+   return count;
+  }
+
+// 🚀 WEEKEND CARRY-OVER FIX: Absolute Mathematical Midnight
+int CountTodayTrades()
+  {
+   int count = 0;
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   dt.hour = 0;
+   dt.min = 0;
+   dt.sec = 0;
+   datetime start_of_day = StructToTime(dt); // True midnight
+   
+   if(HistorySelect(start_of_day, TimeCurrent()))
+     {
+      for(int i = 0; i < HistoryDealsTotal(); i++)
+        {
+         ulong ticket = HistoryDealGetTicket(i);
+         if(HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_IN &&
+            HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol)
+           {
+            int m_id = (int)HistoryDealGetInteger(ticket, DEAL_MAGIC);
+            if(m_id >= i_base_magic && m_id <= i_base_magic + 50)
+              {
+               count++;
+              }
+           }
+        }
+     }
+   return count;
+  }
+
+//+------------------------------------------------------------------+
+double ParseValue(string txt, string keyword, double fallback)
+  {
+   string up_txt = txt;
+   StringToUpper(up_txt);
+   string up_kw = keyword;
+   StringToUpper(up_kw);
+   int pos = StringFind(up_txt, up_kw);
+   
+   if(pos < 0)
+      return fallback;
+   
+   int start = pos + StringLen(up_kw);
+   string num_str = "";
+   bool found_digit = false;
+   
+   for(int i = start; i < StringLen(up_txt); i++)
+     {
+      ushort c = StringGetCharacter(up_txt, i);
+      if(c >= '0' && c <= '9')
+        {
+         num_str += ShortToString(c);
+         found_digit = true;
+        }
+      else
+         if(c == '.' || c == ',')
+           {
+            num_str += ".";
+            found_digit = true;
+           }
+         else
+           {
+            if(found_digit)
+               break;
+           }
+     }
+   return (num_str != "") ? StringToDouble(num_str) : fallback;
+  }
+
+//+------------------------------------------------------------------+
+//| 🚀 UNIFIED SMC STATE MACHINE ENGINE                              |
+//+------------------------------------------------------------------+
+void GetActiveStructure(ENUM_TIMEFRAMES tf, int len, double &out_ph, double &out_pl, datetime &out_t_ph, datetime &out_t_pl)
+  {
+   double h[], l[], c[];
+   datetime t[];
+   ArraySetAsSeries(h, true);
+   ArraySetAsSeries(l, true);
+   ArraySetAsSeries(c, true);
+   ArraySetAsSeries(t, true);
+   
+   int lookback = i_smc_lookback;
+   
+   int copied_h = CopyHigh(_Symbol, tf, 0, lookback, h);
+   int copied_l = CopyLow(_Symbol, tf, 0, lookback, l);
+   int copied_c = CopyClose(_Symbol, tf, 0, lookback, c);
+   int copied_t = CopyTime(_Symbol, tf, 0, lookback, t);
+   
+   if(copied_h <= len * 2 || copied_l <= len * 2 || copied_c <= len * 2 || copied_t <= len * 2)
+     {
+      out_ph = EMPTY_VALUE;
+      out_pl = EMPTY_VALUE;
+      out_t_ph = 0;
+      out_t_pl = 0;
+      return;
+     }
+
+   int alb = (int)MathMin(copied_h, MathMin(copied_l, MathMin(copied_c, copied_t)));
+   
+   double active_ph = EMPTY_VALUE, active_pl = EMPTY_VALUE;
+   double pot_ph = EMPTY_VALUE, pot_pl = EMPTY_VALUE;
+   datetime t_act_ph = 0, t_act_pl = 0, t_pot_ph = 0, t_pot_pl = 0;
+
+   for(int i = alb - len - 1; i >= len; i--)
+     {
+      bool isPH = true;
+      bool isPL = true;
+     
+      for(int j = i - len; j <= i + len; j++)
+        {
+         if(i == j)
+            continue;
+         if(h[j] >= h[i])
+            isPH = false;
+         if(l[j] <= l[i])
+            isPL = false;
+        }
+
+      if(isPH)
+        {
+         if(active_ph == EMPTY_VALUE || h[i] > active_ph)
+           {
+            active_ph = h[i];
+            t_act_ph = t[i];
+           }
+         if(pot_ph == EMPTY_VALUE || h[i] > pot_ph)
+           {
+            pot_ph = h[i];
+            t_pot_ph = t[i];
+           }
+        }
+       
+      if(isPL)
+        {
+         if(active_pl == EMPTY_VALUE || l[i] < active_pl)
+           {
+            active_pl = l[i];
+            t_act_pl = t[i];
+           }
+         if(pot_pl == EMPTY_VALUE || l[i] < pot_pl)
+           {
+            pot_pl = l[i];
+            t_pot_pl = t[i];
+           }
+        }
+
+      if(active_ph != EMPTY_VALUE && c[i] > active_ph)
+        {
+         active_pl = pot_pl;
+         t_act_pl = t_pot_pl;
+         active_ph = EMPTY_VALUE;
+         pot_pl = EMPTY_VALUE;
+        }
+      else
+         if(active_pl != EMPTY_VALUE && c[i] < active_pl)
+           {
+            active_ph = pot_ph;
+            t_act_ph = t_pot_ph;
+            active_pl = EMPTY_VALUE;
+            pot_ph = EMPTY_VALUE;
+           }
+     }
+     
+   out_ph = active_ph;
+   out_pl = active_pl;
+   out_t_ph = t_act_ph;
+   out_t_pl = t_act_pl;
+  }
+
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !TerminalInfoInteger(TERMINAL_CONNECTED))
+      Print("WARNING: Terminal not connected or Algo Trading disabled. WebRequests may fail.");
+
+   symb.Name(_Symbol);
+   if(!symb.Refresh())
+      return(INIT_FAILED);
+   
+   sys_magic = i_base_magic + i_tf_enforce;
+   trade.SetExpertMagicNumber(sys_magic);
+   
+   trade.SetDeviationInPoints(50);
+   
+   uint filling = (uint)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   if((filling & SYMBOL_FILLING_FOK) != 0)
+      trade.SetTypeFilling(ORDER_FILLING_FOK);
+   else
+      if((filling & SYMBOL_FILLING_IOC) != 0)
+         trade.SetTypeFilling(ORDER_FILLING_IOC);
+      else
+         trade.SetTypeFilling(ORDER_FILLING_RETURN);
+   
+   string up_txt = i_ai_text;
+   StringToUpper(up_txt);
+   
+   if(StringLen(up_txt) > 5)
+     {
+      if(StringFind(up_txt, "BULLISH") >= 0 || StringFind(up_txt, "LONG") >= 0)
+         sys_bias = "Long";
+      else
+         if(StringFind(up_txt, "BEARISH") >= 0 || StringFind(up_txt, "SHORT") >= 0)
+            sys_bias = "Short";
+         else
+           {
+            if(i_manual_bias == BIAS_LONG)
+               sys_bias = "Long";
+            else
+               if(i_manual_bias == BIAS_SHORT)
+                  sys_bias = "Short";
+               else
+                  sys_bias = "Neutral";
+           }
+       
+      sys_pivot = ParseValue(up_txt, "PIVOT", i_manual_pivot);
+      sys_tp1   = ParseValue(up_txt, "TARGET 1", i_manual_tp1);
+      sys_tp2   = ParseValue(up_txt, "TARGET 2", i_manual_tp2);
+       
+      if(sys_tp1 == 0.0)
+         sys_tp1 = ParseValue(up_txt, "TP1", i_manual_tp1);
+      if(sys_tp2 == 0.0)
+         sys_tp2 = ParseValue(up_txt, "TP2", i_manual_tp2);
+     }
+   else
+     {
+      if(i_manual_bias == BIAS_LONG)
+         sys_bias = "Long";
+      else
+         if(i_manual_bias == BIAS_SHORT)
+            sys_bias = "Short";
+         else
+            sys_bias = "Neutral";
+       
+      sys_pivot = i_manual_pivot;
+      sys_tp1   = i_manual_tp1;
+      sys_tp2   = i_manual_tp2;
+     }
+   
+   sys_tp1 = NormalizeDouble(sys_tp1, _Digits);
+   sys_tp2 = NormalizeDouble(sys_tp2, _Digits);
+
+   global_atr_handle = iATR(_Symbol, PERIOD_D1, 14);
+   if(global_atr_handle == INVALID_HANDLE)
+      return(INIT_FAILED);
+
+   daily_trades_count = CountTodayTrades();
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   last_trade_day = dt.day;
+
+   EventSetTimer(1);
+   return(INIT_SUCCEEDED);
+  }
+
+void OnDeinit(const int reason)
+  {
+   EventKillTimer();
+   IndicatorRelease(global_atr_handle);
+   ObjectsDeleteAll(0, "IFX_");
+   ObjectsDeleteAll(0, "HUD_");
+   ObjectsDeleteAll(0, "LDG_");
+   ChartRedraw();
+  }
+
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   if(!symb.RefreshRates())
+      return;
+
+   // 🚀 DISCORD QUEUE PROCESSOR
+   if(req_discord_long)
+     {
+      SendDiscordAlert("🛠️ MANUAL TEST LONG", "Testing Discord Webhook...", 3447003);
+      req_discord_long = false;
+     }
+   if(req_discord_short)
+     {
+      SendDiscordAlert("🛠️ MANUAL TEST SHORT", "Testing Discord Webhook...", 15548997);
+      req_discord_short = false;
+     }
+   if(req_discord_report)
+     {
+      SendDailyReport();
+      req_discord_report = false;
+     }
+
+   if(CountOpenPositions() == 0)
+     {
+      is_be_secured = false;
+      is_partial_taken = false;
+     }
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   
+   if(dt.day != last_trade_day)
+     {
+      daily_trades_count = 0;
+      eod_closed_today = false;
+      report_sent_today = false;
+      last_trade_day = dt.day;
+      last_traded_pivot = 0.0;
+     }
+   
+   if(isDead_SL && TimeCurrent() >= dead_SL_time + (i_slCooldown * 60))
+      isDead_SL = false;
+   
+   if(dt.hour == 0 && dt.min == 0)
+      report_sent_today = false;
+   
+   if(dt.hour == i_reportHour && dt.min >= i_reportMin && !report_sent_today)
+     {
+      SendDailyReport();
+      report_sent_today = true;
+     }
+
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   if(CopyBuffer(global_atr_handle, 0, 1, 1, atr) <= 0)
+      return;
+
+   double zone_thickness = atr[0] * (i_atrPct / 100.0);
+   zoneHigh = NormalizeDouble(sys_pivot + (zone_thickness / 2), _Digits);
+   zoneLow  = NormalizeDouble(sys_pivot - (zone_thickness / 2), _Digits);
+   calc_inval = (sys_bias == "Long") ? zoneLow : zoneHigh;
+
+   double m1_close_curr = iClose(_Symbol, i_tf_enforce, 0);
+   is_inside_zone = (m1_close_curr <= zoneHigh && m1_close_curr >= zoneLow);
+
+   // 🛡️ DYNAMIC FALLBACK STOP LOSS ENGINE
+   if(CountOpenPositions() == 0 && sys_bias != "Neutral" && sys_pivot > 0)
+     {
+      double ph_ltf, pl_ltf, ph_htf, pl_htf;
+      datetime t1, t2;
+     
+      GetActiveStructure(i_tf_enforce, i_pivotLen, ph_ltf, pl_ltf, t1, t2);
+      double final_anchor = (sys_bias == "Long") ? pl_ltf : ph_ltf;
+     
+      if(i_use_mtf_sl)
+        {
+         GetActiveStructure(i_sl_tf, i_pivotLen, ph_htf, pl_htf, t1, t2);
+         double htf_anchor = (sys_bias == "Long") ? pl_htf : ph_htf;
+         
+         if(htf_anchor != EMPTY_VALUE)
+           {
+            if(sys_bias == "Long" && htf_anchor < m1_close_curr)
+               final_anchor = htf_anchor;
+            if(sys_bias == "Short" && htf_anchor > m1_close_curr)
+               final_anchor = htf_anchor;
+           }
+        }
+
+      if(final_anchor != EMPTY_VALUE && final_anchor != 0)
+        {
+         double dynamic_pad = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point * i_slPadMult;
+         live_sl = (sys_bias == "Long") ? NormalizeDouble(final_anchor - dynamic_pad, _Digits) : NormalizeDouble(final_anchor + dynamic_pad, _Digits);
+         CalculateAutoRR(sys_bias, live_sl);
+         live_lots = CalculateLots(live_sl);
+        }
+      else
+        {
+         live_sl = 0.0;
+         live_lots = 0.0;
+        }
+     }
+
+   DrawBattlefieldZones(zoneHigh, zoneLow, calc_inval);
+
+   datetime current_bar = iTime(_Symbol, i_tf_enforce, 0);
+   if(current_bar != last_smc_bar)
+     {
+      if(i_show_struct)
+         DrawSMCStructure();
+      else
+         ObjectsDeleteAll(0, "IFX_SMC_");
+     
+      last_smc_bar = current_bar;
+     }
+
+   if(i_useEOD && TimeToString(TimeCurrent(), TIME_MINUTES) >= i_eodTime && !eod_closed_today)
+     {
+      if(CountOpenPositions() > 0)
+        {
+         for(int i = PositionsTotal() - 1; i >= 0; i--)
+           {
+            if(posn.SelectByIndex(i) && posn.Symbol() == _Symbol)
+              {
+               int m_id = (int)posn.Magic();
+               if(m_id >= i_base_magic && m_id <= i_base_magic + 50)
+                 {
+                  trade.PositionClose(posn.Ticket());
+                 }
+              }
+           }
+         SendDiscordAlert("EOD FORCE EXIT", "End of day time limit reached. Position closed.", 16753920);
+        }
+      eod_closed_today = true;
+     }
+   
+   bool inSession = CheckTradingSessions();
+   double boss_close[];
+   ArraySetAsSeries(boss_close, true);
+   
+   if(CopyClose(_Symbol, i_boss_tf, 1, 1, boss_close) <= 0)
+      return;
+   
+   isDead_Struct = false;
+   if(sys_bias == "Long" && boss_close[0] < calc_inval)
+      isDead_Struct = true;
+   if(sys_bias == "Short" && boss_close[0] > calc_inval)
+      isDead_Struct = true;
+
+   CheckHistoricalStopLoss();
+   ManageOpenPositions();
+
+   if(CountOpenPositions() == 0 && daily_trades_count < i_maxTrades && !isDead_SL && !isDead_Struct && inSession && !eod_closed_today)
+     {
+      double m1_close[];
+      ArraySetAsSeries(m1_close, true);
+     
+      if(CopyClose(_Symbol, i_tf_enforce, 0, 3, m1_close) < 3)
+         return;
+       
+      bool touchingZone = (iLow(_Symbol, i_tf_enforce, 0) <= zoneHigh && iHigh(_Symbol, i_tf_enforce, 0) >= zoneLow) ||
+                          (iLow(_Symbol, i_tf_enforce, 1) <= zoneHigh && iHigh(_Symbol, i_tf_enforce, 1) >= zoneLow);
+     
+      double act_ph, act_pl;
+      datetime t_ph, t_pl;
+      GetActiveStructure(i_tf_enforce, i_pivotLen, act_ph, act_pl, t_ph, t_pl);
+       
+      bool bullishBreak = (act_ph != EMPTY_VALUE && m1_close[1] > act_ph && m1_close[2] <= act_ph);
+      bool bearishBreak = (act_pl != EMPTY_VALUE && m1_close[1] < act_pl && m1_close[2] >= act_pl);
+       
+      if(sys_bias == "Long" && bullishBreak && touchingZone && act_ph != last_traded_pivot)
+        {
+         double sl = live_sl;
+         double total_lots = live_lots;
+         if(sl > 0 && total_lots > 0.0)
+           {
+            int live_spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+            int dyn_dev = (live_spread > 0) ? live_spread * 2 : 50;
+            trade.SetDeviationInPoints(dyn_dev);
+            bool success = false;
+
+            if(i_usePartial && sys_tp1 > 0.0)
+              {
+               double step_lot = symb.LotsStep();
+               if(step_lot <= 0.0)
+                  step_lot = 0.01;
+               int lot_digits = (int)MathMax(0, MathCeil(-MathLog10(step_lot)));
+
+               double lot_tp1 = NormalizeDouble(MathFloor((total_lots * (i_tp1_pct / 100.0) + 1e-8) / step_lot) * step_lot, lot_digits);
+               double lot_tp2 = NormalizeDouble(total_lots - lot_tp1, lot_digits);
+
+               if(lot_tp1 >= symb.LotsMin() && lot_tp2 >= symb.LotsMin())
+                 {
+                  bool t1 = trade.Buy(lot_tp1, _Symbol, symb.Ask(), sl, sys_tp1, "IFX Long TP1");
+                  bool t2 = trade.Buy(lot_tp2, _Symbol, symb.Ask(), sl, sys_tp2, "IFX Long TP2");
+                  if(t1 || t2)
+                     success = true;
+                 }
+               else
+                 {
+                  success = trade.Buy(total_lots, _Symbol, symb.Ask(), sl, sys_tp2, "IFX Long");
+                 }
+              }
+            else
+              {
+               success = trade.Buy(total_lots, _Symbol, symb.Ask(), sl, sys_tp2, "IFX Long");
+              }
+
+            if(success)
+              {
+               last_traded_pivot = act_ph; // 🔒 Lock this specific structure point
+               daily_trades_count++;
+               SendDiscordAlert("🚨 LIVE SNIPER ENTRY: LONG 🟢", "Entry: " + DoubleToString(symb.Ask(), 5) + "\nTarget 1: " + DoubleToString(sys_tp1, 5), 3447003);
+              }
+           }
+        }
+      else
+         if(sys_bias == "Short" && bearishBreak && touchingZone && act_pl != last_traded_pivot)
+           {
+            double sl = live_sl;
+            double total_lots = live_lots;
+            if(sl > 0 && total_lots > 0.0)
+              {
+               int live_spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+               int dyn_dev = (live_spread > 0) ? live_spread * 2 : 50;
+               trade.SetDeviationInPoints(dyn_dev);
+               bool success = false;
+
+               if(i_usePartial && sys_tp1 > 0.0)
+                 {
+                  double step_lot = symb.LotsStep();
+                  if(step_lot <= 0.0)
+                     step_lot = 0.01;
+                  int lot_digits = (int)MathMax(0, MathCeil(-MathLog10(step_lot)));
+
+                  double lot_tp1 = NormalizeDouble(MathFloor((total_lots * (i_tp1_pct / 100.0) + 1e-8) / step_lot) * step_lot, lot_digits);
+                  double lot_tp2 = NormalizeDouble(total_lots - lot_tp1, lot_digits);
+
+                  if(lot_tp1 >= symb.LotsMin() && lot_tp2 >= symb.LotsMin())
+                    {
+                     bool t1 = trade.Sell(lot_tp1, _Symbol, symb.Bid(), sl, sys_tp1, "IFX Short TP1");
+                     bool t2 = trade.Sell(lot_tp2, _Symbol, symb.Bid(), sl, sys_tp2, "IFX Short TP2");
+                     if(t1 || t2)
+                        success = true;
+                    }
+                  else
+                    {
+                     success = trade.Sell(total_lots, _Symbol, symb.Bid(), sl, sys_tp2, "IFX Short");
+                    }
+                 }
+               else
+                 {
+                  success = trade.Sell(total_lots, _Symbol, symb.Bid(), sl, sys_tp2, "IFX Short");
+                 }
+
+               if(success)
+                 {
+                  last_traded_pivot = act_pl; // 🔒 Lock this specific structure point
+                  daily_trades_count++;
+                  SendDiscordAlert("🚨 LIVE SNIPER ENTRY: SHORT 🔴", "Entry: " + DoubleToString(symb.Bid(), 5) + "\nTarget 1: " + DoubleToString(sys_tp1, 5), 15548997);
+                 }
+              }
+           }
+     }
+  }
+
+//+------------------------------------------------------------------+
+void ManageOpenPositions()
+  {
+   double total_open_lots = 0.0;
+   bool tp1_exists = false;
+   bool tp2_exists = false;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(posn.SelectByIndex(i) && posn.Symbol() == _Symbol)
+        {
+         int m_id = (int)posn.Magic();
+         if(m_id >= i_base_magic && m_id <= i_base_magic + 50)
+           {
+            double tp = posn.TakeProfit();
+            if(sys_tp1 > 0.0 && tp == sys_tp1)
+               tp1_exists = true;
+            if(sys_tp2 > 0.0 && tp == sys_tp2)
+               tp2_exists = true;
+            total_open_lots += posn.Volume();
+           }
+        }
+     }
+
+   if(tp2_exists && !tp1_exists && i_usePartial && sys_tp1 > 0.0 && !is_partial_taken)
+     {
+      SendDiscordAlert("✅ VIP PROFIT SECURED", "Broker successfully executed TP1 split-order.", 5763719);
+      is_partial_taken = true;
+     }
+
+   bool trigger_be = false;
+   if(i_be_after_tp1 && is_partial_taken)
+      trigger_be = true;
+
+   if(i_useBE && !trigger_be && tp2_exists)
+     {
+      double ref_entry = 0;
+      long ref_type = -1;
+      datetime ref_time = 0;
+       
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         if(posn.SelectByIndex(i) && posn.Symbol() == _Symbol && (int)posn.Magic() >= i_base_magic && (int)posn.Magic() <= i_base_magic + 50)
+           {
+            ref_entry = posn.PriceOpen();
+            ref_type = posn.PositionType();
+            ref_time = posn.Time();
+            break;
+           }
+        }
+
+      if(ref_type != -1)
+        {
+         double m10_close[];
+         ArraySetAsSeries(m10_close, true);
+         
+         if(CopyClose(_Symbol, i_be_tf, 0, 1, m10_close) > 0)
+           {
+            double be_ph, be_pl;
+            datetime t_ph, t_pl;
+            GetActiveStructure(i_be_tf, i_pivotLen, be_ph, be_pl, t_ph, t_pl);
+
+            if(ref_type == POSITION_TYPE_BUY && be_ph != EMPTY_VALUE && be_ph > ref_entry && m10_close[0] > ref_entry && t_ph > ref_time)
+               trigger_be = true;
+            if(ref_type == POSITION_TYPE_SELL && be_pl != EMPTY_VALUE && be_pl < ref_entry && m10_close[0] < ref_entry && t_pl > ref_time)
+               trigger_be = true;
+           }
+        }
+     }
+
+   if(trigger_be)
+      is_be_secured = true;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(posn.SelectByIndex(i) && posn.Symbol() == _Symbol)
+        {
+         int m_id = (int)posn.Magic();
+         if(m_id >= i_base_magic && m_id <= i_base_magic + 50)
+           {
+            double entry = posn.PriceOpen();
+            long type = posn.PositionType();
+            double sl = posn.StopLoss();
+            double tp = posn.TakeProfit();
+               
+            live_sl = sl;
+               
+            if(i_useAutoRR && (sys_tp1 == 0.0 || sys_tp2 == 0.0))
+              {
+               double risk = MathAbs(entry - sl);
+               if(type == POSITION_TYPE_BUY)
+                 {
+                  sys_tp1 = NormalizeDouble(entry + (risk * i_autoRR1), _Digits);
+                  sys_tp2 = NormalizeDouble(entry + (risk * i_autoRR2), _Digits);
+                 }
+               else
+                  if(type == POSITION_TYPE_SELL)
+                    {
+                     sys_tp1 = NormalizeDouble(entry - (risk * i_autoRR1), _Digits);
+                     sys_tp2 = NormalizeDouble(entry - (risk * i_autoRR2), _Digits);
+                    }
+              }
+
+            if(is_be_secured)
+              {
+               double new_sl = NormalizeDouble(entry, _Digits);
+               if(MathAbs(sl - new_sl) > _Point * 2)
+                 {
+                  long stop_level_points = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+                  long freeze_level_points = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+                  double required_buffer = MathMax(stop_level_points, freeze_level_points) * _Point;
+                  double current_price = (type == POSITION_TYPE_BUY) ? symb.Bid() : symb.Ask();
+                       
+                  if(MathAbs(current_price - new_sl) > required_buffer && (tp == 0 || MathAbs(current_price - tp) > required_buffer))
+                    {
+                     trade.PositionModify(posn.Ticket(), new_sl, tp);
+                    }
+                 }
+              }
+           }
+        }
+     }
+   if(CountOpenPositions() > 0)
+      live_lots = total_open_lots;
+  }
+
+//+------------------------------------------------------------------+
+void CheckHistoricalStopLoss()
+  {
+   if(i_useDeadSL && !isDead_SL)
+     {
+      if(HistorySelect(TimeCurrent() - 86400, TimeCurrent()))
+        {
+         for(int j = HistoryDealsTotal() - 1; j >= 0; j--)
+           {
+            ulong ticket = HistoryDealGetTicket(j);
+            if(ticket == last_loss_ticket)
+               break;
+               
+            if(HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT && HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol)
+              {
+               int m_id = (int)HistoryDealGetInteger(ticket, DEAL_MAGIC);
+               if(m_id >= i_base_magic && m_id <= i_base_magic + 50)
+                 {
+                  double pnl = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+                  if(pnl < 0.0)
+                    {
+                     isDead_SL = true;
+                     dead_SL_time = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+                     last_loss_ticket = ticket;
+                     SendDiscordAlert("❌ STOP LOSS HIT", "Trade closed at a loss. Cooling down.", 16711680);
+                    }
+                  break;
+                 }
+              }
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool CheckTradingSessions()
+  {
+   string curr = TimeToString(TimeCurrent(), TIME_MINUTES);
+   bool active = false;
+   
+   if(i_useAsia)
+     {
+      if(i_sesAsiaStart < i_sesAsiaEnd)
+        {
+         if(curr >= i_sesAsiaStart && curr <= i_sesAsiaEnd)
+            active = true;
+        }
+      else
+        {
+         if(curr >= i_sesAsiaStart || curr <= i_sesAsiaEnd)
+            active = true;
+        }
+     }
+     
+   if(i_useLon)
+     {
+      if(i_sesLonStart < i_sesLonEnd)
+        {
+         if(curr >= i_sesLonStart && curr <= i_sesLonEnd)
+            active = true;
+        }
+      else
+        {
+         if(curr >= i_sesLonStart || curr <= i_sesLonEnd)
+            active = true;
+        }
+     }
+     
+   if(i_useNY)
+     {
+      if(i_sesNYStart < i_sesNYEnd)
+        {
+         if(curr >= i_sesNYStart && curr <= i_sesNYEnd)
+            active = true;
+        }
+      else
+        {
+         if(curr >= i_sesNYStart || curr <= i_sesNYEnd)
+            active = true;
+        }
+     }
+   
+   return active;
+  }
+
+//+------------------------------------------------------------------+
+void CalculateAutoRR(string dir, double sl)
+  {
+   if(!i_useAutoRR)
+      return;
+   double entry = (dir == "Long") ? symb.Ask() : symb.Bid();
+   double risk = MathAbs(entry - sl);
+   if(dir == "Long")
+     {
+      sys_tp1 = NormalizeDouble(entry + (risk * i_autoRR1), _Digits);
+      sys_tp2 = NormalizeDouble(entry + (risk * i_autoRR2), _Digits);
+     }
+   else
+     {
+      sys_tp1 = NormalizeDouble(entry - (risk * i_autoRR1), _Digits);
+      sys_tp2 = NormalizeDouble(entry - (risk * i_autoRR2), _Digits);
+     }
+  }
+
+//+------------------------------------------------------------------+
+double CalculateLots(double sl_price)
+  {
+   double risk_usd = acct.Equity() * (i_riskPct / 100.0);
+   double tick_size = symb.TickSize();
+   
+   if(tick_size <= 0.0)
+      return 0.0;
+   
+   double tick_value = symb.TickValue();
+   double current_price = (sys_bias == "Long") ? symb.Ask() : symb.Bid();
+   double sl_dist_points = MathAbs(current_price - sl_price) / tick_size;
+   
+   if (sl_dist_points == 0 || tick_value == 0)
+      return 0.0;
+   
+   double lots = risk_usd / (sl_dist_points * tick_value);
+   double min_lot = symb.LotsMin();
+   double max_lot = symb.LotsMax();
+   double step_lot = symb.LotsStep();
+   
+   if(step_lot <= 0.0)
+      step_lot = 0.01;
+   
+   lots = MathFloor((lots + 1e-8) / step_lot) * step_lot;
+   
+   if(lots < min_lot)
+      return i_strictRisk ? 0.0 : min_lot;
+   if(lots > max_lot)
+      return max_lot;
+   
+   int lot_digits = (int)MathMax(0, MathCeil(-MathLog10(step_lot)));
+   return NormalizeDouble(lots, lot_digits);
+  }
+
+//+------------------------------------------------------------------+
+void DrawBattlefieldZones(double high_price, double low_price, double inval_price)
+  {
+   if(sys_pivot == 0.0)
+      return;
+
+   string zName = "IFX_Entry_Zone";
+   if(ObjectFind(0, zName) < 0)
+      ObjectCreate(0, zName, OBJ_RECTANGLE, 0, 0, 0);
+   ObjectSetInteger(0, zName, OBJPROP_TIME, 0, iTime(_Symbol, PERIOD_D1, 0));
+   ObjectSetDouble(0, zName, OBJPROP_PRICE, 0, high_price);
+   ObjectSetInteger(0, zName, OBJPROP_TIME, 1, TimeCurrent() + (86400 * 2));    
+   ObjectSetDouble(0, zName, OBJPROP_PRICE, 1, low_price);
+   ObjectSetInteger(0, zName, OBJPROP_COLOR, clrMidnightBlue);
+   ObjectSetInteger(0, zName, OBJPROP_BACK, true);
+   
+   DrawLine("IFX_Zone_Top", high_price, clrDodgerBlue, STYLE_SOLID);
+   DrawLine("IFX_Zone_Bot", low_price, clrOrange, STYLE_SOLID);
+   DrawLine("IFX_Inval", inval_price, clrRed, STYLE_DOT);
+
+   datetime anchor_time = iTime(_Symbol, i_tf_enforce, 0) + (PeriodSeconds(i_tf_enforce) * 3);
+
+   if(sys_tp1 > 0)
+     {
+      DrawLine("IFX_TP1", sys_tp1, clrMediumSeaGreen, STYLE_DASH);
+      DrawText("IFX_TP1_TXT", "TP1", anchor_time, sys_tp1, clrMediumSeaGreen, ANCHOR_LOWER);
+     }
+   else
+     {
+      ObjectDelete(0, "IFX_TP1");
+      ObjectDelete(0, "IFX_TP1_TXT");
+     }
+   
+   if(sys_tp2 > 0)
+     {
+      DrawLine("IFX_TP2", sys_tp2, clrMediumSeaGreen, STYLE_DASH);
+      DrawText("IFX_TP2_TXT", "TP2", anchor_time, sys_tp2, clrMediumSeaGreen, ANCHOR_LOWER);
+     }
+   else
+     {
+      ObjectDelete(0, "IFX_TP2");
+      ObjectDelete(0, "IFX_TP2_TXT");
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DrawLine(string name, double price, color col, int style)
+  {
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, col);
+      ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+      ui_needs_redraw = true;
+     }
+   if(ObjectGetDouble(0, name, OBJPROP_PRICE, 0) != price)
+     {
+      ObjectSetDouble(0, name, OBJPROP_PRICE, 0, price);
+      ui_needs_redraw = true;
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DrawStructure()
+  {
+   double ph, pl;
+   datetime tph, tpl;
+   GetActiveStructure(i_tf_enforce, i_pivotLen, ph, pl, tph, tpl);
+   
+   datetime anchor_time = iTime(_Symbol, i_tf_enforce, 0) + (PeriodSeconds(i_tf_enforce) * 3);
+   
+   if(ph != EMPTY_VALUE)
+     {
+      DrawLine("IFX_STR_PH", ph, clrCrimson, STYLE_SOLID);
+      DrawText("IFX_STR_PH_TXT", "PH / BOS", anchor_time, ph, clrCrimson, ANCHOR_LOWER);
+     }
+   if(pl != EMPTY_VALUE)
+     {
+      DrawLine("IFX_STR_PL", pl, clrMediumSeaGreen, STYLE_SOLID);
+      DrawText("IFX_STR_PL_TXT", "PL / SMS", anchor_time, pl, clrMediumSeaGreen, ANCHOR_UPPER);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DrawSMCStructure()
+  {
+   DrawStructure();
+   ObjectsDeleteAll(0, "IFX_SMC_");
+   
+   int lookback = i_smc_lookback;
+   double h[], l[], c[];
+   datetime t[];
+   
+   int copied_h = CopyHigh(_Symbol, i_tf_enforce, 0, lookback, h);
+   int copied_l = CopyLow(_Symbol, i_tf_enforce, 0, lookback, l);
+   int copied_c = CopyClose(_Symbol, i_tf_enforce, 0, lookback, c);
+   int copied_t = CopyTime(_Symbol, i_tf_enforce, 0, lookback, t);
+   
+   if(copied_h <= 0 || copied_l <= 0 || copied_c <= 0 || copied_t <= 0)
+      return;
+   
+   int actual_lookback = (int)MathMin(copied_h, MathMin(copied_l, MathMin(copied_c, copied_t)));
+   if(actual_lookback < lookback)
+      lookback = actual_lookback;
+
+   ArraySetAsSeries(h, true);
+   ArraySetAsSeries(l, true);
+   ArraySetAsSeries(c, true);
+   ArraySetAsSeries(t, true);
+
+   int pLen = i_pivotLen;
+   int ph_bos_count = 0;
+   int pl_bos_count = 0;
+
+   for(int i = pLen; i < lookback - pLen; i++)
+     {
+      bool isPH = true;
+      for(int j = i - pLen; j <= i + pLen; j++)
+        {
+         if(i == j)
+            continue;
+         if(h[j] >= h[i])
+           {
+            isPH = false;
+            break;
+           }
+        }
+       
+      if(isPH)
+        {
+         for(int k = i - 1; k >= 0; k--)
+           {
+            if(c[k] > h[i])
+              {
+               if(ph_bos_count < 3)
+                 {
+                  string name = "IFX_SMC_PH_" + IntegerToString(t[i]);
+                  DrawTrendLine(name, t[i], h[i], t[k], h[i], clrMediumSeaGreen, STYLE_DASH);
+                  DrawText(name+"_txt", "BOS", t[k+(i-k)/2], h[i], clrMediumSeaGreen, ANCHOR_LOWER);
+                  ph_bos_count++;
+                 }
+               break;
+              }
+           }
+        }
+
+      bool isPL = true;
+      for(int j = i - pLen; j <= i + pLen; j++)
+        {
+         if(i == j)
+            continue;
+         if(l[j] <= l[i])
+           {
+            isPL = false;
+            break;
+           }
+        }
+       
+      if(isPL)
+        {
+         for(int k = i - 1; k >= 0; k--)
+           {
+            if(c[k] < l[i])
+              {
+               if(pl_bos_count < 3)
+                 {
+                  string name = "IFX_SMC_PL_" + IntegerToString(t[i]);
+                  DrawTrendLine(name, t[i], l[i], t[k], l[i], clrCrimson, STYLE_DASH);
+                  DrawText(name+"_txt", "BOS", t[k+(i-k)/2], l[i], clrCrimson, ANCHOR_UPPER);
+                  pl_bos_count++;
+                 }
+               break;
+              }
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DrawTrendLine(string name, datetime t1, double p1, datetime t2, double p2, color col, int style)
+  {
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_TREND, 0, t1, p1, t2, p2);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, col);
+      ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+      ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+      ui_needs_redraw = true;
+     }
+   else
+     {
+      if(ObjectGetInteger(0, name, OBJPROP_TIME, 1) != t2)
+        {
+         ObjectSetInteger(0, name, OBJPROP_TIME, 1, t2);
+         ui_needs_redraw = true;
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DrawText(string name, string text, datetime t, double price, color col, ENUM_ANCHOR_POINT anchor)
+  {
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_TEXT, 0, t, price);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, col);
+      ObjectSetString(0, name, OBJPROP_TEXT, text);
+      ObjectSetInteger(0, name, OBJPROP_ANCHOR, anchor);
+      ui_needs_redraw = true;
+     }
+   else
+     {
+      if(ObjectGetInteger(0, name, OBJPROP_TIME, 0) != t)
+        {
+         ObjectSetInteger(0, name, OBJPROP_TIME, 0, t);
+         ui_needs_redraw = true;
+        }
+      if(ObjectGetDouble(0, name, OBJPROP_PRICE, 0) != price)
+        {
+         ObjectSetDouble(0, name, OBJPROP_PRICE, 0, price);
+         ui_needs_redraw = true;
+        }
+      if(ObjectGetString(0, name, OBJPROP_TEXT) != text)
+        {
+         ObjectSetString(0, name, OBJPROP_TEXT, text);
+         ui_needs_redraw = true;
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+void OnTimer()
+  {
+   ui_needs_redraw = false;
+   DrawMatrixHUD();
+   DrawTopLedger();
+   if(ui_needs_redraw)
+      ChartRedraw();
+  }
+
+//+------------------------------------------------------------------+
+void DrawMatrixHUD()
+  {
+   int start_x = 20;
+   int start_y = 30;
+   int row_h = 22;
+   int col1_w = 160;
+   int col2_w = 180;
+   
+   string statusTxt = "🔴 ASLEEP";
+   color statusCol = c_red;
+   
+   if(sys_pivot > 0.0)
+     {
+      double m1_close_curr = iClose(_Symbol, i_tf_enforce, 0);
+      bool inPurgatory = (sys_bias == "Long" && m1_close_curr < calc_inval && !isDead_Struct) ||
+                         (sys_bias == "Short" && m1_close_curr > calc_inval && !isDead_Struct);
+                           
+      if(CountOpenPositions() > 0)
+        {
+         statusTxt = "🚀 IN TRADE";
+         statusCol = c_purple;
+        }
+      else
+         if(isDead_Struct)
+           {
+            statusTxt = "💀 DEAD (Awaiting Zone)";
+            statusCol = c_red;
+           }
+         else
+            if(isDead_SL)
+              {
+               statusTxt = "🩸 BLEEDING (CD)";
+               statusCol = c_red;
+              }
+            else
+               if(daily_trades_count >= i_maxTrades)
+                 {
+                  statusTxt = "🛑 MAX TRADES";
+                  statusCol = c_red;
+                 }
+               else
+                  if(inPurgatory)
+                    {
+                     statusTxt = "⚠️ PURGATORY";
+                     statusCol = c_orange;
+                    }
+                  else
+                     if(CheckTradingSessions())
+                       {
+                        statusTxt = "🟢 STALKING";
+                        statusCol = c_green;
+                       }
+     }
+
+   DrawTableCell("hdr1", "IFX BOT: " + _Symbol, start_x, start_y, col1_w, row_h, c_dark, clrWhite);
+   DrawTableCell("hdr2", statusTxt, start_x + col1_w, start_y, col2_w, row_h, statusCol, clrWhite);
+   
+   int r = 1;
+   DrawTableCell("r1c1", "Engine Timeframe", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r1c2", EnumToString(i_tf_enforce), start_x + col1_w, start_y + (r*row_h), col2_w, row_h, c_purple, clrWhite);
+   
+   r = 2;
+   color biasCol = c_gray;
+   if(sys_bias == "Long")
+      biasCol = c_green;
+   else
+      if(sys_bias == "Short")
+         biasCol = c_red;
+   DrawTableCell("r2c1", "Master Bias", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r2c2", sys_bias, start_x + col1_w, start_y + (r*row_h), col2_w, row_h, biasCol, clrWhite);
+   
+   r = 3;
+   DrawTableCell("r3c1", "Invalidation ("+EnumToString(i_boss_tf)+")", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r3c2", DoubleToString(calc_inval, 5), start_x + col1_w, start_y + (r*row_h), col2_w, row_h, c_orange, clrWhite);
+   
+   r = 4;
+   string sl_txt = (live_sl > 0) ? DoubleToString(live_sl, 5) : "Pending Trigger";
+   DrawTableCell("r4c1", "Hard Stop Loss", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r4c2", sl_txt, start_x + col1_w, start_y + (r*row_h), col2_w, row_h, c_red, clrWhite);
+   
+   r = 5;
+   DrawTableCell("r5c1", "Origin Rule", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r5c2", is_inside_zone ? "Inside Zone" : "Outside Zone", start_x + col1_w, start_y + (r*row_h), col2_w, row_h, is_inside_zone ? c_green : c_red, clrWhite);
+   
+   r = 6;
+   string rr_txt = i_useAutoRR ? ("TP1: "+DoubleToString(i_autoRR1,1)+"R | TP2: "+DoubleToString(i_autoRR2,1)+"R") : ("TP1: " + DoubleToString(sys_tp1, 5) + " | TP2: " + DoubleToString(sys_tp2, 5));
+   if(sys_tp1 == 0.0 && !i_useAutoRR)
+      rr_txt = "Waiting for Parameters...";
+   DrawTableCell("r6c1", "Expected RR", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r6c2", rr_txt, start_x + col1_w, start_y + (r*row_h), col2_w, row_h, c_green, clrWhite);
+   
+   r = 7;
+   DrawTableCell("r7c1", "Risk Status (BE Tracker)", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r7c2", is_be_secured ? "Free Ride" : "---", start_x + col1_w, start_y + (r*row_h), col2_w, row_h, is_be_secured ? c_purple : c_gray, clrWhite);
+   
+   r = 8;
+   DrawTableCell("r8c1", "Position Size ("+DoubleToString(i_riskPct,1)+"% Risk)", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r8c2", DoubleToString(live_lots, 2) + " Lots", start_x + col1_w, start_y + (r*row_h), col2_w, row_h, c_purple, clrWhite);
+   
+   r = 9;
+   DrawTableCell("r9c1", "Daily Trades ("+IntegerToString(i_maxTrades)+" Max)", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r9c2", IntegerToString(daily_trades_count) + " / " + IntegerToString(i_maxTrades), start_x + col1_w, start_y + (r*row_h), col2_w, row_h, (daily_trades_count>=i_maxTrades)?c_red:c_green, clrWhite);
+   
+   r = 10;
+   DrawTableCell("r10c1", "Report Status", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r10c2", report_sent_today ? "✅ SENT" : "⏳ PENDING", start_x + col1_w, start_y + (r*row_h), col2_w, row_h, report_sent_today ? c_green : c_orange, clrWhite);
+   
+   int btn_y = start_y + ((r+1)*row_h) + 10;
+   CreateUIButton("IFX_BTN_LONG", "🟢 T-LONG", start_x, btn_y, clrDarkGreen);
+   CreateUIButton("IFX_BTN_SHORT", "🔴 T-SHORT", start_x + 80, btn_y, clrDarkRed);
+   CreateUIButton("IFX_BTN_REP", "🟦 T-REPORT", start_x + 160, btn_y, clrNavy);
+  }
+
+//+------------------------------------------------------------------+
+void DrawTopLedger()
+  {
+   if(HistorySelect(TimeCurrent() - 604800, TimeCurrent()))
+     {
+      int current_deals = HistoryDealsTotal();
+      if(current_deals == last_ledger_deals)
+         return;
+         
+      last_ledger_deals = current_deals;
+       
+      int start_y = 30;
+      int row_h = 22;
+      int base_x = 20;
+     
+      int w_pnl = 80;
+      int w_entry = 80;
+      int w_dir = 50;
+      int w_trade = 60;
+     
+      int x_pnl = base_x;
+      int x_entry = x_pnl + w_pnl;
+      int x_dir = x_entry + w_entry;
+      int x_trade = x_dir + w_dir;            
+
+      DrawTableCornerCell("lg_h1", "Trade", x_trade, start_y, w_trade, row_h, c_dark, clrWhite);
+      DrawTableCornerCell("lg_h2", "Dir", x_dir, start_y, w_dir, row_h, c_dark, clrWhite);
+      DrawTableCornerCell("lg_h3", "Entry", x_entry, start_y, w_entry, row_h, c_dark, clrWhite);
+      DrawTableCornerCell("lg_h4", "PnL ($)", x_pnl, start_y, w_pnl, row_h, c_dark, clrWhite);
+
+      double net_prof = 0.0;
+      int printed = 0;
+       
+      for(int i = current_deals-1; i >= 0 && printed < 4; i--)
+        {
+         ulong ticket = HistoryDealGetTicket(i);
+         if(HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol && HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
+           {
+            int m_id = (int)HistoryDealGetInteger(ticket, DEAL_MAGIC);
+            if(m_id >= i_base_magic && m_id <= i_base_magic + 50)
+              {
+               double pnl = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+               net_prof += pnl;
+                   
+               string dir = (HistoryDealGetInteger(ticket, DEAL_TYPE) == DEAL_TYPE_BUY) ? "Buy" : "Sell";
+               string pnl_str = (pnl >= 0 ? "+$" : "-$") + DoubleToString(MathAbs(pnl), 2);
+               color pnl_col = (pnl >= 0) ? c_green : c_red;
+                   
+               int r = printed + 1;
+               int y_pos = start_y + (r*row_h);
+                   
+               DrawTableCornerCell("lg_r"+IntegerToString(r)+"_1", "#"+IntegerToString(r), x_trade, y_pos, w_trade, row_h, c_gray, clrWhite);
+               DrawTableCornerCell("lg_r"+IntegerToString(r)+"_2", dir, x_dir, y_pos, w_dir, row_h, c_gray, clrWhite);
+               DrawTableCornerCell("lg_r"+IntegerToString(r)+"_3", DoubleToString(HistoryDealGetDouble(ticket, DEAL_PRICE),5), x_entry, y_pos, w_entry, row_h, c_gray, clrWhite);
+               DrawTableCornerCell("lg_r"+IntegerToString(r)+"_4", pnl_str, x_pnl, y_pos, w_pnl, row_h, pnl_col, clrWhite);
+               
+               printed++;
+              }
+           }
+        }
+       
+      while(printed < 4)
+        {
+         int r = printed + 1;
+         int y_pos = start_y + (r*row_h);
+         DrawTableCornerCell("lg_r"+IntegerToString(r)+"_1", "-", x_trade, y_pos, w_trade, row_h, c_gray, clrWhite);
+         DrawTableCornerCell("lg_r"+IntegerToString(r)+"_2", "-", x_dir, y_pos, w_dir, row_h, c_gray, clrWhite);
+         DrawTableCornerCell("lg_r"+IntegerToString(r)+"_3", "-", x_entry, y_pos, w_entry, row_h, c_gray, clrWhite);
+         DrawTableCornerCell("lg_r"+IntegerToString(r)+"_4", "-", x_pnl, y_pos, w_pnl, row_h, c_gray, clrWhite);
+         printed++;
+        }
+
+      int w_tot_label = w_trade + w_dir + w_entry;
+      DrawTableCornerCell("lg_tot1", "TOTAL NET PROFIT:", x_entry, start_y + (5*row_h), w_tot_label, row_h, clrWhite, clrBlack);
+      DrawTableCornerCell("lg_tot2", (net_prof>=0?"+$":"-$")+DoubleToString(MathAbs(net_prof), 2), x_pnl, start_y + (5*row_h), w_pnl, row_h, (net_prof>=0)?c_green:c_red, clrWhite);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DrawTableCell(string id, string text, int x, int y, int w, int h, color bgCol, color txtCol)
+  {
+   string bg = "HUD_BG_" + id;
+   string txt = "HUD_TXT_" + id;
+   
+   if(ObjectFind(0, bg) < 0)
+     {
+      ObjectCreate(0, bg, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, bg, OBJPROP_XSIZE, w);
+      ObjectSetInteger(0, bg, OBJPROP_YSIZE, h);
+      ui_needs_redraw = true;
+     }
+     
+   if(ObjectGetInteger(0, bg, OBJPROP_BGCOLOR) != bgCol)
+     {
+      ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, bgCol);
+      ui_needs_redraw = true;
+     }
+
+   if(ObjectFind(0, txt) < 0)
+     {
+      ObjectCreate(0, txt, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, txt, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, txt, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, 8);
+      ObjectSetString(0, txt, OBJPROP_FONT, "Arial");
+      ObjectSetInteger(0, txt, OBJPROP_XDISTANCE, x + (w/2));
+      ObjectSetInteger(0, txt, OBJPROP_YDISTANCE, y + (h/2) - 6);
+      ui_needs_redraw = true;
+     }
+   
+   if(ObjectGetString(0, txt, OBJPROP_TEXT) != text)
+     {
+      ObjectSetString(0, txt, OBJPROP_TEXT, text);
+      ui_needs_redraw = true;
+     }
+     
+   if(ObjectGetInteger(0, txt, OBJPROP_COLOR) != txtCol)
+     {
+      ObjectSetInteger(0, txt, OBJPROP_COLOR, txtCol);
+      ui_needs_redraw = true;
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DrawTableCornerCell(string id, string text, int x_dist, int y_dist, int w, int h, color bgCol, color txtCol)
+  {
+   string bg = "LDG_BG_" + id;
+   string txt = "LDG_TXT_" + id;
+   
+   if(ObjectFind(0, bg) < 0)
+     {
+      ObjectCreate(0, bg, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+      ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, x_dist);
+      ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, y_dist);
+      ObjectSetInteger(0, bg, OBJPROP_XSIZE, w);
+      ObjectSetInteger(0, bg, OBJPROP_YSIZE, h);
+      ui_needs_redraw = true;
+     }
+     
+   if(ObjectGetInteger(0, bg, OBJPROP_BGCOLOR) != bgCol)
+     {
+      ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, bgCol);
+      ui_needs_redraw = true;
+     }
+
+   if(ObjectFind(0, txt) < 0)
+     {
+      ObjectCreate(0, txt, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, txt, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, txt, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+      ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, 8);
+      ObjectSetString(0, txt, OBJPROP_FONT, "Arial");
+      ObjectSetInteger(0, txt, OBJPROP_XDISTANCE, x_dist + (w/2));
+      ObjectSetInteger(0, txt, OBJPROP_YDISTANCE, y_dist + (h/2) - 6);
+      ui_needs_redraw = true;
+     }
+   
+   if(ObjectGetString(0, txt, OBJPROP_TEXT) != text)
+     {
+      ObjectSetString(0, txt, OBJPROP_TEXT, text);
+      ui_needs_redraw = true;
+     }
+     
+   if(ObjectGetInteger(0, txt, OBJPROP_COLOR) != txtCol)
+     {
+      ObjectSetInteger(0, txt, OBJPROP_COLOR, txtCol);
+      ui_needs_redraw = true;
+     }
+  }
+
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+  {
+   if(id == CHARTEVENT_OBJECT_CLICK)
+     {
+      if(sparam == "IFX_BTN_LONG")
+        {
+         req_discord_long = true;
+         ObjectSetInteger(0, "IFX_BTN_LONG", OBJPROP_STATE, false);
+        }
+      if(sparam == "IFX_BTN_SHORT")
+        {
+         req_discord_short = true;
+         ObjectSetInteger(0, "IFX_BTN_SHORT", OBJPROP_STATE, false);
+        }
+      if(sparam == "IFX_BTN_REP")
+        {
+         req_discord_report = true;
+         ObjectSetInteger(0, "IFX_BTN_REP", OBJPROP_STATE, false);
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+void SendDailyReport()
+  {
+   int wins = 0, losses = 0, break_evens = 0;
+   double net_pnl = 0.0;
+   
+   if(HistorySelect(iTime(_Symbol, PERIOD_D1, 0), TimeCurrent()))
+     {
+      for(int i = 0; i < HistoryDealsTotal(); i++)
+        {
+         ulong ticket = HistoryDealGetTicket(i);
+         if(HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol && HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
+           {
+            int m_id = (int)HistoryDealGetInteger(ticket, DEAL_MAGIC);
+            if(m_id >= i_base_magic && m_id <= i_base_magic + 50)
+              {
+               double pnl = HistoryDealGetDouble(ticket, DEAL_PROFIT) + HistoryDealGetDouble(ticket, DEAL_COMMISSION) + HistoryDealGetDouble(ticket, DEAL_SWAP);
+               double be_threshold = 2.0;
+               
+               if(pnl > be_threshold)
+                  wins++;
+               else
+                  if (pnl < -be_threshold)
+                     losses++;
+                  else
+                     break_evens++;
+                     
+               net_pnl += pnl;
+              }
+           }
+        }
+     }
+     
+   string sign = (net_pnl >= 0) ? "+$" : "-$";
+   string desc = "Total Trades: " + IntegerToString(wins + losses + break_evens) + "\\nWins: " + IntegerToString(wins) + "\\nLosses: " + IntegerToString(losses) + "\\nBreak-Evens: " + IntegerToString(break_evens) + "\\nNet PnL: " + sign + DoubleToString(MathAbs(net_pnl), 2);
+   SendDiscordAlert("📊 DAILY TRADE REPORT", desc, (net_pnl >= 0) ? 5763719 : 16711680);
+  }
+
+// ============================================================================
+// 🚀 DISCORD DIAGNOSTIC FIX ONLY
+// ============================================================================
+void SendDiscordAlert(string title, string description, int embed_color)
+  {
+   if(i_discord_url == "" || i_discord_url == "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID_HERE")
+     {
+      Print("❌ DISCORD ERROR: Webhook URL is empty or using the default placeholder.");
+      return;
+     }
+   
+   StringReplace(description, "\n", "\\n");
+   char post[], result[];
+   string result_headers;
+   
+   string req_headers = "Content-Type: application/json\r\nUser-Agent: MetaTrader 5 / IFX Engine\r\nAccept: */*\r\n";
+   string json = "{\"embeds\": [{\"title\": \"" + title + "\", \"color\": " + IntegerToString(embed_color) + ", \"description\": \"" + description + "\", \"fields\": [{\"name\": \"Asset\", \"value\": \"" + _Symbol + "\", \"inline\": true}], \"footer\": {\"text\": \"IFX v9.30 Turbo Engine\"}}]}";
+   
+   StringToCharArray(json, post, 0, WHOLE_ARRAY, CP_UTF8);
+   ResetLastError();
+   
+   int res = WebRequest("POST", i_discord_url, req_headers, 5000, post, result, result_headers);
+   
+   if(res == -1)
+     {
+      Print("🛑 MT5 FIREWALL BLOCKED IT. MT5 Error Code: ", GetLastError());
+      Print("👉 You MUST add this exact domain to Tools -> Options -> Expert Advisors: https://discord.com");
+     }
+   else
+      if(res == 200 || res == 204)
+        {
+         Print("✅ DISCORD SUCCESS: Message delivered beautifully.");
+        }
+      else
+        {
+         string error_body = CharArrayToString(result);
+         Print("⚠️ DISCORD REJECTED IT. HTTP Status Code: ", res);
+         Print("👉 Discord Server Reply: ", error_body);
+        }
+  }
+
+//+------------------------------------------------------------------+
+void CreateUIButton(string name, string text, int x, int y, color bg_col)
+  {
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_BUTTON, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, name, OBJPROP_XSIZE, 75);
+      ObjectSetInteger(0, name, OBJPROP_YSIZE, 25);
+      ObjectSetString(0, name, OBJPROP_TEXT, text);
+      ObjectSetInteger(0, name, OBJPROP_BGCOLOR, bg_col);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(0, name, OBJPROP_STATE, false);
+     }
+  }

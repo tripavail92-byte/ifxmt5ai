@@ -9,15 +9,42 @@ import { createClient } from "@/utils/supabase/server";
 import { isAdminEmail } from "@/lib/authz";
 import { RuntimeStatusPanel } from "../RuntimeStatusPanel";
 
+type EaCommandAckRow = {
+  id: string;
+  command_id: string;
+  sequence_no: number;
+  status: string;
+  ack_payload_json?: Record<string, unknown> | null;
+  acknowledged_at?: string | null;
+  created_at: string;
+};
+
+type EaRuntimeEventRow = {
+  id: number;
+  event_type: string;
+  payload?: Record<string, unknown> | null;
+  created_at: string;
+};
+
+type AdminSignalItem = {
+  id: string;
+  kind: "ack" | "event";
+  title: string;
+  detail: string;
+  status: string;
+  timestamp: string;
+};
+
 type AuditSummary = {
   overall_status?: string;
   relay_ok?: boolean;
-  supervisor_ok?: boolean;
+  terminal_manager_ok?: boolean;
   active_connections?: number;
-  fresh_heartbeats?: number;
-  stale_heartbeats?: number;
-  queued_jobs?: number;
-  stuck_jobs?: number;
+  fresh_terminal_signals?: number;
+  stale_terminal_signals?: number;
+  pending_actions?: number;
+  stuck_actions?: number;
+  deprecated_processes?: number;
   emitted_at?: string;
   findings?: Array<{ severity?: string; message?: string }>;
 };
@@ -37,22 +64,68 @@ export default async function AdminPage() {
   const [
     { count: totalConnections },
     { count: onlineConnections },
-    { count: queuedJobs },
-    { count: successTrades },
+    { count: pendingEaCommands },
+    { count: acknowledgedEaCommands },
+    { count: executionEvents },
     { data: heartbeats },
     { data: connections },
     { data: auditEvents },
-    { data: runtimeEvents },
+    { data: commandAcks },
+    { data: eaEvents },
   ] = await Promise.all([
     admin.from("mt5_user_connections").select("*", { count: "exact", head: true }),
     admin.from("mt5_user_connections").select("*", { count: "exact", head: true }).eq("status", "online"),
-    admin.from("trade_jobs").select("*", { count: "exact", head: true }).in("status", ["queued", "claimed", "executing", "retry"]),
-    admin.from("trade_jobs").select("*", { count: "exact", head: true }).eq("status", "success"),
+    admin.from("ea_commands").select("*", { count: "exact", head: true }).eq("status", "pending"),
+    admin.from("ea_command_acks").select("*", { count: "exact", head: true }).eq("status", "acknowledged"),
+    admin.from("ea_runtime_events").select("*", { count: "exact", head: true }).eq("event_type", "armed_trade_executed"),
     admin.from("mt5_worker_heartbeats").select("*").order("last_seen_at", { ascending: false }),
     admin.from("mt5_user_connections").select("id,user_id,broker_server,account_login,status,last_error,last_seen_at,last_ok_at,created_at").order("created_at", { ascending: false }).limit(25),
-    admin.from("mt5_runtime_events").select("message,details,created_at").eq("component", "supervisor").like("message", "[runtime_audit]%").order("created_at", { ascending: false }).limit(1),
-    admin.from("mt5_runtime_events").select("id,level,component,message,created_at").order("created_at", { ascending: false }).limit(12),
+    admin.from("mt5_runtime_events").select("message,details,created_at").like("message", "[runtime_audit]%").order("created_at", { ascending: false }).limit(1),
+    admin.from("ea_command_acks").select("id,command_id,sequence_no,status,ack_payload_json,acknowledged_at,created_at").order("acknowledged_at", { ascending: false }).limit(12),
+    admin.from("ea_runtime_events").select("id,event_type,payload,created_at").order("created_at", { ascending: false }).limit(12),
   ]);
+
+  const eaSignalStream: AdminSignalItem[] = [
+    ...((commandAcks ?? []) as EaCommandAckRow[]).map((ack) => {
+      const payload = (ack.ack_payload_json ?? {}) as Record<string, unknown>;
+      const reason = typeof payload.reason === "string" && payload.reason.trim()
+        ? payload.reason.trim()
+        : `command ${ack.command_id}`;
+      return {
+        id: `ack-${ack.id}`,
+        kind: "ack" as const,
+        title: `Ack #${ack.sequence_no}`,
+        detail: `${ack.status} · ${reason}`,
+        status: ack.status,
+        timestamp: ack.acknowledged_at || ack.created_at,
+      };
+    }),
+    ...((eaEvents ?? []) as EaRuntimeEventRow[]).map((event) => {
+      const payload = (event.payload ?? {}) as Record<string, unknown>;
+      const nestedPayload = payload.payload && typeof payload.payload === "object"
+        ? (payload.payload as Record<string, unknown>)
+        : null;
+      const symbol = typeof payload.symbol === "string" ? payload.symbol : event.event_type;
+      const side = typeof payload.side === "string" ? payload.side.toUpperCase() : null;
+      const volume = typeof nestedPayload?.volume === "number" ? `${nestedPayload.volume} lots` : null;
+      const detail = event.event_type === "armed_trade_executed"
+        ? [event.event_type, side, volume].filter(Boolean).join(" · ")
+        : event.event_type === "command_processed"
+          ? `${String(payload.status ?? "processed")} · ${String(payload.command_type ?? "command")}`
+          : event.event_type;
+
+      return {
+        id: `event-${event.id}`,
+        kind: "event" as const,
+        title: symbol,
+        detail,
+        status: event.event_type,
+        timestamp: event.created_at,
+      };
+    }),
+  ]
+    .sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime())
+    .slice(0, 12);
 
   const runtimeAudit = (auditEvents?.[0]?.details as AuditSummary | undefined)
     ? {
@@ -66,7 +139,7 @@ export default async function AdminPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold md:text-2xl">Admin Portal</h1>
-          <p className="text-sm text-muted-foreground">Global runtime command view for relay, supervisor, workers, connections, and queue health.</p>
+          <p className="text-sm text-muted-foreground">Global EA-first view for command delivery, runtime execution signals, terminal health, and connection status.</p>
         </div>
         <Badge variant="secondary" className="gap-1 px-3 py-1">
           <ShieldCheck className="h-4 w-4" />
@@ -74,7 +147,7 @@ export default async function AdminPage() {
         </Badge>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         <Card className="border-primary/20 bg-gradient-to-br from-primary/5 to-transparent shadow-sm">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium">Total Connections</CardTitle>
@@ -99,23 +172,34 @@ export default async function AdminPage() {
         </Card>
         <Card className="border-amber-500/20 bg-gradient-to-br from-amber-500/5 to-transparent shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium">Queued Jobs</CardTitle>
+            <CardTitle className="text-sm font-medium">Pending EA Commands</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex items-center justify-between">
-              <div className="text-3xl font-bold">{queuedJobs || 0}</div>
+              <div className="text-3xl font-bold">{pendingEaCommands || 0}</div>
               <AlertTriangle className="h-5 w-5 text-amber-500" />
             </div>
           </CardContent>
         </Card>
         <Card className="border-sky-500/20 bg-gradient-to-br from-sky-500/5 to-transparent shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium">Successful Trades</CardTitle>
+            <CardTitle className="text-sm font-medium">EA Command Acks</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex items-center justify-between">
-              <div className="text-3xl font-bold">{successTrades || 0}</div>
+              <div className="text-3xl font-bold">{acknowledgedEaCommands || 0}</div>
               <Cpu className="h-5 w-5 text-sky-500" />
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="border-fuchsia-500/20 bg-gradient-to-br from-fuchsia-500/5 to-transparent shadow-sm">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">EA Execution Events</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center justify-between">
+              <div className="text-3xl font-bold">{executionEvents || 0}</div>
+              <Cpu className="h-5 w-5 text-fuchsia-500" />
             </div>
           </CardContent>
         </Card>
@@ -165,8 +249,8 @@ export default async function AdminPage() {
 
         <Card className="xl:col-span-2 shadow-sm">
           <CardHeader>
-            <CardTitle>Worker Watch</CardTitle>
-            <CardDescription>Latest worker heartbeats across the fleet.</CardDescription>
+            <CardTitle>Terminal Heartbeat Watch</CardTitle>
+            <CardDescription>Latest terminal heartbeats across the fleet.</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="space-y-3">
@@ -177,7 +261,7 @@ export default async function AdminPage() {
                     <div className="flex items-center justify-between gap-3">
                       <div>
                         <div className="font-medium">{hb.account_login || hb.connection_id}</div>
-                        <div className="text-xs text-muted-foreground">PID {hb.pid} · {hb.connection_id}</div>
+                        <div className="text-xs text-muted-foreground">Terminal heartbeat · {hb.connection_id}</div>
                       </div>
                       <Badge variant={stale ? "destructive" : hb.status === "online" ? "secondary" : "default"}>
                         {stale ? "stale" : hb.status}
@@ -196,21 +280,22 @@ export default async function AdminPage() {
 
       <Card className="shadow-sm">
         <CardHeader>
-          <CardTitle>Recent Platform Events</CardTitle>
-          <CardDescription>Latest runtime events across the entire system.</CardDescription>
+          <CardTitle>Recent EA Delivery + Execution</CardTitle>
+          <CardDescription>Latest command acknowledgements and EA runtime execution events across the fleet.</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="space-y-2 font-mono text-xs">
-            {(runtimeEvents || []).map((event) => (
+            {eaSignalStream.map((event) => (
               <div key={event.id} className="flex flex-col gap-1 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-center gap-2">
-                  <Badge variant={event.level === "error" ? "destructive" : event.level === "warn" ? "default" : "secondary"} className="uppercase">
-                    {event.level}
+                  <Badge variant={event.kind === "ack" ? "secondary" : "default"} className="uppercase">
+                    {event.kind}
                   </Badge>
-                  <span className="text-muted-foreground">{event.component}</span>
-                  <span>{event.message}</span>
+                  <span className="text-muted-foreground">{event.status}</span>
+                  <span>{event.title}</span>
+                  <span className="text-muted-foreground">{event.detail}</span>
                 </div>
-                <span className="text-muted-foreground">{new Date(event.created_at).toLocaleString()}</span>
+                <span className="text-muted-foreground">{new Date(event.timestamp).toLocaleString()}</span>
               </div>
             ))}
           </div>

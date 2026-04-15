@@ -1,12 +1,15 @@
 import { Badge } from "@/components/ui/badge";
 import { AlertTriangle, CheckCircle2, Clock3, Link2, Network, TrendingUp } from "lucide-react";
 import { createClient } from "@/utils/supabase/server";
+import { createAdminClient } from "@/utils/supabase/admin";
 import { Button } from "@/components/ui/button";
 import { enforceSingleActiveConnection } from "@/lib/terminal-access";
+import { getConnectionExecutionMode } from "@/lib/ea-control-plane";
 import Link from "next/link";
 
 export default async function Dashboard() {
   const supabase = await createClient();
+  const admin = createAdminClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
@@ -15,9 +18,19 @@ export default async function Dashboard() {
     ? (await enforceSingleActiveConnection(supabase, user.id))[0] ?? null
     : null;
 
-  const [{ count: completedTrades }, { count: queuedTrades }, heartbeatResult, eventsResult] = await Promise.all([
+  const executionMode = activeConnection
+    ? await getConnectionExecutionMode(admin, activeConnection.id).catch(() => "legacy-worker")
+    : null;
+
+  const [{ count: completedTrades }, { count: queuedTrades }, { count: eaRecordedTrades }, { count: pendingEaCommands }, heartbeatResult, eventsResult] = await Promise.all([
     supabase.from("trade_jobs").select("*", { count: "exact", head: true }).eq("status", "success"),
     supabase.from("trade_jobs").select("*", { count: "exact", head: true }).in("status", ["queued", "claimed", "executing", "retry"]),
+    activeConnection
+      ? supabase.from("ea_trade_audit").select("*", { count: "exact", head: true }).eq("connection_id", activeConnection.id)
+      : Promise.resolve({ count: 0 }),
+    activeConnection
+      ? supabase.from("ea_commands").select("*", { count: "exact", head: true }).eq("connection_id", activeConnection.id).eq("status", "pending")
+      : Promise.resolve({ count: 0 }),
     activeConnection
       ? supabase
           .from("mt5_worker_heartbeats")
@@ -42,6 +55,14 @@ export default async function Dashboard() {
   const heartbeats = heartbeatResult.data ?? [];
   const events = eventsResult.data ?? [];
   const latestHeartbeat = heartbeats[0] ?? null;
+  const executionCount = executionMode === "ea-first" ? Number(eaRecordedTrades ?? 0) : Number(completedTrades ?? 0);
+  const pendingCount = executionMode === "ea-first" ? Number(pendingEaCommands ?? 0) : Number(queuedTrades ?? 0);
+  const executionCaption = executionMode === "ea-first"
+    ? "Trade audit rows recorded by the EA for this connection."
+    : "Successful legacy trade jobs recorded for this workspace.";
+  const pendingCaption = executionMode === "ea-first"
+    ? "Pending EA commands waiting to be acknowledged by the terminal."
+    : "Queued, claimed, executing, or retry jobs still in flight.";
   const isStale = latestHeartbeat
     ? new Date().getTime() - new Date(latestHeartbeat.last_seen_at).getTime() > 30000
     : false;
@@ -100,7 +121,7 @@ export default async function Dashboard() {
 
           <div className="rounded-3xl border border-[#1f1f1f] bg-[#101010] p-5">
             <div className="flex items-center justify-between text-xs uppercase tracking-[0.18em] text-gray-500">
-              <span>Runtime Status</span>
+              <span>Terminal Status</span>
               <Network className="size-4 text-emerald-300" />
             </div>
             <div className="mt-4">
@@ -109,26 +130,26 @@ export default async function Dashboard() {
               </Badge>
             </div>
             <div className="mt-2 text-sm text-gray-400">
-              {latestHeartbeat?.last_seen_at ? `Last heartbeat ${new Date(latestHeartbeat.last_seen_at).toLocaleTimeString()}` : "Waiting for worker heartbeat."}
+              {latestHeartbeat?.last_seen_at ? `Last terminal heartbeat ${new Date(latestHeartbeat.last_seen_at).toLocaleTimeString()}` : "Waiting for terminal heartbeat."}
             </div>
           </div>
 
           <div className="rounded-3xl border border-[#1f1f1f] bg-[#101010] p-5">
             <div className="flex items-center justify-between text-xs uppercase tracking-[0.18em] text-gray-500">
-              <span>Trades Executed</span>
+              <span>{executionMode === "ea-first" ? "EA Trade Audit" : "Legacy Executions"}</span>
               <CheckCircle2 className="size-4 text-emerald-300" />
             </div>
-            <div className="mt-4 text-3xl font-semibold text-white">{completedTrades || 0}</div>
-            <div className="mt-2 text-sm text-gray-400">Successful trade jobs recorded for this workspace.</div>
+            <div className="mt-4 text-3xl font-semibold text-white">{executionCount}</div>
+            <div className="mt-2 text-sm text-gray-400">{executionCaption}</div>
           </div>
 
           <div className="rounded-3xl border border-[#1f1f1f] bg-[#101010] p-5">
             <div className="flex items-center justify-between text-xs uppercase tracking-[0.18em] text-gray-500">
-              <span>Queue Pressure</span>
+              <span>{executionMode === "ea-first" ? "Pending EA Commands" : "Legacy Queue Pressure"}</span>
               <Clock3 className="size-4 text-amber-300" />
             </div>
-            <div className="mt-4 text-3xl font-semibold text-white">{queuedTrades || 0}</div>
-            <div className="mt-2 text-sm text-gray-400">Queued, claimed, executing, or retry jobs still in flight.</div>
+            <div className="mt-4 text-3xl font-semibold text-white">{pendingCount}</div>
+            <div className="mt-2 text-sm text-gray-400">{pendingCaption}</div>
           </div>
         </div>
 
@@ -154,7 +175,7 @@ export default async function Dashboard() {
                   <div className="text-xs text-gray-500">{activeConnection.broker_server}</div>
                 </div>
                 <div className="rounded-2xl border border-[#202020] bg-[#151515] px-4 py-3">
-                  <div className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Worker Signal</div>
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Terminal Signal</div>
                   <div className="mt-2 text-sm font-medium text-white">{runtimeState}</div>
                   <div className="text-xs text-gray-500">{latestHeartbeat ? new Date(latestHeartbeat.last_seen_at).toLocaleString() : "No heartbeat yet"}</div>
                 </div>
@@ -172,7 +193,7 @@ export default async function Dashboard() {
 
             {isStale ? (
               <div className="mt-4 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                The worker heartbeat is stale. Check the MT5 runtime or reopen the terminal session.
+                The terminal heartbeat is stale. Check MT5 or reopen the terminal session.
               </div>
             ) : null}
           </section>

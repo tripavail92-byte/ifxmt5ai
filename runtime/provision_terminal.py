@@ -31,6 +31,17 @@ BROKER_BASE_MAP: dict[str, str] = {
 DEFAULT_BASE = r"C:\Program Files\MetaTrader 5"
 
 
+def _truthy_env(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _allow_existing_instance_reprovision() -> bool:
+    return _truthy_env("MT5_ALLOW_EXISTING_INSTANCE_REPROVISION", False)
+
+
 def _configured_template_dir() -> Path | None:
     raw = (os.environ.get("MT5_TEMPLATE_DIR") or "").strip()
     if not raw:
@@ -53,6 +64,100 @@ def _resolve_base(broker_server: str) -> str:
     return DEFAULT_BASE
 
 
+def _request_window_close(pid: int) -> bool:
+    if os.name != "nt":
+        return False
+
+    try:
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        WM_CLOSE = 0x0010
+        windows: list[int] = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        def enum_proc(hwnd, lparam):
+            owner_pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner_pid))
+            if int(owner_pid.value) == int(pid) and user32.IsWindowVisible(hwnd):
+                windows.append(int(hwnd))
+            return True
+
+        user32.EnumWindows(enum_proc, 0)
+        for hwnd in windows:
+            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+        return bool(windows)
+    except Exception:
+        return False
+
+
+def _graceful_stop_terminal(target_exe: Path) -> None:
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return
+
+    if not target_exe.exists():
+        return
+
+    target = str(target_exe.resolve())
+    matching = []
+    for proc in psutil.process_iter(attrs=["pid", "exe"]):
+        try:
+            exe = proc.info.get("exe") or ""
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if not exe:
+            continue
+        try:
+            if str(Path(exe).resolve()) == target:
+                matching.append(proc)
+        except Exception:
+            continue
+
+    if not matching:
+        return
+
+    logger.warning("[provisioner] Requesting graceful MT5 shutdown for %s", target_exe)
+    sent_close = False
+    for proc in matching:
+        sent_close = _request_window_close(int(proc.pid)) or sent_close
+
+    if not sent_close:
+        for proc in matching:
+            try:
+                proc.terminate()
+            except Exception:
+                continue
+
+    deadline = time.time() + float((os.environ.get("MT5_GRACEFUL_SHUTDOWN_TIMEOUT_SEC") or "15").strip() or "15")
+    while time.time() < deadline:
+        alive = []
+        for proc in matching:
+            try:
+                if proc.is_running():
+                    alive.append(proc)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        if not alive:
+            return
+        time.sleep(0.5)
+
+    if not _truthy_env("MT5_FORCE_KILL_ON_BACKUP", False):
+        raise RuntimeError(
+            "MT5 terminal is still running; refusing to wipe a persistent portable instance. "
+            "Close the terminal cleanly or set MT5_FORCE_KILL_ON_BACKUP=1 for an explicit destructive override."
+        )
+
+    logger.warning("[provisioner] Forcing MT5 shutdown after graceful timeout: %s", target_exe)
+    for proc in matching:
+        try:
+            proc.kill()
+        except Exception:
+            continue
+    time.sleep(1)
+
+
 def get_terminal_path(connection_id: str) -> Path:
     return Path(TERMINALS_DIR) / connection_id
 
@@ -67,31 +172,8 @@ def _backup_existing_terminal_folder(dest: Path) -> Path | None:
     if not dest.exists():
         return None
 
-    # Best-effort: terminate any running terminal from this folder.
-    # Reprovisioning while terminal64.exe is alive can fail on Windows.
-    try:
-        import psutil  # type: ignore
-
-        target_exe = dest / "terminal64.exe"
-        if target_exe.exists():
-            target = str(target_exe.resolve())
-            for proc in psutil.process_iter(attrs=["pid", "exe"]):
-                try:
-                    exe = proc.info.get("exe") or ""
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-                if not exe:
-                    continue
-                try:
-                    if str(Path(exe).resolve()) == target:
-                        proc.terminate()
-                except Exception:
-                    continue
-
-            # Give it a moment to die.
-            time.sleep(1)
-    except Exception:
-        pass
+    target_exe = dest / "terminal64.exe"
+    _graceful_stop_terminal(target_exe)
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     backup = dest.parent / f"{dest.name}_backup_{stamp}"
@@ -136,6 +218,12 @@ def provision(connection_id: str, broker_server: str = "", force: bool = False) 
     # If forcing or the folder looks corrupted, prefer a clean reprovision.
     # Copy-over can leave behind broken state (Config/*.dat, partial updates, etc).
     if dest.exists():
+        if not _allow_existing_instance_reprovision():
+            raise RuntimeError(
+                "Refusing to reprovision an existing MT5 portable instance at "
+                f"{dest}. This folder contains persisted terminal state such as the WebRequest allow-list. "
+                "Reuse the existing folder, or set MT5_ALLOW_EXISTING_INSTANCE_REPROVISION=1 for an explicit reset."
+            )
         try:
             _backup_existing_terminal_folder(dest)
         except Exception as exc:
@@ -169,6 +257,6 @@ def verify_or_provision(connection_id: str, broker_server: str = "") -> Path:
 
 
 def verify_or_reprovision(connection_id: str, broker_server: str = "") -> Path:
-    """Force a clean reprovision, backing up any existing folder."""
+    """Force a clean reprovision, backing up any existing folder when explicitly allowed."""
     logger.warning("[provisioner] Forcing terminal reprovision for %s", connection_id)
     return provision(connection_id, broker_server=broker_server, force=True)

@@ -4,6 +4,36 @@ $ErrorActionPreference = 'Continue'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -Path $Root
 
+function Stop-Mt5ProcessGracefully {
+    param(
+        [Parameter(Mandatory = $true)]
+        $CimProcess,
+
+        [int]$TimeoutSeconds = 15
+    )
+
+    try {
+        $process = Get-Process -Id $CimProcess.ProcessId -ErrorAction Stop
+    } catch {
+        return $true
+    }
+
+    try {
+        if ($process.MainWindowHandle -ne 0) {
+            $null = $process.CloseMainWindow()
+        } else {
+            Stop-Process -Id $process.Id -ErrorAction Stop
+        }
+
+        Wait-Process -Id $process.Id -Timeout $TimeoutSeconds -ErrorAction Stop
+        return $true
+    } catch {
+        Write-Warning ("graceful terminal stop failed pid={0}: {1}" -f $process.Id, $_.Exception.Message)
+    }
+
+    return $false
+}
+
 Write-Host 'Emergency stop only.' -ForegroundColor Yellow
 Write-Host 'This script is not part of normal startup in Railway-only mode.' -ForegroundColor Yellow
 Write-Host ''
@@ -38,7 +68,7 @@ Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
         }
     }
 
-Write-Host '[3/4] Stopping MT5 terminals...' -ForegroundColor Cyan
+Write-Host '[3/4] Stopping MT5 terminals (graceful first)...' -ForegroundColor Cyan
 Get-CimInstance Win32_Process -Filter "Name='terminal64.exe'" |
     Where-Object {
         ($_.ExecutablePath -like 'C:\mt5system\terminals\*') -or
@@ -46,8 +76,12 @@ Get-CimInstance Win32_Process -Filter "Name='terminal64.exe'" |
     } |
     ForEach-Object {
         try {
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop
-            Write-Host ("  stopped terminal64 pid={0}" -f $_.ProcessId) -ForegroundColor DarkGray
+            if (Stop-Mt5ProcessGracefully -CimProcess $_) {
+                Write-Host ("  stopped terminal64 pid={0} gracefully" -f $_.ProcessId) -ForegroundColor DarkGray
+            } else {
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop
+                Write-Warning ("terminal pid={0} required force stop; MT5 may not persist settings" -f $_.ProcessId)
+            }
         } catch {
             Write-Warning ("terminal stop failed pid={0}: {1}" -f $_.ProcessId, $_.Exception.Message)
         }

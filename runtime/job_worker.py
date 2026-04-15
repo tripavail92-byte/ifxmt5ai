@@ -148,30 +148,14 @@ def mt5_init_headless(
         except Exception:
             return
 
-    # Best-effort: terminate a stuck terminal for this exact portable path.
-    try:
-        import psutil  # type: ignore
-
-        target = str(Path(terminal_path))
-        for proc in psutil.process_iter(attrs=["pid", "exe"]):
-            try:
-                exe = proc.info.get("exe") or ""
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-            if not exe:
-                continue
-            try:
-                if Path(exe).resolve() == Path(target).resolve():
-                    proc.terminate()
-            except Exception:
-                continue
-        time.sleep(1)
-    except Exception:
-        pass
-
     # Repeatedly attempt initialization within the overall timeout window.
     # Short per-call timeout keeps retries responsive.
+    # IMPORTANT: do NOT pre-kill the terminal — if a startup.ini-launched terminal
+    # is already running with an EA loaded, killing it would destroy the EA session.
+    # mt5.initialize(path=...) will connect to the existing process if it is running,
+    # or launch a new one only if it is not.
     per_call_timeout_ms = 15000
+    killed_stuck = False
     while time.time() < deadline:
         _progress()
         ok = mt5.initialize(
@@ -190,6 +174,32 @@ def mt5_init_headless(
             mt5.shutdown()
         except Exception:
             pass
+
+        # Only kill a genuinely stuck terminal once — after the first connect
+        # attempt fails.  This avoids destroying an EA-loaded session on the
+        # very first try; we only force-terminate when mt5.initialize() cannot
+        # attach even after a clean shutdown.
+        if not killed_stuck:
+            killed_stuck = True
+            try:
+                import psutil  # type: ignore
+
+                target = str(Path(terminal_path))
+                for proc in psutil.process_iter(attrs=["pid", "exe"]):
+                    try:
+                        exe = proc.info.get("exe") or ""
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+                    if not exe:
+                        continue
+                    try:
+                        if Path(exe).resolve() == Path(target).resolve():
+                            proc.terminate()
+                    except Exception:
+                        continue
+                time.sleep(1)
+            except Exception:
+                pass
 
         time.sleep(2)
 

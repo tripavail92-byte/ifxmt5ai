@@ -1,26 +1,23 @@
-# Final Clean MT5 Handoff
+# MT5 Master Handoff
 
-Prepared terminal:
+`final-clean-manual` is not a valid template source. Clone testing from that folder still produced immediate `err=4014` on first launch and after a clean restart.
 
-- Portable MT5 folder: `C:\mt5system\terminals\final-clean-manual`
-- EA binary already copied into `MQL5\Experts\IFX\IFX_Railway_Bridge_v1.ex5`
-- EA preset already copied into `MQL5\Presets\ifx_connection.set`
-- Bootstrap payload already copied into `MQL5\Files\ifx\bootstrap.json`
+Use a dedicated clean master instead:
 
-Manual setup sequence:
+- Portable MT5 folder: `C:\MT5_MASTER`
+- Launch helper: `setup_mt5_master.ps1`
+- Validation helper: `validate_mt5_master.ps1`
 
-1. Run `start_final_clean_terminal_normal.ps1` or launch `terminal64.exe` from `C:\mt5system\terminals\final-clean-manual` in portable mode.
-2. In MT5, log in manually if needed.
-3. Open Tools -> Options -> Expert Advisors.
-4. Add `https://ifx-mt5-portal-production.up.railway.app` to `Allow WebRequest for listed URL`.
-5. In Navigator, attach `IFX_Railway_Bridge_v1` from `Experts > IFX` to a chart.
-6. When the EA input dialog opens, load `ifx_connection.set` if MT5 does not load it automatically.
-7. Confirm the EA shows a smiling icon / active state on the chart.
-8. Close MT5 normally.
+Required operator sequence:
 
-After that, keep using the same portable terminal folder for manual testing.
+1. Run `setup_mt5_master.ps1`.
+2. In the launched MT5 instance, use `File -> Open Data Folder` and confirm it opens `C:\MT5_MASTER`.
+3. Open `Tools -> Options -> Expert Advisors`.
+4. Enable algo trading as required and add `https://ifx-mt5-portal-production.up.railway.app`.
+5. Click `OK`, wait 5-10 seconds, then close MT5 using `File -> Exit`.
+6. Reopen `C:\MT5_MASTER\terminal64.exe /portable`.
+7. Confirm the URL is still present.
+8. Attach a test EA that performs WebRequest and confirm there is no `err=4014`.
+9. Run `validate_mt5_master.ps1` and review its checklist output.
 
-Validation target after the manual attach:
-
-- The WebRequest allow-list entry still exists after restart.
-- The Experts log no longer shows `err=4014` for `/api/mt5` requests.
+Only after those checks pass should `.env` set `MT5_TEMPLATE_DIR=C:\MT5_MASTER`.

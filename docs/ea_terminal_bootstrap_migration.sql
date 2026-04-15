@@ -94,6 +94,8 @@ create table if not exists public.ea_installations (
   terminal_path text,
   ea_version    text,
   config_version int,
+  applied_config_version int,
+  last_command_sequence bigint not null default 0,
   status        text not null default 'starting',
   install_token text not null unique,
   metadata_json jsonb not null default '{}'::jsonb,
@@ -105,10 +107,59 @@ create table if not exists public.ea_installations (
   unique (connection_id)
 );
 
+alter table if exists public.ea_installations
+  add column if not exists config_version int;
+
+alter table if exists public.ea_installations
+  add column if not exists applied_config_version int;
+
+alter table if exists public.ea_installations
+  add column if not exists last_command_sequence bigint not null default 0;
+
 drop trigger if exists trg_ea_installations_updated_at on public.ea_installations;
 create trigger trg_ea_installations_updated_at
 before update on public.ea_installations
 for each row execute function public.set_updated_at();
+
+create table if not exists public.ea_commands (
+  id              uuid primary key default gen_random_uuid(),
+  connection_id   uuid not null references public.mt5_user_connections(id) on delete cascade,
+  user_id         uuid not null references auth.users(id) on delete cascade,
+  command_type    text not null,
+  payload_json    jsonb not null default '{}'::jsonb,
+  sequence_no     bigint not null,
+  idempotency_key text not null,
+  status          text not null default 'pending',
+  expires_at      timestamptz,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now(),
+  unique (connection_id, sequence_no),
+  unique (connection_id, idempotency_key)
+);
+
+create index if not exists idx_ea_commands_connection_status_created
+  on public.ea_commands(connection_id, status, created_at desc);
+
+drop trigger if exists trg_ea_commands_updated_at on public.ea_commands;
+create trigger trg_ea_commands_updated_at
+before update on public.ea_commands
+for each row execute function public.set_updated_at();
+
+create table if not exists public.ea_command_acks (
+  id               uuid primary key default gen_random_uuid(),
+  command_id       uuid not null references public.ea_commands(id) on delete cascade,
+  connection_id    uuid not null references public.mt5_user_connections(id) on delete cascade,
+  sequence_no      bigint not null,
+  status           text not null,
+  ack_payload_json jsonb not null default '{}'::jsonb,
+  acknowledged_at  timestamptz not null default now(),
+  created_at       timestamptz not null default now(),
+  unique (command_id),
+  unique (connection_id, sequence_no)
+);
+
+create index if not exists idx_ea_command_acks_connection_acknowledged
+  on public.ea_command_acks(connection_id, acknowledged_at desc);
 
 create table if not exists public.ea_runtime_events (
   id            bigserial primary key,

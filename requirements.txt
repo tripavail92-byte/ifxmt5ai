@@ -19,8 +19,8 @@ psutil>=5.9.0
 # HTTP client (used by runtime/price_relay.py to forward ingest)
 requests>=2.31.0
 
+# MT5 Python API used by local workers and direct-price fallback
+MetaTrader5>=5.0.0
+
 # Phase 2: Windows Credential Manager (uncomment when moving to Phase 3 security)
 # keyring>=25.0.0
-
-# MT5 (install separately from MetaTrader 5 official package)
-# MetaTrader5>=5.0.0

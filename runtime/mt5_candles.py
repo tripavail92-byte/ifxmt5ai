@@ -13,6 +13,7 @@ This module is intentionally lightweight so it can be used by both the relay
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -51,6 +52,50 @@ def _terminal_path_for_connection(connection_id: str) -> Optional[str]:
         return terminal_path
 
     return None
+
+
+def _terminal_process_running(terminal_path: str) -> bool:
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return False
+
+    target = os.path.normcase(os.path.abspath(str(terminal_path)))
+    for proc in psutil.process_iter(attrs=["exe"]):
+        try:
+            exe = proc.info.get("exe") or ""
+        except Exception:
+            continue
+        if not exe:
+            continue
+        if os.path.normcase(os.path.abspath(str(exe))) == target:
+            return True
+    return False
+
+
+def _launch_terminal_with_startup(terminal_path: str) -> None:
+    terminal_exe = Path(terminal_path)
+    terminal_dir = terminal_exe.parent
+    startup_ini = terminal_dir / "startup.ini"
+
+    if not startup_ini.exists():
+        raise Mt5CandlesError(f"startup.ini missing for managed terminal: {terminal_dir}")
+
+    subprocess.Popen(
+        [str(terminal_exe), "/portable", f"/config:{startup_ini}"],
+        cwd=str(terminal_dir),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    launch_timeout = float((os.getenv("MT5_TERMINAL_LAUNCH_TIMEOUT_SEC") or "20").strip() or "20")
+    deadline = time.time() + max(5.0, launch_timeout)
+    while time.time() < deadline:
+        if _terminal_process_running(str(terminal_exe)):
+            return
+        time.sleep(0.5)
+
+    raise Mt5CandlesError(f"managed terminal did not start via startup.ini: {terminal_exe}")
 
 
 def _ipc_lock_path() -> str:
@@ -160,6 +205,9 @@ def _ensure_session_for_connection(connection_id: str) -> bool:
     portable = True
     if "MT5_TERMINAL_PORTABLE" in os.environ:
         portable = _truthy_env("MT5_TERMINAL_PORTABLE")
+
+    if not _terminal_process_running(terminal_path):
+        _launch_terminal_with_startup(terminal_path)
 
     ok = mt5.initialize(path=str(terminal_path), portable=portable, timeout=timeout_ms)
     if not ok:

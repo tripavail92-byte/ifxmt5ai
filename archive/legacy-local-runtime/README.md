@@ -10,6 +10,14 @@ Archived here:
 - old local control-plane launcher
 - old manual Exness MT5 launcher
 
+Archived under `root-deprecated/`:
+- deprecated root-level runtime/watchdog stubs moved out of the workspace top level
+- `restart_runtime.ps1`
+- `start_runtime_headless.ps1`
+- `restart_all_services.ps1`
+- `watchdog_relay.ps1`
+- `setup_watchdog_task.ps1`
+
 Current live architecture:
 - MT5 terminal
 - EA inside MT5

@@ -30,7 +30,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from runtime.crypto_utils import decrypt_mt5_password
-from runtime.provision_terminal import verify_or_provision
+from runtime.provision_terminal import verify_or_provision, verify_or_reprovision
 
 
 def _load_simple_dotenv(path: Path) -> None:
@@ -105,7 +105,7 @@ def _startup_symbol() -> str:
     explicit = (os.getenv("MT5_STARTUP_SYMBOL") or "").strip()
     if explicit:
         return explicit
-    return "EURUSDm"
+    return "BTCUSDm"
 
 
 def _startup_period() -> str:
@@ -113,6 +113,38 @@ def _startup_period() -> str:
     if explicit:
         return explicit
     return "M1"
+
+
+def _read_existing_startup_setting(terminal_dir: Path, key: str) -> str:
+    startup_ini = terminal_dir / "startup.ini"
+    if not startup_ini.exists():
+        return ""
+
+    try:
+        for raw_line in startup_ini.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith(";"):
+                continue
+            if line.lower().startswith(f"{key.lower()}="):
+                return line.split("=", 1)[1].strip()
+    except Exception:
+        return ""
+
+    return ""
+
+
+def _resolve_startup_symbol(terminal_dir: Path) -> str:
+    existing = _read_existing_startup_setting(terminal_dir, "Symbol")
+    if existing:
+        return existing
+    return _startup_symbol()
+
+
+def _resolve_startup_period(terminal_dir: Path) -> str:
+    existing = _read_existing_startup_setting(terminal_dir, "Period")
+    if existing:
+        return existing.upper()
+    return _startup_period()
 
 
 def _prefer_compiled_artifact(path_value: str) -> str:
@@ -364,6 +396,124 @@ def _running_terminal_process(executable_path: Path) -> bool:
     return False
 
 
+def _running_terminal_pids(executable_path: Path) -> list[int]:
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return []
+
+    target = str(executable_path.resolve())
+    matches: list[int] = []
+    for proc in psutil.process_iter(attrs=["exe", "pid"]):
+        try:
+            exe = proc.info.get("exe") or ""
+            pid = int(proc.info.get("pid") or 0)
+        except Exception:
+            continue
+        if not exe or pid <= 0:
+            continue
+        try:
+            if str(Path(exe).resolve()) == target:
+                matches.append(pid)
+        except Exception:
+            continue
+    return matches
+
+
+def _stop_terminal_processes(executable_path: Path) -> None:
+    pids = _running_terminal_pids(executable_path)
+    if not pids:
+        return
+
+    for pid in pids:
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/F", "/T"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=15,
+            )
+        except Exception:
+            continue
+
+
+def _latest_terminal_log_path(logs_dir: Path) -> Path | None:
+    if not logs_dir.exists():
+        return None
+    candidates = [path for path in logs_dir.glob("*.log") if path.is_file()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _read_text_file(path: Path) -> str:
+    raw = path.read_bytes()
+    for encoding in ("utf-16", "utf-8", "latin-1"):
+        try:
+            return raw.decode(encoding, errors="replace")
+        except Exception:
+            continue
+    return ""
+
+
+def _tail_from_offset(path: Path, offset: int) -> str:
+    if not path.exists():
+        return ""
+    with open(path, "rb") as fh:
+        fh.seek(max(0, offset))
+        raw = fh.read()
+    for encoding in ("utf-16", "utf-8", "latin-1"):
+        try:
+            return raw.decode(encoding, errors="replace")
+        except Exception:
+            continue
+    return ""
+
+
+def _startup_log_offset(log_path: Path | None) -> int:
+    if not log_path or not log_path.exists():
+        return 0
+    try:
+        return int(log_path.stat().st_size)
+    except Exception:
+        return 0
+
+
+def _terminal_launch_has_expert_loaded(terminal_dir: Path, startup_ini: Path, log_path: Path | None, offset: int) -> bool:
+    startup_text = startup_ini.read_text(encoding="utf-8")
+    expert_path = ""
+    for raw_line in startup_text.splitlines():
+        line = raw_line.strip()
+        if line.lower().startswith("expert="):
+            expert_path = line.split("=", 1)[1].strip()
+            break
+
+    if not expert_path:
+        return False
+
+    expert_name = Path(expert_path).name
+    markers = [
+        f"inputs read from expert '{expert_path}'",
+        f"Experts expert {expert_name}",
+    ]
+
+    candidate_logs: list[Path] = []
+    if log_path and log_path.exists():
+        candidate_logs.append(log_path)
+    latest = _latest_terminal_log_path(terminal_dir / "Logs")
+    if latest and latest not in candidate_logs:
+        candidate_logs.append(latest)
+
+    for candidate in candidate_logs:
+        text = _tail_from_offset(candidate, offset if candidate == log_path else 0)
+        if not text:
+            continue
+        if all(marker in text for marker in markers):
+            return True
+    return False
+
+
 class TerminalManager:
     def __init__(self, host_name: str, host_type: str, capacity: int, poll_seconds: float, once: bool = False) -> None:
         self.host_name = host_name
@@ -447,20 +597,34 @@ class TerminalManager:
 
         try:
             broker_server = str(connection.get("broker_server") or "")
-            terminal_dir = verify_or_provision(connection_id, broker_server=broker_server)
             password = self._decrypt_connection_password(connection)
-            assets = self._install_ea_assets(terminal_dir, assignment)
-            preset_path = self._write_set_file(terminal_dir, assignment)
-            startup_ini = self._write_startup_ini(
-                terminal_dir,
-                login=str(connection.get("account_login") or ""),
+            terminal_dir, assets, preset_path, startup_ini, bootstrap_path = self._prepare_terminal_launch(
+                connection_id=connection_id,
+                broker_server=broker_server,
                 password=password,
-                server=broker_server,
-                expert_path=assets.get("expert_path") or "",
-                expert_parameters=preset_path.name,
+                assignment=assignment,
+                force_reprovision=False,
             )
-            bootstrap_path = self._write_bootstrap_json(terminal_dir, assignment)
-            self._launch_terminal(terminal_dir, startup_ini)
+
+            try:
+                self._launch_terminal(terminal_dir, startup_ini)
+            except RuntimeError as exc:
+                if "expert was not attached automatically" not in str(exc).lower():
+                    raise
+
+                logger.warning(
+                    "Launch drift detected for %s. Reprovisioning terminal and retrying once.",
+                    connection_id,
+                )
+                terminal_dir, assets, preset_path, startup_ini, bootstrap_path = self._prepare_terminal_launch(
+                    connection_id=connection_id,
+                    broker_server=broker_server,
+                    password=password,
+                    assignment=assignment,
+                    force_reprovision=True,
+                )
+                self._launch_terminal(terminal_dir, startup_ini)
+
             verification = self._wait_for_assignment_verification(assignment_id)
 
             self.client.ack_assignment(
@@ -484,6 +648,40 @@ class TerminalManager:
                 error=str(exc),
                 details={"stage": "failed"},
             )
+
+    def _prepare_terminal_launch(
+        self,
+        connection_id: str,
+        broker_server: str,
+        password: str,
+        assignment: dict[str, Any],
+        force_reprovision: bool,
+    ) -> tuple[Path, dict[str, Any], Path, Path, Path]:
+        if force_reprovision:
+            previous = os.environ.get("MT5_ALLOW_EXISTING_INSTANCE_REPROVISION")
+            os.environ["MT5_ALLOW_EXISTING_INSTANCE_REPROVISION"] = "1"
+            try:
+                terminal_dir = verify_or_reprovision(connection_id, broker_server=broker_server)
+            finally:
+                if previous is None:
+                    os.environ.pop("MT5_ALLOW_EXISTING_INSTANCE_REPROVISION", None)
+                else:
+                    os.environ["MT5_ALLOW_EXISTING_INSTANCE_REPROVISION"] = previous
+        else:
+            terminal_dir = verify_or_provision(connection_id, broker_server=broker_server)
+
+        assets = self._install_ea_assets(terminal_dir, assignment)
+        preset_path = self._write_set_file(terminal_dir, assignment)
+        startup_ini = self._write_startup_ini(
+            terminal_dir,
+            login=str((assignment.get("connection") or {}).get("account_login") or ""),
+            password=password,
+            server=broker_server,
+            expert_path=assets.get("expert_path") or "",
+            expert_parameters=preset_path.name,
+        )
+        bootstrap_path = self._write_bootstrap_json(terminal_dir, assignment)
+        return terminal_dir, assets, preset_path, startup_ini, bootstrap_path
 
     def _decrypt_connection_password(self, connection: dict[str, Any]) -> str:
         ciphertext = str(connection.get("password_ciphertext_b64") or "")
@@ -582,11 +780,18 @@ class TerminalManager:
                     "[Charts]",
                     "ProfileLast=Default",
                     "",
+                    "[Experts]",
+                    "AllowLiveTrading=1",
+                    "AllowDllImport=0",
+                    "Enabled=1",
+                    "Account=0",
+                    "Profile=0",
+                    "",
                     "[StartUp]",
                     f"Expert={expert_path}",
                     f"ExpertParameters={expert_parameters}",
-                    f"Symbol={_startup_symbol()}",
-                    f"Period={_startup_period()}",
+                    f"Symbol={_resolve_startup_symbol(terminal_dir)}",
+                    f"Period={_resolve_startup_period(terminal_dir)}",
                     "ShutdownTerminal=0",
                     "",
                 ]
@@ -612,6 +817,8 @@ class TerminalManager:
                 "register_url": _control_plane_url("/api/ea/register"),
                 "heartbeat_url": _control_plane_url("/api/ea/heartbeat"),
                 "config_url": _control_plane_url("/api/ea/config"),
+                "commands_url": _control_plane_url("/api/ea/commands"),
+                "command_ack_url": _control_plane_url("/api/ea/commands/ack"),
                 "events_url": _control_plane_url("/api/ea/events"),
                 "trade_audit_url": _control_plane_url("/api/ea/trade-audit"),
             },
@@ -653,21 +860,46 @@ class TerminalManager:
         if not terminal_exe.exists():
             raise RuntimeError(f"terminal64.exe missing: {terminal_exe}")
 
-        subprocess.Popen(
-            [str(terminal_exe), "/portable", f"/config:{startup_ini}"],
-            cwd=str(terminal_dir),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        launch_timeout = float((os.getenv("MT5_LAUNCH_TIMEOUT_SEC") or "20").strip() or "20")
+        expert_timeout = float((os.getenv("MT5_EXPERT_ATTACH_TIMEOUT_SEC") or "30").strip() or "30")
+        attempts = max(1, int((os.getenv("MT5_LAUNCH_RETRY_COUNT") or "2").strip() or "2"))
 
-        launch_timeout = float((os.getenv("MT5_LAUNCH_TIMEOUT_SEC") or "15").strip() or "15")
-        deadline = time.time() + launch_timeout
-        while time.time() < deadline:
-            if _running_terminal_process(terminal_exe):
-                return
-            time.sleep(1.0)
+        last_error = ""
+        for attempt in range(1, attempts + 1):
+            log_path = _latest_terminal_log_path(terminal_dir / "Logs")
+            log_offset = _startup_log_offset(log_path)
 
-        raise RuntimeError(f"MT5 terminal did not stay running after launch: {terminal_exe}")
+            _stop_terminal_processes(terminal_exe)
+            time.sleep(1.5)
+
+            subprocess.Popen(
+                [str(terminal_exe), "/portable", f"/config:{startup_ini}"],
+                cwd=str(terminal_dir),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            deadline = time.time() + launch_timeout
+            while time.time() < deadline:
+                if _running_terminal_process(terminal_exe):
+                    break
+                time.sleep(1.0)
+            else:
+                last_error = f"MT5 terminal did not stay running after launch: {terminal_exe}"
+                continue
+
+            expert_deadline = time.time() + expert_timeout
+            while time.time() < expert_deadline:
+                if _terminal_launch_has_expert_loaded(terminal_dir, startup_ini, log_path, log_offset):
+                    return
+                time.sleep(1.0)
+
+            last_error = (
+                f"MT5 started but expert was not attached automatically for {terminal_exe}. "
+                f"startup={startup_ini} attempt={attempt}/{attempts}"
+            )
+
+        raise RuntimeError(last_error or f"Failed to launch MT5 with expert: {terminal_exe}")
 
 
 def build_parser() -> argparse.ArgumentParser:
