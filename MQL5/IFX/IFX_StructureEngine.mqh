@@ -71,41 +71,25 @@ void SE_GetActiveStructure(
 
    int alb = (int)MathMin(copied_h, MathMin(copied_l, MathMin(copied_c, copied_t)));
 
-   double active_ph = EMPTY_VALUE, active_pl = EMPTY_VALUE;
-   double pot_ph    = EMPTY_VALUE, pot_pl    = EMPTY_VALUE;
-   datetime t_act_ph = 0, t_act_pl = 0, t_pot_ph = 0, t_pot_pl = 0;
+   double   active_ph = EMPTY_VALUE, active_pl = EMPTY_VALUE;
+   datetime t_act_ph  = 0,           t_act_pl  = 0;
 
-   for(int i = alb - pivot_len - 1; i >= pivot_len; i--)
+   // PROXIMITY SEARCH: walk newest-to-oldest (i=0 is newest since ArraySetAsSeries=true).
+   // Capture the nearest qualified pivot and stop searching as soon as both are found.
+   // This is more responsive than a full BOS state-machine — the nearest structural
+   // floor/ceiling is the level the market is currently interacting with.
+   for(int i = pivot_len; i < alb - pivot_len; i++)
    {
       bool isPH = true, isPL = true;
       for(int j = i - pivot_len; j <= i + pivot_len; j++)
       {
          if(j == i) continue;
-         if(h[j] >= h[i]) isPH = false;
-         if(l[j] <= l[i]) isPL = false;
+         if(h[j] > h[i]) isPH = false;
+         if(l[j] < l[i]) isPL = false;
       }
-
-      if(isPH)
-      {
-         if(active_ph == EMPTY_VALUE || h[i] > active_ph) { active_ph = h[i]; t_act_ph = t[i]; }
-         if(pot_ph    == EMPTY_VALUE || h[i] > pot_ph)    { pot_ph    = h[i]; t_pot_ph = t[i]; }
-      }
-      if(isPL)
-      {
-         if(active_pl == EMPTY_VALUE || l[i] < active_pl) { active_pl = l[i]; t_act_pl = t[i]; }
-         if(pot_pl    == EMPTY_VALUE || l[i] < pot_pl)    { pot_pl    = l[i]; t_pot_pl = t[i]; }
-      }
-
-      if(active_ph != EMPTY_VALUE && c[i] > active_ph)
-      {
-         active_pl = pot_pl; t_act_pl = t_pot_pl;
-         active_ph = EMPTY_VALUE; pot_pl = EMPTY_VALUE;
-      }
-      else if(active_pl != EMPTY_VALUE && c[i] < active_pl)
-      {
-         active_ph = pot_ph; t_act_ph = t_pot_ph;
-         active_pl = EMPTY_VALUE; pot_ph = EMPTY_VALUE;
-      }
+      if(isPH && active_ph == EMPTY_VALUE) { active_ph = h[i]; t_act_ph = t[i]; }
+      if(isPL && active_pl == EMPTY_VALUE) { active_pl = l[i]; t_act_pl = t[i]; }
+      if(active_ph != EMPTY_VALUE && active_pl != EMPTY_VALUE) break;
    }
 
    out_ph   = active_ph;   out_pl   = active_pl;
@@ -437,7 +421,13 @@ void SE_DrawMatrixHUD(
    if(cfg.bias == "Long")  biasCol = SE_c_green;
    else if(cfg.bias == "Short") biasCol = SE_c_red;
    SE_DrawTableCell("r2c1", "Master Bias", start_x, start_y + (r*row_h), col1_w, row_h, SE_c_gray, clrWhite);
-   SE_DrawTableCell("r2c2", cfg.bias, start_x + col1_w, start_y + (r*row_h), col2_w, row_h, biasCol, clrWhite);
+   {
+      string bias_disp;
+      if(cfg.bias == "Long")       bias_disp = "\U0001F402 " + IntegerToString(cfg.confidence) + "% BULLISH";
+      else if(cfg.bias == "Short") bias_disp = "\U0001F43B " + IntegerToString(cfg.confidence) + "% BEARISH";
+      else                         bias_disp = "\u2696\ufe0f "  + IntegerToString(cfg.confidence) + "% NEUTRAL";
+      SE_DrawTableCell("r2c2", bias_disp, start_x + col1_w, start_y + (r*row_h), col2_w, row_h, biasCol, clrWhite);
+   }
 
    r = 3;
    SE_DrawTableCell("r3c1", "Invalidation (" + EnumToString(cfg.tf_boss) + ")", start_x, start_y + (r*row_h), col1_w, row_h, SE_c_gray, clrWhite);

@@ -430,6 +430,7 @@ export async function buildEaConfigForConnection(admin: AdminClient, connectionI
         max_position_size_lots: typeof prefs.maxPositionSizeLots === "number"
           ? prefs.maxPositionSizeLots
           : currentConfig.risk.max_position_size_lots,
+        min_confidence: readNumberPref(prefs, "minConfidence", "min_confidence") ?? currentConfig.risk.min_confidence,
       },
       sessions: buildSessionsPayload(prefs.sessions),
       execution: {
@@ -457,11 +458,19 @@ export async function buildEaConfigForConnection(admin: AdminClient, connectionI
           : currentConfig.execution.auto_rr2,
         close_eod: readBooleanPref(prefs, "closeEod", "close_eod") ?? currentConfig.execution.close_eod,
         eod_time: readStringPref(prefs, "eodTime", "eod_time") ?? currentConfig.execution.eod_time,
+        exit_on_flip: readBooleanPref(prefs, "exitOnFlip", "exit_on_flip") ?? currentConfig.execution.exit_on_flip,
       },
       visuals: {
         ...currentConfig.visuals,
         show_struct: readBooleanPref(prefs, "showStruct", "show_struct") ?? currentConfig.visuals.show_struct,
         smc_lookback: readNumberPref(prefs, "smcLookback", "smc_lookback") ?? currentConfig.visuals.smc_lookback,
+      },
+      discord: {
+        ...currentConfig.discord,
+        enable_discord: readBooleanPref(prefs, "enableDiscord", "enable_discord") ?? currentConfig.discord.enable_discord,
+        notify_on_sl: readBooleanPref(prefs, "notifyOnSL", "notify_on_sl") ?? currentConfig.discord.notify_on_sl,
+        notify_on_tp: readBooleanPref(prefs, "notifyOnTP", "notify_on_tp") ?? currentConfig.discord.notify_on_tp,
+        notify_daily: readBooleanPref(prefs, "notifyDaily", "notify_daily") ?? currentConfig.discord.notify_daily,
       },
     },
     connectionId,

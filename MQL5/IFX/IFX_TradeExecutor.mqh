@@ -162,6 +162,7 @@ void TE_AuditScanClosedTrades(const IFX_EaConfig &cfg)
 
 void TE_SendDiscordAlert(const IFX_EaConfig &cfg, const string msg)
 {
+   if(!cfg.enable_discord) return;   // master discord on/off switch
    if(StringLen(cfg.discord_url) == 0) return;
 
    uchar post_data[];
@@ -178,6 +179,7 @@ void TE_SendDiscordAlert(const IFX_EaConfig &cfg, const string msg)
 
 void TE_SendDailyReport(const IFX_EaConfig &cfg)
 {
+   if(!cfg.notify_daily) return;   // daily report notify flag
    if(!HistorySelect(StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 00:00"), TimeCurrent())) return;
 
    int wins = 0, losses = 0;
@@ -192,9 +194,12 @@ void TE_SendDailyReport(const IFX_EaConfig &cfg)
       long magic = HistoryDealGetInteger(ticket, DEAL_MAGIC);
       if(magic < cfg.base_magic || magic > cfg.base_magic + 50) continue;
 
-      double pnl = HistoryDealGetDouble(ticket, DEAL_PROFIT);
-      if(pnl > 0) { wins++;   gross_profit += pnl; }
-      else        { losses++; gross_loss   += pnl; }
+      double pnl = HistoryDealGetDouble(ticket, DEAL_PROFIT)
+                 + HistoryDealGetDouble(ticket, DEAL_COMMISSION)
+                 + HistoryDealGetDouble(ticket, DEAL_SWAP);
+      if(pnl > 2.0)       { wins++;   gross_profit += pnl; }
+      else if(pnl < -2.0) { losses++; gross_loss   += pnl; }
+      // else: break-even (\u00b1$2) — excluded from win/loss stats
    }
 
    double net = gross_profit + gross_loss;
@@ -294,12 +299,27 @@ bool TE_TryEntryLong(
       return false;
    }
 
-   if(cfg.min_rr > 0.0 && cfg.tp2 > 0.0)
+   // TP DIRECTION GUARD — sanitize TPs that landed on the wrong side of entry
+   if(cfg.tp1 > 0.0 && cfg.tp1 <= entry_price) { Print("⚠️ [TE] Long TP1 below entry — cleared"); cfg.tp1 = 0.0; }
+   if(cfg.tp2 > 0.0 && cfg.tp2 <= entry_price) { Print("⚠️ [TE] Long TP2 below entry — cleared"); cfg.tp2 = 0.0; }
+
+   // BROKER STOP LEVEL GUARD — TPs must clear the broker's minimum distance from entry
    {
-      double rr2 = (cfg.tp2 - entry_price) / sl_dist;
-      if(rr2 < cfg.min_rr)
+      long   stop_lvl = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+      long   spread   = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+      double min_dist = MathMax(stop_lvl, spread) * _Point;
+      if(cfg.tp1 > 0.0 && (cfg.tp1 - entry_price) <= min_dist) { Print("⚠️ [TE] Long TP1 too close — cleared"); cfg.tp1 = 0.0; }
+      if(cfg.tp2 > 0.0 && (cfg.tp2 - entry_price) <= min_dist) { Print("⚠️ [TE] Long TP2 too close — cleared"); cfg.tp2 = 0.0; }
+   }
+
+   // MINIMUM R:R GATE — TP1 is checked first; falls back to TP2 only when TP1 is not set
+   if(cfg.min_rr > 0.0)
+   {
+      double reward_dist = (cfg.tp1 > 0.0) ? (cfg.tp1 - entry_price)
+                         : (cfg.tp2 > 0.0) ? (cfg.tp2 - entry_price) : 0.0;
+      if(reward_dist > 0.0 && (reward_dist / sl_dist) < cfg.min_rr)
       {
-         Print("⚠️ [TE] Long RR too low (", DoubleToString(rr2, 2), " < ", cfg.min_rr, ")");
+         Print("⚠️ [TE] Long RR too low (", DoubleToString(reward_dist / sl_dist, 2), " < ", cfg.min_rr, ")");
          return false;
       }
    }
@@ -311,18 +331,40 @@ bool TE_TryEntryLong(
    if(lot_step <= 0.0) lot_step = 0.01;
    double min_lot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
 
-   bool success = false;
-   if(cfg.use_partial && total_lots >= min_lot * 2.0)
+   // MARGIN SAFETY CHECK
    {
-      // Split: partial exit at TP1, remainder at TP2
-      double lot1 = NormalizeDouble(total_lots * (cfg.tp1_pct / 100.0), 2);
-      double lot2 = NormalizeDouble(total_lots - lot1, 2);
-      lot1 = MathMax(min_lot, MathFloor(lot1 / lot_step) * lot_step);
-      lot2 = MathMax(min_lot, MathFloor(lot2 / lot_step) * lot_step);
+      double req_margin = 0.0;
+      if(OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, total_lots, entry_price, req_margin))
+      {
+         if(req_margin > AccountInfoDouble(ACCOUNT_FREE_MARGIN))
+         {
+            Print("⚠️ [TE] Long margin check failed — req=", req_margin, " free=", AccountInfoDouble(ACCOUNT_FREE_MARGIN));
+            return false;
+         }
+      }
+   }
 
-      bool r1 = TE_SendOrder(ORDER_TYPE_BUY, lot1, entry_price, sl_raw, cfg.tp1, cfg.base_magic,     "IFX-L1");
-      bool r2 = TE_SendOrder(ORDER_TYPE_BUY, lot2, entry_price, sl_raw, cfg.tp2, cfg.base_magic + 1, "IFX-L2");
-      success = r1 || r2;
+   bool success = false;
+   if(cfg.use_partial && total_lots >= min_lot * 2.0 && cfg.tp1 > 0.0)
+   {
+      // HARD-SPLIT ENFORCEMENT: ensure both legs meet min_lot after rounding
+      double lot1 = MathFloor(total_lots * (cfg.tp1_pct / 100.0) / lot_step) * lot_step;
+      double lot2 = MathFloor((total_lots - lot1) / lot_step) * lot_step;
+      if(lot1 < min_lot) { lot1 = min_lot; lot2 = MathFloor((total_lots - lot1) / lot_step) * lot_step; }
+      if(lot2 < min_lot) { lot2 = min_lot; lot1 = MathFloor((total_lots - lot2) / lot_step) * lot_step; }
+
+      if(lot1 >= min_lot && lot2 >= min_lot)
+      {
+         bool r1 = TE_SendOrder(ORDER_TYPE_BUY, lot1, entry_price, sl_raw, cfg.tp1, cfg.base_magic,     "IFX-L1");
+         bool r2 = TE_SendOrder(ORDER_TYPE_BUY, lot2, entry_price, sl_raw, cfg.tp2, cfg.base_magic + 1, "IFX-L2");
+         success = r1 || r2;
+      }
+      else
+      {
+         // Cannot split — fall through to single
+         total_lots = MathMax(min_lot, MathFloor(total_lots / lot_step) * lot_step);
+         success = TE_SendOrder(ORDER_TYPE_BUY, total_lots, entry_price, sl_raw, cfg.tp2, cfg.base_magic, "IFX-L");
+      }
    }
    else
    {
@@ -367,12 +409,27 @@ bool TE_TryEntryShort(
       return false;
    }
 
-   if(cfg.min_rr > 0.0 && cfg.tp2 > 0.0)
+   // TP DIRECTION GUARD — sanitize TPs that landed on the wrong side of entry
+   if(cfg.tp1 > 0.0 && cfg.tp1 >= entry_price) { Print("⚠️ [TE] Short TP1 above entry — cleared"); cfg.tp1 = 0.0; }
+   if(cfg.tp2 > 0.0 && cfg.tp2 >= entry_price) { Print("⚠️ [TE] Short TP2 above entry — cleared"); cfg.tp2 = 0.0; }
+
+   // BROKER STOP LEVEL GUARD — TPs must clear the broker's minimum distance from entry
    {
-      double rr2 = (entry_price - cfg.tp2) / sl_dist;
-      if(rr2 < cfg.min_rr)
+      long   stop_lvl = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+      long   spread   = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+      double min_dist = MathMax(stop_lvl, spread) * _Point;
+      if(cfg.tp1 > 0.0 && (entry_price - cfg.tp1) <= min_dist) { Print("⚠️ [TE] Short TP1 too close — cleared"); cfg.tp1 = 0.0; }
+      if(cfg.tp2 > 0.0 && (entry_price - cfg.tp2) <= min_dist) { Print("⚠️ [TE] Short TP2 too close — cleared"); cfg.tp2 = 0.0; }
+   }
+
+   // MINIMUM R:R GATE — TP1 is checked first; falls back to TP2 only when TP1 is not set
+   if(cfg.min_rr > 0.0)
+   {
+      double reward_dist = (cfg.tp1 > 0.0) ? (entry_price - cfg.tp1)
+                         : (cfg.tp2 > 0.0) ? (entry_price - cfg.tp2) : 0.0;
+      if(reward_dist > 0.0 && (reward_dist / sl_dist) < cfg.min_rr)
       {
-         Print("⚠️ [TE] Short RR too low (", DoubleToString(rr2, 2), " < ", cfg.min_rr, ")");
+         Print("⚠️ [TE] Short RR too low (", DoubleToString(reward_dist / sl_dist, 2), " < ", cfg.min_rr, ")");
          return false;
       }
    }
@@ -384,17 +441,40 @@ bool TE_TryEntryShort(
    if(lot_step <= 0.0) lot_step = 0.01;
    double min_lot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
 
-   bool success = false;
-   if(cfg.use_partial && total_lots >= min_lot * 2.0)
+   // MARGIN SAFETY CHECK
    {
-      double lot1 = NormalizeDouble(total_lots * (cfg.tp1_pct / 100.0), 2);
-      double lot2 = NormalizeDouble(total_lots - lot1, 2);
-      lot1 = MathMax(min_lot, MathFloor(lot1 / lot_step) * lot_step);
-      lot2 = MathMax(min_lot, MathFloor(lot2 / lot_step) * lot_step);
+      double req_margin = 0.0;
+      if(OrderCalcMargin(ORDER_TYPE_SELL, _Symbol, total_lots, entry_price, req_margin))
+      {
+         if(req_margin > AccountInfoDouble(ACCOUNT_FREE_MARGIN))
+         {
+            Print("⚠️ [TE] Short margin check failed — req=", req_margin, " free=", AccountInfoDouble(ACCOUNT_FREE_MARGIN));
+            return false;
+         }
+      }
+   }
 
-      bool r1 = TE_SendOrder(ORDER_TYPE_SELL, lot1, entry_price, sl_raw, cfg.tp1, cfg.base_magic,     "IFX-S1");
-      bool r2 = TE_SendOrder(ORDER_TYPE_SELL, lot2, entry_price, sl_raw, cfg.tp2, cfg.base_magic + 1, "IFX-S2");
-      success = r1 || r2;
+   bool success = false;
+   if(cfg.use_partial && total_lots >= min_lot * 2.0 && cfg.tp1 > 0.0)
+   {
+      // HARD-SPLIT ENFORCEMENT: ensure both legs meet min_lot after rounding
+      double lot1 = MathFloor(total_lots * (cfg.tp1_pct / 100.0) / lot_step) * lot_step;
+      double lot2 = MathFloor((total_lots - lot1) / lot_step) * lot_step;
+      if(lot1 < min_lot) { lot1 = min_lot; lot2 = MathFloor((total_lots - lot1) / lot_step) * lot_step; }
+      if(lot2 < min_lot) { lot2 = min_lot; lot1 = MathFloor((total_lots - lot2) / lot_step) * lot_step; }
+
+      if(lot1 >= min_lot && lot2 >= min_lot)
+      {
+         bool r1 = TE_SendOrder(ORDER_TYPE_SELL, lot1, entry_price, sl_raw, cfg.tp1, cfg.base_magic,     "IFX-S1");
+         bool r2 = TE_SendOrder(ORDER_TYPE_SELL, lot2, entry_price, sl_raw, cfg.tp2, cfg.base_magic + 1, "IFX-S2");
+         success = r1 || r2;
+      }
+      else
+      {
+         // Cannot split — fall through to single
+         total_lots = MathMax(min_lot, MathFloor(total_lots / lot_step) * lot_step);
+         success = TE_SendOrder(ORDER_TYPE_SELL, total_lots, entry_price, sl_raw, cfg.tp2, cfg.base_magic, "IFX-S");
+      }
    }
    else
    {
@@ -444,9 +524,9 @@ void TE_ManageOpenPositions(const IFX_EaConfig &cfg)
       if(magic < cfg.base_magic || magic > cfg.base_magic + 50) continue;
 
       double tp = PositionGetDouble(ticket, POSITION_TP);
-      if(cfg.tp1 > 0.0 && tp == cfg.tp1)
+      if(cfg.tp1 > 0.0 && MathAbs(tp - cfg.tp1) < _Point * 10)
          tp1_exists = true;
-      if(cfg.tp2 > 0.0 && tp == cfg.tp2)
+      if(cfg.tp2 > 0.0 && MathAbs(tp - cfg.tp2) < _Point * 10)
          tp2_exists = true;
       total_open_lots += PositionGetDouble(ticket, POSITION_VOLUME);
    }
@@ -454,7 +534,8 @@ void TE_ManageOpenPositions(const IFX_EaConfig &cfg)
    if(cfg.use_partial && cfg.tp1 > 0.0 && tp2_exists && !tp1_exists && !te_tp1_hit)
    {
       te_tp1_hit = true;
-      TE_SendDiscordAlert(cfg, "✅ VIP PROFIT SECURED | Broker successfully executed TP1 split-order.");
+      if(cfg.notify_on_tp)
+         TE_SendDiscordAlert(cfg, "✅ VIP PROFIT SECURED | Broker successfully executed TP1 split-order.");
    }
 
    bool trigger_be = false;
@@ -534,9 +615,11 @@ void TE_ManageOpenPositions(const IFX_EaConfig &cfg)
          double new_sl = NormalizeDouble(entry, _Digits);
          if(MathAbs(sl - new_sl) > _Point * 2)
          {
-            long stop_level_points = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+            long stop_level_points  = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
             long freeze_level_points = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
-            double required_buffer = MathMax(stop_level_points, freeze_level_points) * _Point;
+            long spread_points       = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+            long min_points          = MathMax(MathMax(stop_level_points, freeze_level_points), MathMax(spread_points, 10));
+            double required_buffer   = min_points * _Point;
             double current_price = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
             if(MathAbs(current_price - new_sl) > required_buffer && (tp == 0.0 || MathAbs(current_price - tp) > required_buffer))

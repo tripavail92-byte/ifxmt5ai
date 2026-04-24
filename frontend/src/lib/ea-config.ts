@@ -54,6 +54,8 @@ export type EaConfigJson = {
     strict_risk: boolean;
     /** Minimum R:R to accept a setup — i_min_rr */
     min_rr: number;
+    /** Minimum AI confidence score (0 = disabled) — i_minConfidence */
+    min_confidence: number;
     max_open_trades: number;
     max_daily_loss_usd: number;
     max_daily_trades: number;
@@ -67,8 +69,10 @@ export type EaConfigJson = {
   /** Trade execution behaviour — maps directly to EA group 5 inputs */
   execution: {
     allow_market_orders: boolean;
-    /** SL spread multiplier — i_slPadMult (default 2.0) */
+    /** SL spread multiplier — i_slPadMult (default 0.2) */
     sl_pad_mult: number;
+    /** Close conflicting position when bias flips — i_exitOnFlip */
+    exit_on_flip: boolean;
     /** Use MTF structure anchor for SL — i_use_mtf_sl */
     use_mtf_sl: boolean;
     /** Enable SL cooldown after a loss — i_useDeadSL */
@@ -105,6 +109,14 @@ export type EaConfigJson = {
   /** Discord webhook integration */
   discord: {
     webhook_url: string;
+    /** Master enable/disable Discord notifications — i_enableDiscord */
+    enable_discord: boolean;
+    /** Send alert when SL is hit — i_notifyOnSL */
+    notify_on_sl: boolean;
+    /** Send alert when TP is hit — i_notifyOnTP */
+    notify_on_tp: boolean;
+    /** Send daily P&L summary — i_notifyDaily */
+    notify_daily: boolean;
     /** Hour (0-23) to send daily report — i_reportHour */
     report_hour: number;
     /** Minute (0-59) to send daily report — i_reportMin */
@@ -199,7 +211,7 @@ export function buildDefaultEaConfig(
       mode: "fractal",
       timeframe: "M1",
       boss_timeframe: "H1",
-      sl_timeframe: "M15",
+      sl_timeframe: "M5",
       be_timeframe: "M10",
       pivot_window: 5,
       bars_to_scan: 120,
@@ -208,6 +220,7 @@ export function buildDefaultEaConfig(
       risk_percent: 2,
       strict_risk: false,
       min_rr: 1.0,
+      min_confidence: 70,
       max_open_trades: 1,
       max_daily_loss_usd: 0,
       max_daily_trades: 3,
@@ -220,7 +233,8 @@ export function buildDefaultEaConfig(
     },
     execution: {
       allow_market_orders: true,
-      sl_pad_mult: 2.0,
+      sl_pad_mult: 0.2,
+      exit_on_flip: true,
       use_mtf_sl: true,
       use_dead_sl: true,
       sl_cooldown_min: 30,
@@ -241,7 +255,11 @@ export function buildDefaultEaConfig(
     },
     discord: {
       webhook_url: "",
-      report_hour: 22,
+      enable_discord: true,
+      notify_on_sl: false,
+      notify_on_tp: true,
+      notify_daily: true,
+      report_hour: 20,
       report_min: 0,
     },
     telemetry: {
@@ -322,6 +340,7 @@ export function normalizeEaConfig(
       risk_percent: asNumber(risk.risk_percent, defaults.risk.risk_percent),
       strict_risk: asBoolean(risk.strict_risk, defaults.risk.strict_risk),
       min_rr: asNumber(risk.min_rr, defaults.risk.min_rr),
+      min_confidence: asNumber(risk.min_confidence, defaults.risk.min_confidence),
       max_open_trades: asNumber(risk.max_open_trades, defaults.risk.max_open_trades),
       max_daily_loss_usd: asNumber(risk.max_daily_loss_usd, defaults.risk.max_daily_loss_usd),
       max_daily_trades: asNumber(risk.max_daily_trades, defaults.risk.max_daily_trades),
@@ -347,6 +366,7 @@ export function normalizeEaConfig(
     execution: {
       allow_market_orders: asBoolean(execution.allow_market_orders, defaults.execution.allow_market_orders),
       sl_pad_mult: asNumber(execution.sl_pad_mult, defaults.execution.sl_pad_mult),
+      exit_on_flip: asBoolean(execution.exit_on_flip, defaults.execution.exit_on_flip),
       use_mtf_sl: asBoolean(execution.use_mtf_sl, defaults.execution.use_mtf_sl),
       use_dead_sl: asBoolean(execution.use_dead_sl, defaults.execution.use_dead_sl),
       sl_cooldown_min: asNumber(execution.sl_cooldown_min, defaults.execution.sl_cooldown_min),
@@ -367,6 +387,10 @@ export function normalizeEaConfig(
     },
     discord: {
       webhook_url: asString(discord.webhook_url, defaults.discord.webhook_url),
+      enable_discord: asBoolean(discord.enable_discord, defaults.discord.enable_discord),
+      notify_on_sl: asBoolean(discord.notify_on_sl, defaults.discord.notify_on_sl),
+      notify_on_tp: asBoolean(discord.notify_on_tp, defaults.discord.notify_on_tp),
+      notify_daily: asBoolean(discord.notify_daily, defaults.discord.notify_daily),
       report_hour: asNumber(discord.report_hour, defaults.discord.report_hour),
       report_min: asNumber(discord.report_min, defaults.discord.report_min),
     },

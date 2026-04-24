@@ -44,6 +44,7 @@ struct IFX_EaConfig
    double tp2;
    double atr_zone_pct;
    double sl_pad_mult;
+   int    confidence;    // AI confidence score 0-100 (70 = default)
 
    // ----- Sessions -----
    bool   use_asia;
@@ -96,6 +97,13 @@ struct IFX_EaConfig
    string discord_url;
    int    report_hour;
    int    report_min;
+   bool   enable_discord;   // master on/off for all Discord alerts
+   bool   notify_on_sl;     // post alert when SL / risk-protection fires
+   bool   notify_on_tp;     // post alert when TP1 profit hit
+   bool   notify_daily;     // post daily performance report
+
+   // ----- Trade Control -----
+   bool   exit_on_flip;     // close trade automatically if AI bias flips
 
    // ----- Symbols (relay list from cloud) -----
    string symbols_csv;   // comma-separated base names e.g. "XAUUSD,EURUSD,GBPUSD"
@@ -123,6 +131,18 @@ double CFG_ParseValue(const string txt, const string keyword, double fallback)
    if(pos < 0) return fallback;
 
    int start = pos + StringLen(up_kw);
+
+   // JSON nested-array fix: for TARGET 1/2 and INVALIDATION keys, jump past the
+   // "PRICE POINT" label to avoid capturing stray numbers from condition notes
+   // (e.g. "if price closes above 2680") before the actual level value.
+   if(StringFind(up_kw, "TARGET 1")    >= 0 || StringFind(up_kw, "TARGET 2")    >= 0 ||
+      StringFind(up_kw, "INVALIDATION") >= 0 || StringFind(up_kw, "COUNTER")    >= 0)
+   {
+      int price_pos = StringFind(up_txt, "PRICE POINT", start);
+      if(price_pos > start)
+         start = price_pos + 11;  // skip past "PRICE POINT" (len=11)
+   }
+
    string num_str = "";
    bool found_digit = false;
 
@@ -263,6 +283,31 @@ ENUM_TIMEFRAMES CFG_ParseTimeframe(const string s, ENUM_TIMEFRAMES fallback)
 }
 
 //==========================================================================
+// CFG_GetOptimalAtrPct — Symbol DNA Registry (port of GetOptimalATRPercentage)
+// Returns the best ATR zone thickness % for the given symbol class.
+// If the user manually changed atr_zone_pct from the default 10.0, honours it.
+// Gold/XAU = 18%, Oil = 16%, Indices = 15%, FX pairs = 12.5%, else 10%.
+//==========================================================================
+double CFG_GetOptimalAtrPct(double configured_pct, const string sym)
+{
+   // User overrode the default — respect their choice
+   if(MathAbs(configured_pct - 10.0) > 0.01) return configured_pct;
+
+   string s = sym;
+   StringToUpper(s);
+
+   if(StringFind(s, "XAU")  >= 0 || StringFind(s, "GOLD") >= 0) return 18.0;
+   if(StringFind(s, "OIL")  >= 0 || StringFind(s, "WTI")  >= 0 ||
+      StringFind(s, "BRN")  >= 0 || StringFind(s, "LCO")  >= 0) return 16.0;
+   if(StringFind(s, "30")   >= 0 || StringFind(s, "100")  >= 0 ||
+      StringFind(s, "500")  >= 0 || StringFind(s, "DJI")  >= 0 ||
+      StringFind(s, "NAS")  >= 0 || StringFind(s, "SPX")  >= 0 ||
+      StringFind(s, "GER")  >= 0 || StringFind(s, "DAX")  >= 0) return 15.0;
+   if(StringLen(s) >= 6) return 12.5;   // typical FX pair length
+   return 10.0;
+}
+
+//==========================================================================
 // CFG_ParseFromInputs — fill struct from EA input parameters
 // Called first. Sets all fields to their input-default values.
 //==========================================================================
@@ -306,7 +351,12 @@ void CFG_ParseFromInputs(
    int             smc_lookback,
    string          discord_url,
    int             report_hour,
-   int             report_min
+   int             report_min,
+   bool            enable_discord,
+   bool            notify_on_sl,
+   bool            notify_on_tp,
+   bool            notify_daily,
+   bool            exit_on_flip
 )
 {
    cfg.connection_id  = connection_id;
@@ -322,6 +372,7 @@ void CFG_ParseFromInputs(
    cfg.tp2            = manual_tp2;
    cfg.atr_zone_pct   = atr_pct;
    cfg.sl_pad_mult    = sl_pad_mult;
+   cfg.confidence     = 70;   // default until AI text provides a score
 
    cfg.use_asia       = use_asia;
    cfg.asia_start     = asia_start;
@@ -366,6 +417,11 @@ void CFG_ParseFromInputs(
    cfg.discord_url    = discord_url;
    cfg.report_hour    = report_hour;
    cfg.report_min     = report_min;
+   cfg.enable_discord = enable_discord;
+   cfg.notify_on_sl   = notify_on_sl;
+   cfg.notify_on_tp   = notify_on_tp;
+   cfg.notify_daily   = notify_daily;
+   cfg.exit_on_flip   = exit_on_flip;
 
    cfg.symbols_csv    = "";
 
@@ -385,28 +441,58 @@ void CFG_ApplyAiText(IFX_EaConfig &cfg, const string ai_text)
    string up = ai_text;
    StringToUpper(up);
 
-   // Bias
-   if(StringFind(up, "BULLISH") >= 0 || StringFind(up, "LONG") >= 0)
-      cfg.bias = "Long";
-   else if(StringFind(up, "BEARISH") >= 0 || StringFind(up, "SHORT") >= 0)
-      cfg.bias = "Short";
-   // else keep existing bias
+   // Bias — try JSON key "BIAS":"..." first, fall back to keyword scan.
+   // This handles the structured LLM JSON output format exactly.
+   {
+      string bias_key_val = CFG_JsonString(ai_text, "BIAS", "");
+      if(StringLen(bias_key_val) == 0)
+         bias_key_val = CFG_JsonString(ai_text, "bias", "");   // lowercase fallback
 
-   // Levels
+      if(StringLen(bias_key_val) > 0)
+      {
+         StringToUpper(bias_key_val);
+         if(StringFind(bias_key_val, "BULLISH") >= 0 || StringFind(bias_key_val, "LONG")  >= 0)
+            cfg.bias = "Long";
+         else if(StringFind(bias_key_val, "BEARISH") >= 0 || StringFind(bias_key_val, "SHORT") >= 0)
+            cfg.bias = "Short";
+         else
+            cfg.bias = "Neutral";
+      }
+      else
+      {
+         // Plain-text fallback (e.g. "Bullish bias expected")
+         if(StringFind(up, "BULLISH") >= 0 || StringFind(up, "LONG") >= 0)
+            cfg.bias = "Long";
+         else if(StringFind(up, "BEARISH") >= 0 || StringFind(up, "SHORT") >= 0)
+            cfg.bias = "Short";
+         // else keep existing bias
+      }
+   }
+
+   // Levels — try specific JSON keys first, fall back to generic keywords
    double v;
-   v = CFG_ParseValue(ai_text, "PIVOT", 0.0);
+
+   // Pivot: "ENTRY PIVOT ZONE" is the structured LLM key; "PIVOT" is the legacy keyword
+   v = CFG_ParseValue(ai_text, "ENTRY PIVOT ZONE", 0.0);
+   if(v == 0.0) v = CFG_ParseValue(ai_text, "PIVOT", 0.0);
    if(v > 0.0) cfg.pivot = v;
 
+   // TP1: "TARGET 1" (with PRICE POINT fix in CFG_ParseValue), fall back to "TP1"
    v = CFG_ParseValue(ai_text, "TARGET 1", 0.0);
    if(v == 0.0) v = CFG_ParseValue(ai_text, "TP1", 0.0);
    if(v > 0.0) cfg.tp1 = v;
 
+   // TP2: "TARGET 2" (with PRICE POINT fix), fall back to "TP2"
    v = CFG_ParseValue(ai_text, "TARGET 2", 0.0);
    if(v == 0.0) v = CFG_ParseValue(ai_text, "TP2", 0.0);
    if(v > 0.0) cfg.tp2 = v;
 
    cfg.tp1 = NormalizeDouble(cfg.tp1, _Digits);
    cfg.tp2 = NormalizeDouble(cfg.tp2, _Digits);
+
+   // Confidence score (0-100, default 70)
+   int conf = (int)CFG_ParseValue(ai_text, "CONFIDENCE SCORE", 70.0);
+   if(conf > 0 && conf <= 100) cfg.confidence = conf;
 }
 
 //==========================================================================

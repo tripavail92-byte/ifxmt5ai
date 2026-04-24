@@ -37,6 +37,17 @@ export type TerminalPreferences = {
   showEntryZones: boolean;
   showTPZones: boolean;
   stopMode: StopMode;
+  // EA execution settings
+  slPadMult: number;
+  minConfidence: number;
+  exitOnFlip: boolean;
+  useDeadSl: boolean;
+  slCooldownMin: number;
+  // Discord notification flags
+  enableDiscord: boolean;
+  notifyOnSL: boolean;
+  notifyOnTP: boolean;
+  notifyDaily: boolean;
 };
 
 export type PersistedTerminalSettings = {

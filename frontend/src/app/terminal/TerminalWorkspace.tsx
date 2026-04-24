@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, useTransition } from "react";
 import {
   AlertTriangle,
+  Bell,
   Bot,
   Calendar,
   CheckCircle2,
@@ -568,13 +569,21 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
   const [tp1, setTp1] = useState<string>("");
   const [tp2, setTp2] = useState<string>("");
   const [atrZonePct, setAtrZonePct] = useState<number>(ZONE_DEFAULT_FALLBACK);
-  const [slPadMult, setSlPadMult] = useState<number>(2.0);
+  const [slPadMult, setSlPadMult] = useState<number>(0.2);
   const [useAutoRR, setUseAutoRR] = useState(false);
   const [autoRR1, setAutoRR1] = useState<number>(1.0);
   const [autoRR2, setAutoRR2] = useState<number>(2.0);
   const [aiText, setAiText] = useState<string>("");
   const [showStruct, setShowStruct] = useState(false);
   const [smcLookback, setSmcLookback] = useState(400);
+  const [minConfidence, setMinConfidence] = useState<number>(70);
+  const [exitOnFlip, setExitOnFlip] = useState(true);
+  const [useDeadSl, setUseDeadSl] = useState(true);
+  const [slCooldownMin, setSlCooldownMin] = useState<number>(30);
+  const [enableDiscord, setEnableDiscord] = useState(true);
+  const [notifyOnSL, setNotifyOnSL] = useState(false);
+  const [notifyOnTP, setNotifyOnTP] = useState(true);
+  const [notifyDaily, setNotifyDaily] = useState(true);
   const [visualsSaving, setVisualsSaving] = useState(false);
   const [showEntryZones, setShowEntryZones] = useState(true);
   const [showTPZones, setShowTPZones] = useState(true);
@@ -911,6 +920,15 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     if (typeof mergedPrefs.showEntryZones === "boolean") setShowEntryZones(mergedPrefs.showEntryZones);
     if (typeof mergedPrefs.showTPZones === "boolean") setShowTPZones(mergedPrefs.showTPZones);
     setStopMode(normalizeStopMode(mergedPrefs.stopMode));
+    if (typeof mergedPrefs.slPadMult === "number") setSlPadMult(mergedPrefs.slPadMult);
+    if (typeof mergedPrefs.minConfidence === "number") setMinConfidence(mergedPrefs.minConfidence);
+    if (typeof mergedPrefs.exitOnFlip === "boolean") setExitOnFlip(mergedPrefs.exitOnFlip);
+    if (typeof mergedPrefs.useDeadSl === "boolean") setUseDeadSl(mergedPrefs.useDeadSl);
+    if (typeof mergedPrefs.slCooldownMin === "number") setSlCooldownMin(mergedPrefs.slCooldownMin);
+    if (typeof mergedPrefs.enableDiscord === "boolean") setEnableDiscord(mergedPrefs.enableDiscord);
+    if (typeof mergedPrefs.notifyOnSL === "boolean") setNotifyOnSL(mergedPrefs.notifyOnSL);
+    if (typeof mergedPrefs.notifyOnTP === "boolean") setNotifyOnTP(mergedPrefs.notifyOnTP);
+    if (typeof mergedPrefs.notifyDaily === "boolean") setNotifyDaily(mergedPrefs.notifyDaily);
     if (mergedPrefs.sessions) {
       setSessions({
         london: Boolean(mergedPrefs.sessions.london),
@@ -955,6 +973,15 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       showEntryZones,
       showTPZones,
       stopMode,
+      slPadMult,
+      minConfidence,
+      exitOnFlip,
+      useDeadSl,
+      slCooldownMin,
+      enableDiscord,
+      notifyOnSL,
+      notifyOnTP,
+      notifyDaily,
     });
   }, [
     dailyLossLimitUsd,
@@ -973,6 +1000,15 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     showEntryZones,
     showTPZones,
     stopMode,
+    slPadMult,
+    minConfidence,
+    exitOnFlip,
+    useDeadSl,
+    slCooldownMin,
+    enableDiscord,
+    notifyOnSL,
+    notifyOnTP,
+    notifyDaily,
   ]);
 
   useEffect(() => {
@@ -1028,6 +1064,15 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
           showEntryZones,
           showTPZones,
           stopMode,
+          slPadMult,
+          minConfidence,
+          exitOnFlip,
+          useDeadSl,
+          slCooldownMin,
+          enableDiscord,
+          notifyOnSL,
+          notifyOnTP,
+          notifyDaily,
         },
         termsVersion: TERMS_VERSION,
         termsAccepted,
@@ -1063,6 +1108,15 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     showEntryZones,
     showTPZones,
     stopMode,
+    slPadMult,
+    minConfidence,
+    exitOnFlip,
+    useDeadSl,
+    slCooldownMin,
+    enableDiscord,
+    notifyOnSL,
+    notifyOnTP,
+    notifyDaily,
     isAuthenticated,
     termsAccepted,
   ]);
@@ -1189,7 +1243,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       setTp1(setup.tp1 != null ? String(setup.tp1) : "");
       setTp2(setup.tp2 != null ? String(setup.tp2) : "");
       setAtrZonePct(Number(setup.atr_zone_pct ?? setup.zone_percent) || getZoneDefault(selectedSymbol));
-      setSlPadMult(Number(setup.sl_pad_mult) || 2.0);
+      setSlPadMult(Number(setup.sl_pad_mult) || 0.2);
       setUseAutoRR(false);
       setAutoRR1(1.0);
       setAutoRR2(2.0);
@@ -1205,7 +1259,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     setTp1("");
     setTp2("");
     setAtrZonePct(typeof draft.zonePercent === "number" ? draft.zonePercent : getZoneDefault(selectedSymbol));
-    setSlPadMult(2.0);
+    setSlPadMult(0.2);
     setAiSensitivity(typeof draft.aiSensitivity === "number" ? draft.aiSensitivity : 5);
     setActiveSetupState(null);
   }, [selectedSymbol, setupsBySymbol]);
@@ -2550,7 +2604,35 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                   <input type="range" min={1} max={20} step={0.5} value={riskRewardRatio} onChange={(e) => setRiskRewardRatio(parseFloat(e.target.value))} className="w-full accent-emerald-500" />
                 </div>
 
-                {/* Account-level guardrails */}
+                <div className="rounded-lg bg-[#0f0f0f] p-3 space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-gray-400">Min AI Confidence</span>
+                    <span className="font-semibold text-purple-300">{minConfidence === 0 ? "Off" : `${minConfidence}%`}</span>
+                  </div>
+                  <input type="range" min={0} max={100} step={5} value={minConfidence} onChange={(e) => setMinConfidence(parseInt(e.target.value, 10))} className="w-full accent-purple-500" />
+                  <p className="text-[11px] text-gray-600 leading-snug">EA skips setups where AI confidence is below this threshold. 0 = disabled.</p>
+                </div>
+
+                {/* EA Execution Flags */}
+                <div className="space-y-2 pt-1">
+                  <p className="text-[10px] uppercase tracking-[0.18em] text-gray-600">EA Execution Flags</p>
+                  <label className="flex items-center justify-between rounded-lg bg-[#0f0f0f] px-3 py-2 text-xs text-gray-300">
+                    <span>Exit on Bias Flip</span>
+                    <input type="checkbox" checked={exitOnFlip} onChange={(e) => setExitOnFlip(e.target.checked)} className="accent-orange-500" />
+                  </label>
+                  <label className="flex items-center justify-between rounded-lg bg-[#0f0f0f] px-3 py-2 text-xs text-gray-300">
+                    <span>Dead SL (loss cooldown)</span>
+                    <input type="checkbox" checked={useDeadSl} onChange={(e) => setUseDeadSl(e.target.checked)} className="accent-orange-500" />
+                  </label>
+                  {useDeadSl && (
+                    <div>
+                      <Label className="mb-1 block text-[10px] uppercase tracking-wide text-gray-500">SL Cooldown (min)</Label>
+                      <Input type="number" step="5" min="0" max="1440" value={slCooldownMin} onChange={(e) => setSlCooldownMin(parseInt(e.target.value, 10) || 0)} className="border-[#2b2b2b] bg-[#0f0f0f] text-xs text-white h-8" />
+                    </div>
+                  )}
+                </div>
+
+                {/* Account-level guardrails */
                 <div className="space-y-2 pt-1">
                   <p className="text-[10px] uppercase tracking-[0.18em] text-gray-600">Account Guardrails <span className="text-gray-700">(0 = disabled)</span></p>
                   <div className="grid grid-cols-2 gap-2">
@@ -2674,6 +2756,36 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                   <SessionToggle label="Asia" checked={sessions.asia} onChange={(checked) => setSessions((prev) => ({ ...prev, asia: checked }))} />
                 </div>
                 <p className="leading-relaxed text-gray-500">Sessions are enforced server-side before every job insert. If none are enabled, execution is blocked.</p>
+              </div>
+            </section>
+
+            {/* Discord notifications */}
+            <section className="space-y-3">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-gray-500">
+                <Bell className="size-4" /> Discord Notifications
+              </div>
+              <div className="rounded-xl border border-[#202020] bg-[#151515] p-3 space-y-2 text-xs">
+                <label className="flex items-center justify-between rounded-lg bg-[#0f0f0f] px-3 py-2 text-gray-300">
+                  <span>Enable Discord Alerts</span>
+                  <input type="checkbox" checked={enableDiscord} onChange={(e) => setEnableDiscord(e.target.checked)} className="accent-indigo-500" />
+                </label>
+                {enableDiscord && (
+                  <>
+                    <label className="flex items-center justify-between rounded-lg bg-[#0f0f0f] px-3 py-2 text-gray-300">
+                      <span>Notify on SL Hit</span>
+                      <input type="checkbox" checked={notifyOnSL} onChange={(e) => setNotifyOnSL(e.target.checked)} className="accent-indigo-500" />
+                    </label>
+                    <label className="flex items-center justify-between rounded-lg bg-[#0f0f0f] px-3 py-2 text-gray-300">
+                      <span>Notify on TP Hit</span>
+                      <input type="checkbox" checked={notifyOnTP} onChange={(e) => setNotifyOnTP(e.target.checked)} className="accent-indigo-500" />
+                    </label>
+                    <label className="flex items-center justify-between rounded-lg bg-[#0f0f0f] px-3 py-2 text-gray-300">
+                      <span>Daily P&amp;L Summary</span>
+                      <input type="checkbox" checked={notifyDaily} onChange={(e) => setNotifyDaily(e.target.checked)} className="accent-indigo-500" />
+                    </label>
+                  </>
+                )}
+                <p className="leading-relaxed text-gray-500">Set the Discord webhook URL in the EA inputs on MT5. These toggles control which events trigger a notification.</p>
               </div>
             </section>
 

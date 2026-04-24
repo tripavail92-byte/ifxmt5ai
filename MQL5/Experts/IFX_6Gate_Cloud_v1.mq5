@@ -40,7 +40,7 @@ input double             i_pivot        = 0.0;              // Manual Pivot Pric
 input double             i_tp1          = 0.0;              // Manual TP1 Price
 input double             i_tp2          = 0.0;              // Manual TP2 Price
 input double             i_atrPct       = 10.0;             // Zone Thickness (% of Daily ATR)
-input double             i_slPadMult    = 2.0;              // SL Pad Multiplier (× point)
+input double             i_slPadMult    = 0.2;              // SL Pad Multiplier (× spread, 0.2 = 20% of one spread)
 
 //==========================================================================
 // INPUTS — SESSIONS
@@ -63,7 +63,7 @@ input group              "=== Timeframes ==="
 input ENUM_TIMEFRAMES    i_tfEngine     = PERIOD_M1;        // Engine / Entry Timeframe
 input ENUM_TIMEFRAMES    i_tfBoss       = PERIOD_H1;        // Boss / Invalidation Timeframe
 input bool               i_useMtfSL    = true;              // Enable MTF SL Trailing
-input ENUM_TIMEFRAMES    i_tfSL         = PERIOD_M15;       // SL Trailing Timeframe
+input ENUM_TIMEFRAMES    i_tfSL         = PERIOD_M5;        // SL Trailing Timeframe
 input ENUM_TIMEFRAMES    i_tfBE         = PERIOD_M10;       // Break-Even Reference Timeframe
 
 //==========================================================================
@@ -72,8 +72,9 @@ input ENUM_TIMEFRAMES    i_tfBE         = PERIOD_M10;       // Break-Even Refere
 input group              "=== Risk ==="
 input double             i_riskPct      = 2.0;              // Risk Per Trade (%)
 input bool               i_strictRisk   = false;            // Strict Risk (use equity, not balance)
-input double             i_minRR        = 1.5;              // Minimum R:R Ratio (0 = disabled)
+input double             i_minRR        = 1.0;              // Minimum R:R Ratio (0 = disabled)
 input int                i_maxTrades    = 3;                // Max Daily Trades
+input int                i_minConfidence = 70;              // Minimum AI Confidence to Trade (0 = disabled)
 
 //==========================================================================
 // INPUTS — TRADE MANAGEMENT
@@ -92,6 +93,7 @@ input bool               i_useBE        = true;             // Enable Break-Even
 input bool               i_beAfterTP1   = true;             // Move BE After TP1 Hit
 input bool               i_useEOD       = true;             // Close All at EOD
 input string             i_eodTime      = "23:50";          // EOD Cutoff Time (server)
+input bool               i_exitOnFlip   = true;             // Close Trade if AI Bias Flips
 
 //==========================================================================
 // INPUTS — VISUALS & DISCORD
@@ -101,8 +103,12 @@ input bool               i_showStruct   = false;            // Draw SMC Structur
 input int                i_smcLookback  = 400;              // SMC Lookback (bars)
 
 input group              "=== Discord ==="
+input bool               i_enableDiscord = true;            // Enable Discord Notifications
+input bool               i_notifyOnSL    = false;           // Notify on SL / Risk Protection
+input bool               i_notifyOnTP    = true;            // Notify on TP Profit Hit
+input bool               i_notifyDaily   = true;            // Post Daily Performance Report
 input string             i_discordUrl   = "";               // Discord Webhook URL
-input int                i_reportHour   = 22;               // Daily Report Hour
+input int                i_reportHour   = 20;               // Daily Report Hour
 input int                i_reportMin    = 0;                // Daily Report Minute
 
 //==========================================================================
@@ -151,6 +157,7 @@ bool         s_is_in_purgatory        = false;
 long         s_cmd_cursor             = 0;    // highest sequence_no acked so far
 datetime     s_last_cmd_poll          = 0;    // last command poll attempt
 datetime     s_last_hud_push          = 0;    // last live-state POST attempt
+datetime     s_last_entry_bar         = 0;    // bar-change guard: last bar we attempted entry on
 
 // Phase 5: trade audit
 datetime     s_last_audit_check       = 0;    // last closed-trade scan
@@ -248,6 +255,27 @@ void CMD_PollAndExecute(const string frontend_url, const string conn_id, const s
             }
             else if(cmd_type == "arm_trade" || cmd_type == "set_setup")
             {
+               // EXIT ON FLIP — if a conflicting position is open and exit_on_flip is on,
+               // close it first so the new setup can be applied immediately.
+               if(g_cfg.exit_on_flip && RE_CountOpenPositions(g_cfg) > 0)
+               {
+                  int flip_pay = StringFind(cmd_json, "\"payload\"");
+                  if(flip_pay >= 0)
+                  {
+                     string flip_bias_str = RC_JsonExtractStringAfter(cmd_json, flip_pay, "bias");
+                     StringToUpper(flip_bias_str);
+                     string flip_new_bias = "";
+                     if(flip_bias_str == "BUY"  || flip_bias_str == "LONG")  flip_new_bias = "Long";
+                     if(flip_bias_str == "SELL" || flip_bias_str == "SHORT") flip_new_bias = "Short";
+                     // Only close if new bias is confirmed and is the opposite direction
+                     if(StringLen(flip_new_bias) > 0 && flip_new_bias != g_cfg.bias)
+                     {
+                        TE_CloseAllPositions(g_cfg);
+                        Print("\U0001F6D1 [CMD] exit_on_flip \u2014 conflicting position closed before applying new bias=", flip_new_bias);
+                     }
+                  }
+               }
+
                // Extract payload fields for pivot/tp1/tp2/bias — update live config
                // Only applied when no position is open (safe to change setup mid-session)
                if(RE_CountOpenPositions(g_cfg) == 0)
@@ -294,6 +322,19 @@ void CMD_PollAndExecute(const string frontend_url, const string conn_id, const s
                      }
 
                      RecalcZone();
+
+                     // ── Ghost Memory save — persist setup so it survives TF changes / restarts
+                     // Written in a format CFG_ApplyAiText can re-read (ENTRY PIVOT ZONE + PRICE POINT keywords)
+                     {
+                        string _ghost = "BIAS: " + g_cfg.bias
+                           + "\nENTRY PIVOT ZONE PRICE POINT " + DoubleToString(g_cfg.pivot, _Digits)
+                           + "\nTARGET 1 PRICE POINT " + DoubleToString(g_cfg.tp1, _Digits)
+                           + "\nTARGET 2 PRICE POINT " + DoubleToString(g_cfg.tp2, _Digits);
+                        int _gh = FileOpen("IFX_Matrix_" + _Symbol + ".json",
+                                           FILE_WRITE|FILE_TXT|FILE_COMMON);
+                        if(_gh != INVALID_HANDLE) { FileWriteString(_gh, _ghost); FileClose(_gh); }
+                     }
+
                      Print("\U0001F3AF [CMD] arm_trade applied. bias=", g_cfg.bias,
                            " pivot=", DoubleToString(g_cfg.pivot, _Digits),
                            " use_auto_rr=", g_cfg.use_auto_rr,
@@ -410,9 +451,20 @@ void RecalcZone()
       if(CopyBuffer(s_atr_handle, 0, 1, 1, buf) == 1)
          atr_val = buf[0];
    }
-   if(atr_val <= 0.0) atr_val = g_cfg.pivot * 0.005;  // fallback 0.5% of price
+   if(atr_val <= 0.0)
+   {
+      // H–L range fallback: more accurate than static % of price
+      double h_arr[], l_arr[];
+      if(CopyHigh(_Symbol, g_cfg.tf_engine, 0, 100, h_arr) > 0 &&
+         CopyLow (_Symbol, g_cfg.tf_engine, 0, 100, l_arr) > 0)
+         atr_val = h_arr[ArrayMaximum(h_arr)] - l_arr[ArrayMinimum(l_arr)];
+      else
+         atr_val = g_cfg.pivot * 0.005;  // last resort: 0.5% of price
+   }
 
-   double zone_thick = atr_val * (g_cfg.atr_zone_pct / 100.0);
+   // Use symbol-class-aware ATR percentage (Gold=18%, Oil=16%, Indices=15%, FX=12.5%)
+   double eff_atr_pct = CFG_GetOptimalAtrPct(g_cfg.atr_zone_pct, _Symbol);
+   double zone_thick  = atr_val * (eff_atr_pct / 100.0);
    s_zone_high = NormalizeDouble(g_cfg.pivot + zone_thick * 0.5, _Digits);
    s_zone_low  = NormalizeDouble(g_cfg.pivot - zone_thick * 0.5, _Digits);
 
@@ -606,8 +658,31 @@ int OnInit()
       i_useBE,         i_beAfterTP1,
       i_useEOD,        i_eodTime,
       i_showStruct,    i_smcLookback,
-      i_discordUrl,    i_reportHour, i_reportMin
+      i_discordUrl,    i_reportHour, i_reportMin,
+      i_enableDiscord, i_notifyOnSL, i_notifyOnTP, i_notifyDaily,
+      i_exitOnFlip
    );
+
+   // ── 1b. Ghost Memory recovery — restore last AI setup from disk ────────
+   // Written by arm_trade command handler; survives TF changes and MT5 restarts.
+   // Cloud config (step 4) will override with a fresher version if available.
+   {
+      string _gfile = "IFX_Matrix_" + _Symbol + ".json";
+      int _gh = FileOpen(_gfile, FILE_READ|FILE_TXT|FILE_COMMON);
+      if(_gh != INVALID_HANDLE)
+      {
+         string _ghost = "";
+         while(!FileIsEnding(_gh)) _ghost += FileReadString(_gh);
+         FileClose(_gh);
+         if(StringLen(_ghost) > 10)
+         {
+            CFG_ApplyAiText(g_cfg, _ghost);
+            Print("✅ [INIT] Ghost Memory restored: bias=", g_cfg.bias,
+                  " pivot=", DoubleToString(g_cfg.pivot, _Digits),
+                  " confidence=", g_cfg.confidence);
+         }
+      }
+   }
 
    // ── 2. Relay init — reads bootstrap manifest, resolves connection_id ───
    // The bootstrap manifest (MQL5/Files/ifx/bootstrap.json) is written by the
@@ -803,9 +878,15 @@ void OnTick()
    if(is_eod)           return;   // past EOD cutoff
    if(!s_zone_valid)    return;   // no valid zone yet
    if(g_cfg.bias == "Neutral") return;      // no directional bias
+   if(i_minConfidence > 0 && g_cfg.confidence < i_minConfidence) return;  // AI confidence below threshold
    if(s_is_dead_struct) return;               // invalidated on boss timeframe
    if(s_is_in_purgatory) return;              // wick through invalidation, wait for reset
    if(s_live_planned_sl <= 0.0 || s_live_planned_lots <= 0.0) return;
+
+   // BAR-CHANGE GUARD — one entry attempt per bar (pairs with BOS detection for double safety)
+   datetime _entry_bar = iTime(_Symbol, g_cfg.tf_engine, 0);
+   if(_entry_bar == s_last_entry_bar) return;
+   s_last_entry_bar = _entry_bar;  // lock this bar immediately
 
    double engine_close[];
    ArraySetAsSeries(engine_close, true);
