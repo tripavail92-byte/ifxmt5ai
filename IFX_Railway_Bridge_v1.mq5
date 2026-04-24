@@ -113,6 +113,19 @@ string   g_armed_symbol = "";
 string   g_armed_side = "";
 string   g_armed_notes = "";
 
+// ── Config-driven trading gates ──────────────────────────────────────────
+bool     g_session_london_enabled = true;
+bool     g_session_ny_enabled     = true;
+bool     g_session_asia_enabled   = false;
+bool     g_close_eod              = false;
+string   g_eod_time_str           = "23:50";     // "HH:MM" server time
+bool     g_eod_closed_today       = false;
+datetime g_eod_last_close_day     = 0;
+double   g_sl_pad_mult            = 0.2;
+ENUM_TIMEFRAMES g_engine_tf       = PERIOD_M1;
+bool     g_min_confidence_gate    = false;
+double   g_min_confidence         = 0.0;
+
 void AppendDiagLog(const string message)
 {
    int handle = FileOpen("ifx\\diag.log", FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
@@ -775,6 +788,7 @@ bool SendAccountHeartbeat()
    json += "\"margin_level\":" + DoubleToString(marginLevel, 2) + ",";
    json += "\"profit\":" + DoubleToString(AccountInfoDouble(ACCOUNT_PROFIT), 2) + ",";
    json += "\"open_positions\":" + openPositions + ",";
+   json += "\"daily_trades\":" + IntegerToString(CountTodayExecutedTrades()) + ",";
    json += "\"host\":\"mt5-ea\",";
    json += "\"pid\":0,";
    json += "\"mt5_initialized\":true";
@@ -899,6 +913,40 @@ void RunControlPlaneLoop(const ulong now_ms)
 
    MaybeSendAccountHeartbeat(now_ms);
    MaybeRunOneShotFullHistoryReseed(now_ms);
+   MaybeCloseEod();
+}
+
+void MaybeCloseEod()
+{
+   if(!g_close_eod) return;
+
+   MqlDateTime now_dt;
+   TimeToStruct(TimeCurrent(), now_dt);
+   datetime today = StructToTime(now_dt) - (now_dt.hour * 3600 + now_dt.min * 60 + now_dt.sec);
+
+   if(g_eod_last_close_day == today && g_eod_closed_today) return;
+   if(g_eod_last_close_day != today) { g_eod_closed_today = false; g_eod_last_close_day = today; }
+
+   #define PARSE_HM2(s) (((int)StringToInteger(StringSubstr(s,0,2)))*60 + (int)StringToInteger(StringSubstr(s,3,2)))
+   int eod_min = PARSE_HM2(g_eod_time_str);
+   int now_min  = now_dt.hour * 60 + now_dt.min;
+   if(now_min < eod_min) return;
+
+   int closed = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(g_trade.PositionClose(ticket, 50))
+         closed++;
+   }
+   g_eod_closed_today = true;
+   if(closed > 0)
+   {
+      SendEaRuntimeEvent("eod_close", StringFormat("{\"closed\":%d,\"eod_time\":\"%s\"}", closed, EscapeJson(g_eod_time_str)));
+      Print("⏰ [EOD] Closed ", closed, " position(s) at ", g_eod_time_str, " server time");
+   }
 }
 
 void LoadPreferredActiveSymbols()
@@ -992,6 +1040,38 @@ bool ApplyControlPlaneConfig(const string response)
    g_allow_market_orders = JsonExtractBoolAfter(execution, 0, "allow_market_orders", g_allow_market_orders);
    g_allow_pending_orders = JsonExtractBoolAfter(execution, 0, "allow_pending_orders", g_allow_pending_orders);
    g_rr_target = MathMax(0.5, JsonExtractDoubleAfter(execution, 0, "rr_target", g_rr_target));
+   g_sl_pad_mult = MathMax(0.0, JsonExtractDoubleAfter(execution, 0, "sl_pad_mult", g_sl_pad_mult));
+   g_close_eod   = JsonExtractBoolAfter(execution, 0, "close_eod", g_close_eod);
+   string new_eod = JsonExtractStringAfter(execution, 0, "eod_time");
+   if(StringLen(new_eod) >= 4) { g_eod_time_str = new_eod; g_eod_closed_today = false; }
+
+   // ── Sessions (enabled flags) ─────────────────────────────────────────
+   string sessions = JsonExtractObjectAfter(config, 0, "sessions");
+   if(StringLen(sessions) > 0)
+   {
+      string lon = JsonExtractObjectAfter(sessions, 0, "london");
+      string ny  = JsonExtractObjectAfter(sessions, 0, "new_york");
+      string asia = JsonExtractObjectAfter(sessions, 0, "asia");
+      if(StringLen(lon)  > 0) g_session_london_enabled = JsonExtractBoolAfter(lon,  0, "enabled", g_session_london_enabled);
+      if(StringLen(ny)   > 0) g_session_ny_enabled     = JsonExtractBoolAfter(ny,   0, "enabled", g_session_ny_enabled);
+      if(StringLen(asia) > 0) g_session_asia_enabled   = JsonExtractBoolAfter(asia, 0, "enabled", g_session_asia_enabled);
+   }
+
+   // ── Risk gates ────────────────────────────────────────────────────────
+   double min_conf = JsonExtractDoubleAfter(risk, 0, "min_confidence", -1.0);
+   if(min_conf >= 0.0) { g_min_confidence = min_conf; g_min_confidence_gate = (min_conf > 0.0); }
+
+   // ── Structure timeframe ───────────────────────────────────────────────
+   string structure = JsonExtractObjectAfter(config, 0, "structure");
+   string tf_str = JsonExtractStringAfter(structure, 0, "timeframe");
+   if(StringLen(tf_str) > 0)
+   {
+      if(tf_str == "M1")  g_engine_tf = PERIOD_M1;
+      else if(tf_str == "M5")  g_engine_tf = PERIOD_M5;
+      else if(tf_str == "M15") g_engine_tf = PERIOD_M15;
+      else if(tf_str == "M30") g_engine_tf = PERIOD_M30;
+      else if(tf_str == "H1")  g_engine_tf = PERIOD_H1;
+   }
 
    string telemetry = JsonExtractObjectAfter(config, 0, "telemetry");
    int config_poll_sec = MathMax(5, JsonExtractIntAfter(telemetry, 0, "config_poll_sec", g_effective_config_refresh_sec));
@@ -1000,7 +1080,7 @@ bool ApplyControlPlaneConfig(const string response)
    g_effective_account_heartbeat_sec = MathMax(5, JsonExtractIntAfter(telemetry, 0, "heartbeat_sec", g_effective_account_heartbeat_sec));
    g_last_config_version = version;
 
-   Print("✅ [CONFIG] control-plane config version ", version, " applied for ", activeCount, " symbols");
+   Print("✅ [CONFIG] control-plane config version ", version, " applied for ", activeCount, " symbols | sessions: L=", (string)g_session_london_enabled, " NY=", (string)g_session_ny_enabled, " AS=", (string)g_session_asia_enabled, " EOD=", (string)g_close_eod, "@", g_eod_time_str);
    return true;
 }
 
@@ -1725,6 +1805,39 @@ void ClearArmedTradeState()
    g_armed_armed_at = 0;
 }
 
+// Returns true if the current server time falls within any enabled session window.
+// Times are "HH:MM" strings in server (broker) time. Overnight ranges (start > end) are handled.
+bool IsInAllowedTradingSession()
+{
+   if(!g_session_london_enabled && !g_session_ny_enabled && !g_session_asia_enabled)
+      return true;  // no filter configured → allow all
+
+   MqlDateTime now_struct;
+   TimeToStruct(TimeCurrent(), now_struct);
+   int now_min = now_struct.hour * 60 + now_struct.min;
+
+   // Helper lambda-equivalent: parse "HH:MM" to minutes
+   #define PARSE_HM(s) (((int)StringToInteger(StringSubstr(s,0,2)))*60 + (int)StringToInteger(StringSubstr(s,3,2)))
+
+   // London  03:00–11:00 default
+   if(g_session_london_enabled) {
+      int s = PARSE_HM("03:00"), e = PARSE_HM("11:00");
+      if(now_min >= s && now_min < e) return true;
+   }
+   // New York  08:00–17:00 default
+   if(g_session_ny_enabled) {
+      int s = PARSE_HM("08:00"), e = PARSE_HM("17:00");
+      if(now_min >= s && now_min < e) return true;
+   }
+   // Asia  19:00–03:00 (overnight)
+   if(g_session_asia_enabled) {
+      int s = PARSE_HM("19:00"), e = PARSE_HM("03:00");
+      if(s > e) { if(now_min >= s || now_min < e) return true; }
+      else       { if(now_min >= s && now_min < e) return true; }
+   }
+   return false;
+}
+
 void MaybeExecuteArmedTrade(const int sym_idx, const string signal_side, const double stop_anchor, const double signal_price)
 {
    if(!g_armed_trade_active)
@@ -1740,6 +1853,11 @@ void MaybeExecuteArmedTrade(const int sym_idx, const string signal_side, const d
       SendEaRuntimeEvent("armed_trade_skipped", StringFormat("{\"setup_id\":\"%s\",\"symbol\":\"%s\",\"reason\":\"max_daily_trades\"}", EscapeJson(g_armed_setup_id), EscapeJson(g_armed_symbol)));
       ClearArmedTradeState();
       return;
+   }
+   if(!IsInAllowedTradingSession())
+   {
+      SendEaRuntimeEvent("armed_trade_skipped", StringFormat("{\"setup_id\":\"%s\",\"symbol\":\"%s\",\"reason\":\"outside_session\"}", EscapeJson(g_armed_setup_id), EscapeJson(g_armed_symbol)));
+      return;  // keep armed — fire when session opens
    }
 
    double sl = stop_anchor;

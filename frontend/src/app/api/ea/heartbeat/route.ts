@@ -102,5 +102,28 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: heartbeatError.message }, { status: 500 });
   }
 
+  // Sync daily_trades from metrics into ea_live_state so the stats panel sees it
+  const dailyTrades = Number(body?.metrics?.daily_trades ?? -1);
+  if (dailyTrades >= 0) {
+    await auth.admin.rpc("upsert_ea_live_state", {
+      p_connection_id:    connectionId,
+      p_hud_status:       null,
+      p_sys_bias:         null,
+      p_sys_pivot:        null,
+      p_sys_tp1:          null,
+      p_sys_tp2:          null,
+      p_invalidation_lvl: null,
+      p_live_sl:          null,
+      p_live_lots:        null,
+      p_is_inside_zone:   false,
+      p_is_be_secured:    false,
+      p_unrealised_pnl:   null,
+      p_daily_trades:     dailyTrades,
+      p_daily_pnl_usd:    0,
+      p_top_ledger:       [],
+      p_raw_payload:      {},
+    });
+  }
+
   return NextResponse.json({ ok: true, installation: (data ?? [])[0] ?? null });
 }

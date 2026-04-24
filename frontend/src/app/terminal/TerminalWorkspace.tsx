@@ -1284,7 +1284,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
           .eq("connection_id", selectedConnectionId)
           .eq("is_active", true),
         supabase.from("mt5_worker_heartbeats").select("connection_id, status, last_seen_at, last_metrics").eq("connection_id", selectedConnectionId).maybeSingle(),
-        supabase.from("ea_live_state").select("connection_id, hud_status, updated_at").eq("connection_id", selectedConnectionId).maybeSingle(),
+        supabase.from("ea_live_state").select("connection_id, hud_status, updated_at, daily_trades").eq("connection_id", selectedConnectionId).maybeSingle(),
         supabase.from("trade_jobs").select("id, connection_id, symbol, side, volume, sl, tp, status, created_at, idempotency_key, error, result").eq("connection_id", selectedConnectionId).order("created_at", { ascending: false }).limit(30),
         supabase.from("ea_commands").select("id, connection_id, command_type, payload_json, sequence_no, idempotency_key, status, created_at, expires_at").eq("connection_id", selectedConnectionId).order("created_at", { ascending: false }).limit(30),
         supabase.from("ea_command_acks").select("id, command_id, connection_id, sequence_no, status, ack_payload_json, acknowledged_at, created_at").eq("connection_id", selectedConnectionId).order("acknowledged_at", { ascending: false }).limit(30),
