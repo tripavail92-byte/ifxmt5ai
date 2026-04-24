@@ -107,6 +107,10 @@ type EaLiveStateRow = {
   connection_id: string;
   hud_status: string | null;
   updated_at: string;
+  daily_trades?: number | null;
+  win_rate?: number | null;
+  avg_rr?: number | null;
+  max_drawdown_pct?: number | null;
 };
 
 type NewsEvent = {
@@ -584,6 +588,27 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
   const [notifyOnSL, setNotifyOnSL] = useState(false);
   const [notifyOnTP, setNotifyOnTP] = useState(true);
   const [notifyDaily, setNotifyDaily] = useState(true);
+  const [discordWebhookUrl, setDiscordWebhookUrl] = useState<string>("");
+  // EA structure timeframes
+  const [engineTf, setEngineTf] = useState<string>("M1");
+  const [bossTimeframe, setBossTimeframe] = useState<string>("H1");
+  const [slTimeframe, setSlTimeframe] = useState<string>("M5");
+  const [beTimeframe, setBeTimeframe] = useState<string>("M10");
+  // Session times
+  const [londonStart, setLondonStart] = useState<string>("03:00");
+  const [londonEnd, setLondonEnd] = useState<string>("11:00");
+  const [nyStart, setNyStart] = useState<string>("08:00");
+  const [nyEnd, setNyEnd] = useState<string>("17:00");
+  const [asiaStart, setAsiaStart] = useState<string>("19:00");
+  const [asiaEnd, setAsiaEnd] = useState<string>("03:00");
+  // Trade execution
+  const [baseMagic, setBaseMagic] = useState<number>(9180);
+  const [tp1Pct, setTp1Pct] = useState<number>(75.0);
+  const [usePartial, setUsePartial] = useState(true);
+  const [useBE, setUseBE] = useState(true);
+  const [breakEvenAfterTp1, setBreakEvenAfterTp1] = useState(true);
+  const [closeEod, setCloseEod] = useState(true);
+  const [eodTime, setEodTime] = useState<string>("23:50");
   const [visualsSaving, setVisualsSaving] = useState(false);
   const [showEntryZones, setShowEntryZones] = useState(true);
   const [showTPZones, setShowTPZones] = useState(true);
@@ -929,6 +954,24 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     if (typeof mergedPrefs.notifyOnSL === "boolean") setNotifyOnSL(mergedPrefs.notifyOnSL);
     if (typeof mergedPrefs.notifyOnTP === "boolean") setNotifyOnTP(mergedPrefs.notifyOnTP);
     if (typeof mergedPrefs.notifyDaily === "boolean") setNotifyDaily(mergedPrefs.notifyDaily);
+    if (typeof mergedPrefs.discordWebhookUrl === "string") setDiscordWebhookUrl(mergedPrefs.discordWebhookUrl);
+    if (typeof mergedPrefs.engineTf === "string" && mergedPrefs.engineTf) setEngineTf(mergedPrefs.engineTf);
+    if (typeof mergedPrefs.bossTimeframe === "string" && mergedPrefs.bossTimeframe) setBossTimeframe(mergedPrefs.bossTimeframe);
+    if (typeof mergedPrefs.slTimeframe === "string" && mergedPrefs.slTimeframe) setSlTimeframe(mergedPrefs.slTimeframe);
+    if (typeof mergedPrefs.beTimeframe === "string" && mergedPrefs.beTimeframe) setBeTimeframe(mergedPrefs.beTimeframe);
+    if (typeof mergedPrefs.londonStart === "string" && mergedPrefs.londonStart) setLondonStart(mergedPrefs.londonStart);
+    if (typeof mergedPrefs.londonEnd === "string" && mergedPrefs.londonEnd) setLondonEnd(mergedPrefs.londonEnd);
+    if (typeof mergedPrefs.nyStart === "string" && mergedPrefs.nyStart) setNyStart(mergedPrefs.nyStart);
+    if (typeof mergedPrefs.nyEnd === "string" && mergedPrefs.nyEnd) setNyEnd(mergedPrefs.nyEnd);
+    if (typeof mergedPrefs.asiaStart === "string" && mergedPrefs.asiaStart) setAsiaStart(mergedPrefs.asiaStart);
+    if (typeof mergedPrefs.asiaEnd === "string" && mergedPrefs.asiaEnd) setAsiaEnd(mergedPrefs.asiaEnd);
+    if (typeof mergedPrefs.baseMagic === "number") setBaseMagic(mergedPrefs.baseMagic);
+    if (typeof mergedPrefs.tp1Pct === "number") setTp1Pct(mergedPrefs.tp1Pct);
+    if (typeof mergedPrefs.usePartial === "boolean") setUsePartial(mergedPrefs.usePartial);
+    if (typeof mergedPrefs.useBE === "boolean") setUseBE(mergedPrefs.useBE);
+    if (typeof mergedPrefs.breakEvenAfterTp1 === "boolean") setBreakEvenAfterTp1(mergedPrefs.breakEvenAfterTp1);
+    if (typeof mergedPrefs.closeEod === "boolean") setCloseEod(mergedPrefs.closeEod);
+    if (typeof mergedPrefs.eodTime === "string" && mergedPrefs.eodTime) setEodTime(mergedPrefs.eodTime);
     if (mergedPrefs.sessions) {
       setSessions({
         london: Boolean(mergedPrefs.sessions.london),
@@ -982,6 +1025,24 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       notifyOnSL,
       notifyOnTP,
       notifyDaily,
+      discordWebhookUrl,
+      engineTf,
+      bossTimeframe,
+      slTimeframe,
+      beTimeframe,
+      londonStart,
+      londonEnd,
+      nyStart,
+      nyEnd,
+      asiaStart,
+      asiaEnd,
+      baseMagic,
+      tp1Pct,
+      usePartial,
+      useBE,
+      breakEvenAfterTp1,
+      closeEod,
+      eodTime,
     });
   }, [
     dailyLossLimitUsd,
@@ -1009,6 +1070,24 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     notifyOnSL,
     notifyOnTP,
     notifyDaily,
+    discordWebhookUrl,
+    engineTf,
+    bossTimeframe,
+    slTimeframe,
+    beTimeframe,
+    londonStart,
+    londonEnd,
+    nyStart,
+    nyEnd,
+    asiaStart,
+    asiaEnd,
+    baseMagic,
+    tp1Pct,
+    usePartial,
+    useBE,
+    breakEvenAfterTp1,
+    closeEod,
+    eodTime,
   ]);
 
   useEffect(() => {
@@ -1073,6 +1152,24 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
           notifyOnSL,
           notifyOnTP,
           notifyDaily,
+          discordWebhookUrl,
+          engineTf,
+          bossTimeframe,
+          slTimeframe,
+          beTimeframe,
+          londonStart,
+          londonEnd,
+          nyStart,
+          nyEnd,
+          asiaStart,
+          asiaEnd,
+          baseMagic,
+          tp1Pct,
+          usePartial,
+          useBE,
+          breakEvenAfterTp1,
+          closeEod,
+          eodTime,
         },
         termsVersion: TERMS_VERSION,
         termsAccepted,
@@ -1117,6 +1214,24 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     notifyOnSL,
     notifyOnTP,
     notifyDaily,
+    discordWebhookUrl,
+    engineTf,
+    bossTimeframe,
+    slTimeframe,
+    beTimeframe,
+    londonStart,
+    londonEnd,
+    nyStart,
+    nyEnd,
+    asiaStart,
+    asiaEnd,
+    baseMagic,
+    tp1Pct,
+    usePartial,
+    useBE,
+    breakEvenAfterTp1,
+    closeEod,
+    eodTime,
     isAuthenticated,
     termsAccepted,
   ]);
@@ -2237,6 +2352,74 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                 ) : null}
               </div>
             </section>
+
+            {/* ── Timeframes ── */}
+            <section className="space-y-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.2em] text-gray-500">Timeframes</div>
+              <div className="rounded-xl border border-[#202020] bg-[#151515] p-3 space-y-2">
+                <div>
+                  <Label className="mb-1 block text-[10px] uppercase tracking-wide text-gray-500">Engine TF</Label>
+                  <select value={engineTf} onChange={(e) => setEngineTf(e.target.value)} className="h-8 w-full rounded border border-[#2b2b2b] bg-[#0f0f0f] px-2 text-xs text-white outline-none">
+                    {["M1","M5","M15","M30","H1"].map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                  </select>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <Label className="mb-1 block text-[10px] uppercase tracking-wide text-gray-500">Boss TF</Label>
+                    <select value={bossTimeframe} onChange={(e) => setBossTimeframe(e.target.value)} className="h-8 w-full rounded border border-[#2b2b2b] bg-[#0f0f0f] px-2 text-xs text-white outline-none">
+                      {["M15","M30","H1","H4","D1"].map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <Label className="mb-1 block text-[10px] uppercase tracking-wide text-gray-500">SL TF</Label>
+                    <select value={slTimeframe} onChange={(e) => setSlTimeframe(e.target.value)} className="h-8 w-full rounded border border-[#2b2b2b] bg-[#0f0f0f] px-2 text-xs text-white outline-none">
+                      {["M1","M5","M15"].map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <Label className="mb-1 block text-[10px] uppercase tracking-wide text-gray-500">BE TF</Label>
+                    <select value={beTimeframe} onChange={(e) => setBeTimeframe(e.target.value)} className="h-8 w-full rounded border border-[#2b2b2b] bg-[#0f0f0f] px-2 text-xs text-white outline-none">
+                      {["M5","M10","M15","M30"].map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            {/* ── Trade Management ── */}
+            <section className="space-y-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.2em] text-gray-500">Trade Management</div>
+              <div className="rounded-xl border border-[#202020] bg-[#151515] p-3 space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <Label className="mb-1 block text-[10px] uppercase tracking-wide text-gray-500">Magic ID</Label>
+                    <Input type="number" step="1" value={baseMagic} onChange={(e) => setBaseMagic(parseInt(e.target.value, 10) || 9180)} className="h-8 border-[#2b2b2b] bg-[#0f0f0f] text-xs text-white" />
+                  </div>
+                  <div>
+                    <Label className="mb-1 block text-[10px] uppercase tracking-wide text-gray-500">TP1 Close %</Label>
+                    <Input type="number" step="5" min="10" max="100" value={tp1Pct} onChange={(e) => setTp1Pct(parseFloat(e.target.value) || 75)} className="h-8 border-[#2b2b2b] bg-[#0f0f0f] text-xs text-white" />
+                  </div>
+                </div>
+                <div className="space-y-1.5 pt-1">
+                  {([
+                    { key: "usePartial", label: "Partial Close (TP1/TP2)", val: usePartial, set: setUsePartial },
+                    { key: "useBE", label: "Break-Even after TP1", val: useBE, set: setUseBE },
+                    { key: "closeEod", label: "Force Close at EOD", val: closeEod, set: setCloseEod },
+                  ] as const).map(({ label, val, set }) => (
+                    <label key={label} className="flex items-center justify-between rounded-lg bg-[#0f0f0f] px-3 py-2 text-xs text-gray-300 cursor-pointer">
+                      <span>{label}</span>
+                      <input type="checkbox" checked={val} onChange={(e) => set(e.target.checked)} className="accent-blue-500" />
+                    </label>
+                  ))}
+                </div>
+                {closeEod && (
+                  <div>
+                    <Label className="mb-1 block text-[10px] uppercase tracking-wide text-gray-500">EOD Time (server)</Label>
+                    <Input type="time" value={eodTime} onChange={(e) => setEodTime(e.target.value)} className="h-8 border-[#2b2b2b] bg-[#0f0f0f] text-xs text-white" />
+                  </div>
+                )}
+              </div>
+            </section>
           </div>
         </aside>
 
@@ -2720,6 +2903,31 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
               </div>
             </section>
 
+            {/* ── Statistics ── */}
+            <section className="space-y-3">
+              <div className="text-xs font-semibold uppercase tracking-[0.2em] text-gray-500">Statistics</div>
+              <div className="rounded-xl border border-[#202020] bg-[#151515] p-3">
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded-lg bg-[#0f0f0f] px-3 py-2">
+                    <div className="text-gray-500 text-[10px] uppercase tracking-wide mb-0.5">Today&apos;s Trades</div>
+                    <div className="text-white font-semibold">{eaLiveState?.daily_trades ?? 0} / {maxTradesPerDay}</div>
+                  </div>
+                  <div className="rounded-lg bg-[#0f0f0f] px-3 py-2">
+                    <div className="text-gray-500 text-[10px] uppercase tracking-wide mb-0.5">Win Rate</div>
+                    <div className="text-white font-semibold">{eaLiveState?.win_rate != null ? `${(eaLiveState.win_rate * 100).toFixed(0)}%` : "—"}</div>
+                  </div>
+                  <div className="rounded-lg bg-[#0f0f0f] px-3 py-2">
+                    <div className="text-gray-500 text-[10px] uppercase tracking-wide mb-0.5">Avg R:R</div>
+                    <div className="text-white font-semibold">{eaLiveState?.avg_rr != null ? eaLiveState.avg_rr.toFixed(2) : "—"}</div>
+                  </div>
+                  <div className="rounded-lg bg-[#0f0f0f] px-3 py-2">
+                    <div className="text-gray-500 text-[10px] uppercase tracking-wide mb-0.5">Max DD</div>
+                    <div className="text-white font-semibold">{eaLiveState?.max_drawdown_pct != null ? `${eaLiveState.max_drawdown_pct.toFixed(1)}%` : "—"}</div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
             <section className="space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-gray-500">
@@ -2750,10 +2958,30 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                     <Input type="number" value={newsAfterMin} onChange={() => {}} className="border-[#2b2b2b] bg-[#0f0f0f] text-white" />
                   </div>
                 )}
-                <div className="grid grid-cols-3 gap-2">
-                  <SessionToggle label="London" checked={sessions.london} onChange={(checked) => setSessions((prev) => ({ ...prev, london: checked }))} />
-                  <SessionToggle label="New York" checked={sessions.newYork} onChange={(checked) => setSessions((prev) => ({ ...prev, newYork: checked }))} />
-                  <SessionToggle label="Asia" checked={sessions.asia} onChange={(checked) => setSessions((prev) => ({ ...prev, asia: checked }))} />
+                {/* Session rows with editable times */}
+                <div className="space-y-2">
+                  {([
+                    { label: "London", on: sessions.london, setOn: (v: boolean) => setSessions(p => ({ ...p, london: v })), start: londonStart, setStart: setLondonStart, end: londonEnd, setEnd: setLondonEnd },
+                    { label: "New York", on: sessions.newYork, setOn: (v: boolean) => setSessions(p => ({ ...p, newYork: v })), start: nyStart, setStart: setNyStart, end: nyEnd, setEnd: setNyEnd },
+                    { label: "Asia", on: sessions.asia, setOn: (v: boolean) => setSessions(p => ({ ...p, asia: v })), start: asiaStart, setStart: setAsiaStart, end: asiaEnd, setEnd: setAsiaEnd },
+                  ] as const).map(({ label, on, setOn, start, setStart, end, setEnd }) => (
+                    <div key={label} className="rounded-lg bg-[#0f0f0f] px-3 py-2 space-y-1.5">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-gray-300">{label}</span>
+                        <input type="checkbox" checked={on} onChange={(e) => setOn(e.target.checked)} className="accent-blue-500" />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <span className="text-[10px] text-gray-600">Start</span>
+                          <Input type="time" value={start} onChange={(e) => setStart(e.target.value)} className="h-7 border-[#2b2b2b] bg-[#0c0c0c] text-[11px] text-white mt-0.5" />
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-gray-600">End</span>
+                          <Input type="time" value={end} onChange={(e) => setEnd(e.target.value)} className="h-7 border-[#2b2b2b] bg-[#0c0c0c] text-[11px] text-white mt-0.5" />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
                 <p className="leading-relaxed text-gray-500">Sessions are enforced server-side before every job insert. If none are enabled, execution is blocked.</p>
               </div>
@@ -2783,9 +3011,19 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                       <span>Daily P&amp;L Summary</span>
                       <input type="checkbox" checked={notifyDaily} onChange={(e) => setNotifyDaily(e.target.checked)} className="accent-indigo-500" />
                     </label>
+                    <div className="pt-1">
+                      <Label className="mb-1 block text-[10px] uppercase tracking-wide text-gray-500">Webhook URL</Label>
+                      <Input
+                        type="url"
+                        value={discordWebhookUrl}
+                        onChange={(e) => setDiscordWebhookUrl(e.target.value)}
+                        placeholder="https://discord.com/api/webhooks/..."
+                        className="border-[#2b2b2b] bg-[#0f0f0f] text-xs text-white h-8"
+                      />
+                    </div>
                   </>
                 )}
-                <p className="leading-relaxed text-gray-500">Set the Discord webhook URL in the EA inputs on MT5. These toggles control which events trigger a notification.</p>
+                <p className="leading-relaxed text-gray-500">Enter your Discord webhook URL above. These toggles control which events trigger a notification.</p>
               </div>
             </section>
 

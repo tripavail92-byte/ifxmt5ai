@@ -20,14 +20,17 @@ TERMINALS_DIR = os.environ.get(
     r"C:\mt5system\terminals"
 )
 
-# Broker prefix → installed MT5 base directory
-# The Python worker uses the binary from here to provision new portable folders.
+# Broker prefix → installed MT5 base directory.
+# Only needed when a broker-specific MT5 build must be used instead of the
+# generic MetaQuotes build.  The generic build (DEFAULT_BASE) works with
+# every MT5 broker — Vantage, XM, IC Markets, Exness, etc. — because all
+# MT5 brokers share the same protocol and server-discovery mechanism.
+# Add an entry here ONLY when the generic build genuinely cannot connect.
 BROKER_BASE_MAP: dict[str, str] = {
-    "exness": r"C:\Program Files\MetaTrader 5 EXNESS",
-    "metaquotes": r"C:\Program Files\MetaTrader 5",
+    # "exness": r"C:\Program Files\MetaTrader 5 EXNESS",  # keep as reference, not default
 }
 
-# Default fallback if broker not matched
+# Generic MetaQuotes MT5 — the universal default for all brokers.
 DEFAULT_BASE = r"C:\Program Files\MetaTrader 5"
 
 
@@ -225,9 +228,13 @@ def provision(connection_id: str, broker_server: str = "", force: bool = False) 
                 "Reuse the existing folder, or set MT5_ALLOW_EXISTING_INSTANCE_REPROVISION=1 for an explicit reset."
             )
         try:
-            _backup_existing_terminal_folder(dest)
+            # Skip backup creation to preserve disk space — just remove the old folder directly.
+            target_exe = dest / "terminal64.exe"
+            _graceful_stop_terminal(target_exe)
+            shutil.rmtree(str(dest), ignore_errors=True)
+            logger.warning("[provisioner] Removed existing terminal folder for reprovision: %s", dest)
         except Exception as exc:
-            raise RuntimeError(f"Failed to backup existing terminal folder {dest}: {exc}") from exc
+            raise RuntimeError(f"Failed to remove existing terminal folder {dest}: {exc}") from exc
 
     logger.info("[provisioner] Copying %s → %s", source_dir, dest)
     shutil.copytree(str(source_dir), str(dest), dirs_exist_ok=True)

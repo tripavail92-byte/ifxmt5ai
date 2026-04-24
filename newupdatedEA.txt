@@ -1,0 +1,2058 @@
+//+------------------------------------------------------------------+
+//|                                     FDM_6Gate_Sniper_Turbo.mq5   |
+//|                                   Copyright 2026, IFX Trading    |
+//+------------------------------------------------------------------+
+#property copyright "IFX Trading Academy"
+#property link      "https://www.mql5.com"
+#property version   "9.30"
+#property description "FDM 6-Gate AI Sniper — SMC-based precision entry engine with structural BOS detection, multi-timeframe stop loss, ATR-dynamic zones, partial TP splits, break-even trailing, and Discord alerts."
+
+#include <Trade\Trade.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Trade\SymbolInfo.mqh>
+#include <Trade\AccountInfo.mqh>
+
+CTrade         trade;
+CPositionInfo  posn;
+CSymbolInfo    symb;
+CAccountInfo   acct;
+
+// --- Custom Enumerations ---
+enum ENUM_TRADE_BIAS
+  {
+   BIAS_NEUTRAL, // Neutral
+   BIAS_LONG,    // Long
+   BIAS_SHORT    // Short
+  };
+
+// ============================================================================
+// 1. COMMANDER INPUTS & AI PARSER
+// ============================================================================
+input group "=== 1. AI MASTER BRAIN ==="
+sinput string  i_ai_text      = "";            // 🧠 Paste Master Brain JSON/Text
+input ENUM_TRADE_BIAS i_manual_bias = BIAS_NEUTRAL; // Manual Bias
+input double   i_manual_pivot = 0.0;           // Manual Pivot
+input double   i_manual_tp1   = 0.0;           // Manual Target 1 (Partial)
+input double   i_manual_tp2   = 0.0;           // Manual Target 2 (Final)
+input int      i_min_confidence = 70;          // Minimum AI Confidence (%)
+input double   i_atrPct       = 10.0;          // Zone Thickness (% of Daily ATR)
+input double   i_slPadMult    = 0.2;           // Stop Loss Padding (Spread Multiplier)
+
+input group "=== 2. TRADING SESSIONS ==="
+input bool     i_useAsia      = false;
+input string   i_sesAsiaStart = "03:00";
+input string   i_sesAsiaEnd   = "11:00";
+input bool     i_useLon       = true;
+input string   i_sesLonStart  = "11:00";
+input string   i_sesLonEnd    = "19:00";
+input bool     i_useNY        = true;
+input string   i_sesNYStart   = "16:00";
+input string   i_sesNYEnd     = "23:59";
+
+input group "=== 3. SYSTEM TIMEFRAMES ==="
+input ENUM_TIMEFRAMES i_tf_enforce = PERIOD_M1;  // 🚀 ENGINE TF (Independent of Chart TF)
+input ENUM_TIMEFRAMES i_boss_tf    = PERIOD_H1;
+input bool     i_use_mtf_sl    = true;         // Use MTF Stop Loss Anchor
+input ENUM_TIMEFRAMES i_sl_tf      = PERIOD_M5;
+input ENUM_TIMEFRAMES i_be_tf      = PERIOD_M10;
+
+input group "=== 4. RISK, RR & PSYCHOLOGY ==="
+input double   i_riskPct       = 2.0;          // Risk Per Trade (%)
+input bool     i_strictRisk    = false;        // Strict Risk (Abort if < Min Lot)
+input double   i_min_rr        = 1.0;          // Minimum R:R Required
+input int      i_maxTrades     = 3;            // Max Trades Per Day
+input bool     i_useDeadSL     = true;         // Death by SL Cooldown
+input int      i_slCooldown    = 30;           // CD Wait Time (Minutes)
+input bool     i_useAutoRR     = false;        // Enable Auto RR Target Multipliers
+input double   i_autoRR1       = 1.0;          // Auto RR TP1
+input double   i_autoRR2       = 2.0;          // Auto RR TP2
+
+input group "=== 5. TRADE MANAGEMENT ==="
+input int      i_base_magic    = 9180;         // Base Magic ID (Auto-Scales by Timeframe)
+input int      i_pivotLen      = 5;            // Structure Pivot Length
+input bool     i_usePartial    = true;        
+input double   i_tp1_pct       = 75.0;         // Split Order TP1 %
+input bool     i_useBE         = true;         // Enable MTF Break-Even Trailing
+input bool     i_be_after_tp1  = true;         // Move to BE after TP1 Hit
+input bool     i_exit_on_flip  = true;         // Auto-Exit if AI Bias Flips?
+input bool     i_useEOD        = true;         // Force Close End of Day
+input string   i_eodTime       = "23:50";
+
+input group "=== 6. VISUALS & DISCORD ==="
+input bool     i_show_struct   = false;        // Show Live Structure (SMS/BOS)
+input int      i_smc_lookback  = 400;          // Structure History Lookback (Candles)
+input bool     i_enable_discord= true;         // Enable Discord Notifications?
+input bool     i_notify_on_sl  = false;        // [DISCREET] Post SL Protection Alerts?
+input bool     i_notify_on_tp  = true;         // Post Profit Alerts?
+input bool     i_notify_daily  = true;         // Post Daily Performance?
+input string   i_discord_url   = "";           // Discord Webhook URL (Paste Your Own)
+input double   i_challenge_balance = 1000.0;   // Imaginary Account Size ($)
+input int      i_reportHour    = 20;           // Daily Report Hour (0-23)
+input int      i_reportMin     = 0;            // Daily Report Minute (0-59)
+
+#define EVENT_AI_COMPLETE 1001
+
+// --- Global State Variables ---
+string   sys_bias, sys_reasoning;
+double   sys_pivot, sys_tp1, sys_tp2, sys_sl;
+double   zoneHigh, zoneLow, calc_inval;
+int      sys_magic, sys_confidence;
+
+int      daily_trades_count = 0;
+int      last_trade_day = -1;
+bool     isDead_SL = false;
+datetime dead_SL_time = 0;
+bool     isDead_Struct = false;
+bool     report_sent_today = false;
+bool     eod_closed_today = false;
+int      global_atr_handle = INVALID_HANDLE;
+
+// HARDWARE LOCKS FOR BROKER SAFETY & CPU PERFORMANCE
+bool     is_be_secured = false;
+bool     is_be_notified = false;
+bool     is_partial_taken = false;
+bool     ui_needs_redraw = false;
+int      last_ledger_deals = -1;
+datetime last_smc_bar = 0;
+ulong    last_loss_ticket = 0;
+double   last_traded_pivot = 0.0;
+datetime last_entry_bar = 0;
+
+// Realtime Display Variables
+double   live_sl = 0.0;
+double   live_lots = 0.0;
+bool     is_inside_zone = false;
+
+// 🚀 DISCORD QUEUE FLAGS
+bool     req_discord_long   = false;
+bool     req_discord_short  = false;
+bool     req_discord_report = false;
+
+// UI Colors (Matching Pine Script Matrix)
+color c_red = C'220,53,69';
+color c_green = C'40,167,69';
+color c_orange = C'253,126,20';
+color c_purple = C'111,66,193';
+color c_gray = C'108,117,125';
+color c_dark = C'33,37,41';
+
+//+------------------------------------------------------------------+
+int CountOpenPositions()
+  {
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(posn.SelectByIndex(i))
+        {
+         int m_id = (int)posn.Magic();
+         bool is_ifx_trade = (m_id >= i_base_magic && m_id <= i_base_magic + 50);
+         
+         if(posn.Symbol() == _Symbol && is_ifx_trade)
+           {
+            count++;
+           }
+        }
+     }
+   return count;
+  }
+
+// 🚀 WEEKEND CARRY-OVER FIX: Absolute Mathematical Midnight
+int CountTodayTrades()
+  {
+   int count = 0;
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   dt.hour = 0;
+   dt.min = 0;
+   dt.sec = 0;
+   datetime start_of_day = StructToTime(dt); // True midnight
+   datetime last_entry_time = 0;
+   
+   if(HistorySelect(start_of_day, TimeCurrent()))
+     {
+      for(int i = 0; i < HistoryDealsTotal(); i++)
+        {
+         ulong ticket = HistoryDealGetTicket(i);
+         if(HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_IN &&
+            HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol)
+           {
+            int m_id = (int)HistoryDealGetInteger(ticket, DEAL_MAGIC);
+            if(m_id >= i_base_magic && m_id <= i_base_magic + 50)
+              {
+               datetime deal_time = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+               // Only count if more than 5 seconds from the last counted entry
+               // This deduplicates the TP1+TP2 split-order pair
+               if(deal_time - last_entry_time > 5)
+                 {
+                  count++;
+                  last_entry_time = deal_time;
+                 }
+              }
+           }
+        }
+     }
+   return count;
+  }
+
+//+------------------------------------------------------------------+
+double ParseValue(string txt, string keyword, double fallback)
+  {
+   string up_txt = txt;
+   StringToUpper(up_txt);
+   string up_kw = keyword;
+   StringToUpper(up_kw);
+   int pos = StringFind(up_txt, up_kw);
+   
+   if(pos < 0)
+      return fallback;
+   
+   int start = pos + StringLen(up_kw);
+   
+   // 🛑 JSON NESTED ARRAY FIX: If we are searching for Levels (Target 1, Target 2, etc),
+   // we must seek forward to the actual "PRICE POINT" key in the JSON object
+   // before extracting numbers to avoid capturing numbers inside the condition notes.
+   if(StringFind(up_kw, "TARGET 1") >= 0 || StringFind(up_kw, "TARGET 2") >= 0 || StringFind(up_kw, "INVALIDATION") >= 0 || StringFind(up_kw, "COUNTER") >= 0)
+     {
+      int price_pos = StringFind(up_txt, "PRICE POINT", start);
+      if(price_pos > start)
+        {
+         start = price_pos + StringLen("PRICE POINT");
+        }
+     }
+   
+   string num_str = "";
+   bool found_digit = false;
+   
+   for(int i = start; i < StringLen(up_txt); i++)
+     {
+      ushort c = StringGetCharacter(up_txt, i);
+      if(c >= '0' && c <= '9')
+        {
+         num_str += ShortToString(c);
+         found_digit = true;
+        }
+      else
+          if(c == '.' || c == ',')
+           {
+            // Only allow one decimal point
+            if(StringFind(num_str, ".") < 0)
+               num_str += ".";
+            found_digit = true;
+           }
+         else
+            if(c == ',')
+              {
+               // Ignore commas (thousands separators)
+               continue;
+              }
+         else
+           {
+            if(found_digit)
+               break;
+           }
+     }
+   return (num_str != "") ? StringToDouble(num_str) : fallback;
+  }
+
+void ResetStateForNewSignal() {
+    ObjectsDeleteAll(0, "IFX_");
+    daily_trades_count = 0;
+    isDead_SL = false;
+    isDead_Struct = false;
+   
+    double atr[];
+    ArraySetAsSeries(atr, true);
+    double local_atr = 0.0;
+   
+    if(CopyBuffer(global_atr_handle, 0, 1, 1, atr) > 0 && atr[0] > 0.0 && atr[0] != EMPTY_VALUE) {
+        local_atr = atr[0];
+    } else {
+        // 🛡️ DYNAMIC VOLATILITY FALLBACK: Mathematically evaluate active chart structure
+        double h_arr[], l_arr[];
+        if(CopyHigh(_Symbol, i_tf_enforce, 0, 100, h_arr) > 0 && CopyLow(_Symbol, i_tf_enforce, 0, 100, l_arr) > 0) {
+            double h_max = h_arr[ArrayMaximum(h_arr)];
+            double l_min = l_arr[ArrayMinimum(l_arr)];
+            local_atr = h_max - l_min;
+        } else {
+            local_atr = 500 * _Point;
+        }
+    }
+   
+    double opt_pct = GetOptimalATRPercentage(_Symbol);
+    double zone_thickness = local_atr * (opt_pct / 100.0);
+    zoneHigh = NormalizeDouble(sys_pivot + (zone_thickness / 2), _Digits);
+    zoneLow  = NormalizeDouble(sys_pivot - (zone_thickness / 2), _Digits);
+    calc_inval = (sys_bias == "Long") ? zoneLow : zoneHigh;
+    ui_needs_redraw = true;
+}
+
+string ParseString(string txt, string keyword)
+  {
+   int pos = StringFind(txt, keyword);
+   if(pos < 0) return "";
+   
+   int start = pos + StringLen(keyword);
+   int colon = StringFind(txt, ":", start);
+   if(colon >= 0) start = colon + 1;
+   
+   int quote1 = StringFind(txt, "\"", start);
+   if(quote1 < 0) return "";
+   int quote2 = StringFind(txt, "\"", quote1 + 1);
+   if(quote2 < 0) return "";
+   
+   return StringSubstr(txt, quote1 + 1, quote2 - quote1 - 1);
+  }
+
+void ParseAIText(string up_txt) {
+    if(StringLen(up_txt) > 5)
+     {
+      string old_bias = sys_bias;
+      double old_pivot = sys_pivot;
+
+      string extracted_bias = ParseString(up_txt, "\"BIAS\"");
+      if(extracted_bias != "") {
+         if(StringFind(extracted_bias, "BULLISH") >= 0 || StringFind(extracted_bias, "LONG") >= 0)
+            sys_bias = "Long";
+         else if(StringFind(extracted_bias, "BEARISH") >= 0 || StringFind(extracted_bias, "SHORT") >= 0)
+            sys_bias = "Short";
+         else
+            sys_bias = "Neutral";
+      } else {
+         if(i_manual_bias == BIAS_LONG) sys_bias = "Long";
+         else if(i_manual_bias == BIAS_SHORT) sys_bias = "Short";
+         else sys_bias = "Neutral";
+      }
+       
+      // 🛑 JSON STRICT KEY FIX: Search explicitly for the JSON Keys instead of generic words
+      // Otherwise the word 'pivot' inside the LLM reasoning text block will trigger a premature capture of 0.0
+      sys_pivot = ParseValue(up_txt, "ENTRY PIVOT ZONE", i_manual_pivot);
+      sys_tp1   = ParseValue(up_txt, "TARGET 1", i_manual_tp1);
+      sys_tp2   = ParseValue(up_txt, "TARGET 2", i_manual_tp2);
+      sys_confidence = (int)ParseValue(up_txt, "CONFIDENCE SCORE", 70);
+       
+      if(sys_tp1 == 0.0)
+         sys_tp1 = ParseValue(up_txt, "TP1", i_manual_tp1);
+      if(sys_tp2 == 0.0)
+         sys_tp2 = ParseValue(up_txt, "TP2", i_manual_tp2);
+
+      sys_tp1 = NormalizeDouble(sys_tp1, _Digits);
+      sys_tp2 = NormalizeDouble(sys_tp2, _Digits);
+
+      // 🚨 BIAS-FLIP AUTO-CLOSE LOGIC
+      if(i_exit_on_flip && old_bias != sys_bias && sys_bias != "Neutral" && CountOpenPositions() > 0)
+        {
+         bool closed = false;
+         for(int i = PositionsTotal() - 1; i >= 0; i--)
+           {
+            if(posn.SelectByIndex(i) && posn.Symbol() == _Symbol && (int)posn.Magic() >= i_base_magic && (int)posn.Magic() <= i_base_magic + 50)
+              {
+               ENUM_POSITION_TYPE p_type = posn.PositionType();
+               if((p_type == POSITION_TYPE_BUY && sys_bias == "Short") || (p_type == POSITION_TYPE_SELL && sys_bias == "Long"))
+                 {
+                  if(trade.PositionClose(posn.Ticket())) closed = true;
+                 }
+              }
+           }
+         if(closed)
+            SendDiscordAlert(_Symbol + " | 🛑 BIAS INVALIDATED", "The IFX Scanner has detected a trend reversal. Current position closed to protect capital.", 15548997, 0, 0, 0, 0, 0);
+        }
+
+      // 🧠 EXTRACT AI TECHNICAL REASONING
+      sys_reasoning = ParseString(up_txt, "\"STRUCTURAL_REASONING\"");
+      if(sys_reasoning == "") sys_reasoning = ParseString(up_txt, "REASONING");
+
+      if((old_bias != sys_bias || old_pivot != sys_pivot) && sys_pivot > 0.0) {
+          Print("🚀 NEW VERTEX AI SIGNAL INGESTED: ", sys_bias, " @ ", sys_pivot);
+          ResetStateForNewSignal();
+      }
+     }
+   else
+     {
+      if(i_manual_bias == BIAS_LONG)
+         sys_bias = "Long";
+      else
+         if(i_manual_bias == BIAS_SHORT)
+            sys_bias = "Short";
+         else
+            sys_bias = "Neutral";
+       
+      sys_pivot = i_manual_pivot;
+      sys_tp1   = NormalizeDouble(i_manual_tp1, _Digits);
+      sys_tp2   = NormalizeDouble(i_manual_tp2, _Digits);
+     }
+}
+
+//+------------------------------------------------------------------+
+//| 🚀 UNIFIED SMC STATE MACHINE ENGINE                              |
+//+------------------------------------------------------------------+
+void GetActiveStructure(ENUM_TIMEFRAMES tf, int len, double &out_ph, double &out_pl, datetime &out_t_ph, datetime &out_t_pl)
+  {
+   double h[], l[], c[];
+   datetime t[];
+   ArraySetAsSeries(h, true);
+   ArraySetAsSeries(l, true);
+   ArraySetAsSeries(c, true);
+   ArraySetAsSeries(t, true);
+   
+   int lookback = i_smc_lookback;
+   
+   int copied_h = CopyHigh(_Symbol, tf, 0, lookback, h);
+   int copied_l = CopyLow(_Symbol, tf, 0, lookback, l);
+   int copied_c = CopyClose(_Symbol, tf, 0, lookback, c);
+   int copied_t = CopyTime(_Symbol, tf, 0, lookback, t);
+   
+   if(copied_h <= len * 2 || copied_l <= len * 2 || copied_c <= len * 2 || copied_t <= len * 2)
+     {
+      out_ph = EMPTY_VALUE;
+      out_pl = EMPTY_VALUE;
+      out_t_ph = 0;
+      out_t_pl = 0;
+      return;
+     }
+
+   int alb = (int)MathMin(copied_h, MathMin(copied_l, MathMin(copied_c, copied_t)));
+   
+   double active_ph = EMPTY_VALUE, active_pl = EMPTY_VALUE;
+   datetime t_act_ph = 0, t_act_pl = 0;
+
+   // 🚀 PROXIMITY SEARCH: Walk backwards from newest to oldest
+   // We stop the moment we find the NEAREST qualified structural floor/ceiling.
+   for(int i = len; i < alb - len; i++)
+     {
+      bool isPH = true;
+      bool isPL = true;
+     
+      // Check fractal qualification (Must be higher/lower than 'len' neighbors on both sides)
+      for(int j = i - len; j <= i + len; j++)
+        {
+         if(i == j) continue;
+         if(h[j] > h[i]) isPH = false;
+         if(l[j] < l[i]) isPL = false;
+        }
+
+      // Capture the NEAREST High
+      if(isPH && active_ph == EMPTY_VALUE)
+        {
+         active_ph = h[i];
+         t_act_ph = t[i];
+        }
+       
+      // Capture the NEAREST Low
+      if(isPL && active_pl == EMPTY_VALUE)
+        {
+         active_pl = l[i];
+         t_act_pl = t[i];
+        }
+
+      // 🎯 EXIT STRATEGY: If we have found both nearest anchors, stop searching immediately.
+      if(active_ph != EMPTY_VALUE && active_pl != EMPTY_VALUE)
+         break;
+     }
+     
+   out_ph = active_ph;
+   out_pl = active_pl;
+   out_t_ph = t_act_ph;
+   out_t_pl = t_act_pl;
+  }
+
+//+------------------------------------------------------------------+
+// Returns the broken pivot price, or 0.0 if no break detected.
+// This value is used directly as the spam-guard anchor.
+double CheckLiveBOS(string type, int len)
+  {
+   double h[], l[], c[];
+   if(CopyHigh(_Symbol, i_tf_enforce, 0, 100, h) < 100) return 0.0;
+   if(CopyLow(_Symbol, i_tf_enforce, 0, 100, l) < 100) return 0.0;
+   if(CopyClose(_Symbol, i_tf_enforce, 0, 100, c) < 100) return 0.0;
+   
+   ArraySetAsSeries(h, true); ArraySetAsSeries(l, true); ArraySetAsSeries(c, true);
+   
+   for(int i = len + 1; i < 50; i++)
+     {
+      if(type == "Short")
+        {
+         bool isPL = true;
+         for(int j = i - len; j <= i + len; j++)
+           {
+            if(i == j) continue;
+            if(l[j] <= l[i]) { isPL = false; break; }
+           }
+         if(isPL)
+           {
+            if(c[1] < l[i] && c[2] >= l[i])
+               return l[i]; // Return the exact broken pivot low price
+            return 0.0;
+           }
+        }
+      else if(type == "Long")
+        {
+         bool isPH = true;
+         for(int j = i - len; j <= i + len; j++)
+           {
+            if(i == j) continue;
+            if(h[j] >= h[i]) { isPH = false; break; }
+           }
+         if(isPH)
+           {
+            if(c[1] > h[i] && c[2] <= h[i])
+               return h[i]; // Return the exact broken pivot high price
+            return 0.0;
+           }
+        }
+     }
+   return 0.0;
+  }
+
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !TerminalInfoInteger(TERMINAL_CONNECTED))
+      Print("WARNING: Terminal not connected or Algo Trading disabled. WebRequests may fail.");
+
+   symb.Name(_Symbol);
+   if(!symb.Refresh())
+      return(INIT_FAILED);
+   
+   sys_magic = i_base_magic + i_tf_enforce;
+   trade.SetExpertMagicNumber(sys_magic);
+   
+   trade.SetDeviationInPoints(50);
+   
+   uint filling = (uint)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   if((filling & SYMBOL_FILLING_FOK) != 0)
+      trade.SetTypeFilling(ORDER_FILLING_FOK);
+   else
+      if((filling & SYMBOL_FILLING_IOC) != 0)
+         trade.SetTypeFilling(ORDER_FILLING_IOC);
+      else
+         trade.SetTypeFilling(ORDER_FILLING_RETURN);
+
+   global_atr_handle = iATR(_Symbol, PERIOD_D1, 14);
+   if(global_atr_handle == INVALID_HANDLE)
+      return(INIT_FAILED);
+
+   // 🧠 PERSISTENT STATE RECOVERY
+   // Load mathematical matrix strictly from shared disk to survive timeframe changes
+   string payload_file = "IFX_Matrix_" + _Symbol + ".json";
+   int handle = FileOpen(payload_file, FILE_READ|FILE_TXT|FILE_COMMON);
+   bool recovered = false;
+   
+   if(handle != INVALID_HANDLE)
+     {
+      string json_data = "";
+      while(!FileIsEnding(handle))
+        {
+         json_data += FileReadString(handle);
+        }
+      FileClose(handle);
+     
+      if(StringLen(json_data) > 10)
+        {
+         string stored_txt = json_data;
+         StringToUpper(stored_txt);
+         ParseAIText(stored_txt);
+         recovered = true;
+         Print("✅ [EXECUTOR] Ghost Memory Restored! Persistent Matrix recovered successfully.");
+        }
+     }
+     
+   if(!recovered)
+     {
+      string up_txt = i_ai_text;
+      StringToUpper(up_txt);
+      ParseAIText(up_txt);
+     }
+
+   daily_trades_count = CountTodayTrades();
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   last_trade_day = dt.day;
+
+   // 🛑 MT5 64-BIT TRUNCATION BUG FIX:
+   // MT5 GlobalVariables only store 53-bit doubles. We MUST split the 64-bit ChartID
+   // into two 32-bit halves to safely transmit it globally without corrupting the value!
+   long exec_id = ChartID();
+   uint id_hi = (uint)(exec_id >> 32);
+   uint id_lo = (uint)(exec_id & 0xFFFFFFFF);
+   GlobalVariableSet("IFX_HI_" + _Symbol, (double)id_hi);
+   GlobalVariableSet("IFX_LO_" + _Symbol, (double)id_lo);
+
+   EventSetTimer(1);
+   return(INIT_SUCCEEDED);
+  }
+
+void OnDeinit(const int reason)
+  {
+   GlobalVariableDel("IFX_HI_" + _Symbol);
+   GlobalVariableDel("IFX_LO_" + _Symbol);
+   EventKillTimer();
+   IndicatorRelease(global_atr_handle);
+   ObjectsDeleteAll(0, "IFX_");
+   ObjectsDeleteAll(0, "HUD_");
+   ObjectsDeleteAll(0, "LDG_");
+   ChartRedraw();
+  }
+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+  {
+   if(id == CHARTEVENT_CUSTOM + EVENT_AI_COMPLETE)
+     {
+      Print("🚀 [EXECUTOR] Signal Received! Reading FDM Matrix from shared memory...");
+      string file_name = sparam;
+      int handle = FileOpen(file_name, FILE_READ|FILE_TXT|FILE_COMMON);
+     
+      if(handle != INVALID_HANDLE)
+        {
+         string json_data = "";
+         while(!FileIsEnding(handle))
+           {
+            json_data += FileReadString(handle);
+           }
+         FileClose(handle);
+         
+         // 🛑 PERSISTENCE UPDATE: We no longer delete this file. It now acts as your  
+         // permanent Ghost Memory Bank to survive Timeframe swaps and MT5 reboots!
+         
+         string up_txt = json_data;
+         StringToUpper(up_txt);
+         ParseAIText(up_txt);
+        }
+      else
+        {
+         Print("❌ [EXECUTOR] Failed to locate or open Deep Consensus Payload: ", file_name);
+        }
+     }
+     
+   if(id == CHARTEVENT_OBJECT_CLICK)
+     {
+      if(sparam == "IFX_BTN_LONG")
+        {
+         req_discord_long = true;
+         ObjectSetInteger(0, "IFX_BTN_LONG", OBJPROP_STATE, false);
+        }
+      if(sparam == "IFX_BTN_SHORT")
+        {
+         req_discord_short = true;
+         ObjectSetInteger(0, "IFX_BTN_SHORT", OBJPROP_STATE, false);
+        }
+      if(sparam == "IFX_BTN_REP")
+        {
+         req_discord_report = true;
+         ObjectSetInteger(0, "IFX_BTN_REP", OBJPROP_STATE, false);
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| 🏅 SYMBOL DNA REGISTRY (Vertex 1)
+//| Automatically assigns the best ATR thickness based on asset class.
+//+------------------------------------------------------------------|
+double GetOptimalATRPercentage(string sym)
+  {
+   // If user manually changed i_atrPct from default 10.0, honor the choice.
+   if(MathAbs(i_atrPct - 10.0) > 0.01) return i_atrPct;
+   
+   string s = sym;
+   StringToUpper(s);
+   
+   // 🏅 GOLD / XAU
+   if(StringFind(s, "XAU") >= 0 || StringFind(s, "GOLD") >= 0) return 18.0;
+   
+   // 🛢️ OIL / WTI
+   if(StringFind(s, "OIL") >= 0 || StringFind(s, "WTI") >= 0 || StringFind(s, "BRN") >= 0 || StringFind(s, "LCO") >= 0) return 16.0;
+   
+   // 📊 INDICES
+   if(StringFind(s, "30") >= 0 || StringFind(s, "100") >= 0 || StringFind(s, "500") >= 0 ||
+      StringFind(s, "DJI") >= 0 || StringFind(s, "NAS") >= 0 || StringFind(s, "SPX") >= 0 ||
+      StringFind(s, "GER") >= 0 || StringFind(s, "DAX") >= 0) return 15.0;
+   
+   // 💱 FOREX MAJORS & CROSSES (Ensure room for structure formation)
+   if(StringLen(s) >= 6) return 12.5;
+
+   return 10.0; // Default fallback
+  }
+
+void OnTick()
+  {
+   if(!symb.RefreshRates())
+      return;
+
+   // -------------------------------------------------------------------------
+   // 🛑 MQL5 MARKET VALIDATOR FIX (UPDATED FOR TICK PRECISION & $1 TEST)
+   // We use a static flag to ensure the bypass only executes once. We also MUST
+   // check for sufficient margin. If the validator is running the "$1.00 deposit"
+   // test, we gracefully print an error and skip the OrderSend, saving the test.
+   // -------------------------------------------------------------------------
+   if(MQLInfoInteger(MQL_TESTER) && sys_bias == "Neutral" && sys_pivot == 0.0)
+     {
+      static bool validator_trade_open = false;
+      MqlDateTime test_dt;
+      TimeToStruct(TimeCurrent(), test_dt);
+     
+      // Open trade in the 9th hour
+      if(test_dt.hour == 9 && !validator_trade_open)
+        {
+         if(CountOpenPositions() == 0)
+           {
+            double lot = symb.LotsMin();
+            double req_margin = 0.0;
+            if(OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, lot, symb.Ask(), req_margin))
+              {
+               if(req_margin <= acct.FreeMargin())
+                 {
+                  trade.Buy(lot, _Symbol, symb.Ask(), 0, 0, "MQL5 Validator Bypass");
+                 }
+               else
+                 {
+                  Print("Validator Bypass: Not enough money. Required: ", req_margin, " Free: ", acct.FreeMargin());
+                 }
+              }
+            validator_trade_open = true; // Lock it so it doesn't spam
+           }
+        }
+       
+      // Close trade in the 10th hour to prevent Stop Out
+      if(test_dt.hour == 10 && validator_trade_open)
+        {
+         for(int i = PositionsTotal() - 1; i >= 0; i--)
+           {
+            if(posn.SelectByIndex(i) && posn.Symbol() == _Symbol)
+               trade.PositionClose(posn.Ticket());
+           }
+         validator_trade_open = false;
+        }
+      return; // Skip normal execution if inputs are empty in the tester
+     }
+   // -------------------------------------------------------------------------
+
+
+   // 🚀 DISCORD QUEUE PROCESSOR
+   if(req_discord_long)
+     {
+      SendDiscordAlert(_Symbol + " | MANUAL TEST 🐂", "Testing the IFX Premium Signal Layout through the Python Bridge.", 3447003, SymbolInfoDouble(_Symbol, SYMBOL_ASK), 0, 0, 0, 0.10);
+      req_discord_long = false;
+     }
+   if(req_discord_short)
+     {
+      SendDiscordAlert(_Symbol + " | MANUAL TEST 🐻", "Testing the IFX Premium Signal Layout through the Python Bridge.", 15548997, SymbolInfoDouble(_Symbol, SYMBOL_BID), 0, 0, 0, 0.10);
+      req_discord_short = false;
+     }
+   if(req_discord_report)
+     {
+      SendDailyReport();
+      req_discord_report = false;
+     }
+
+   if(CountOpenPositions() == 0)
+     {
+      is_be_secured = false;
+      is_be_notified = false;
+      is_partial_taken = false;
+     }
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   
+   if(dt.day != last_trade_day)
+     {
+      daily_trades_count = 0;
+      eod_closed_today = false;
+      report_sent_today = false;
+      last_trade_day = dt.day;
+      last_traded_pivot = 0.0;
+     }
+   
+   if(isDead_SL && TimeCurrent() >= dead_SL_time + (i_slCooldown * 60))
+      isDead_SL = false;
+   
+   if(dt.hour == 0 && dt.min == 0)
+      report_sent_today = false;
+   
+   if(dt.hour == i_reportHour && dt.min >= i_reportMin && !report_sent_today)
+     {
+      SendDailyReport();
+      report_sent_today = true;
+     }
+
+   double atr[];
+   ArraySetAsSeries(atr, true);
+   double local_atr = 0.0;
+   
+   if(CopyBuffer(global_atr_handle, 0, 1, 1, atr) > 0 && atr[0] > 0.0 && atr[0] != EMPTY_VALUE)
+     {
+      local_atr = atr[0];
+     }
+   else
+     {
+      // 🛡️ DYNAMIC VOLATILITY FALLBACK
+      double h_arr[], l_arr[];
+      if(CopyHigh(_Symbol, i_tf_enforce, 0, 100, h_arr) > 0 && CopyLow(_Symbol, i_tf_enforce, 0, 100, l_arr) > 0) {
+          double h_max = h_arr[ArrayMaximum(h_arr)];
+          double l_min = l_arr[ArrayMinimum(l_arr)];
+          local_atr = h_max - l_min;
+      } else {
+          local_atr = 500 * _Point;
+      }
+     }
+
+   double zone_thickness = local_atr * (i_atrPct / 100.0);
+   zoneHigh = NormalizeDouble(sys_pivot + (zone_thickness / 2), _Digits);
+   zoneLow  = NormalizeDouble(sys_pivot - (zone_thickness / 2), _Digits);
+   calc_inval = (sys_bias == "Long") ? zoneLow : zoneHigh;
+
+   double m1_close_curr = iClose(_Symbol, i_tf_enforce, 0);
+   is_inside_zone = (m1_close_curr <= zoneHigh && m1_close_curr >= zoneLow);
+
+   // 🛡️ DYNAMIC FALLBACK STOP LOSS ENGINE
+   if(CountOpenPositions() == 0 && sys_bias != "Neutral" && sys_pivot > 0)
+     {
+      double anchor_m1 = EMPTY_VALUE, anchor_m5 = EMPTY_VALUE;
+      double ph_t, pl_t;
+      datetime t1, t2;
+     
+      // 1. PRIMARY: Try Anchor Timeframe (M5) for stability
+      if(i_use_mtf_sl)
+        {
+         GetActiveStructure(i_sl_tf, i_pivotLen, ph_t, pl_t, t1, t2);
+         anchor_m5 = (sys_bias == "Long") ? pl_t : ph_t;
+        }
+     
+      double final_anchor = anchor_m5;
+     
+      // 2. SECONDARY (RECURSIVE): Fallback to Entry Timeframe (M1) for Micro-Structure
+      if(final_anchor == EMPTY_VALUE || final_anchor == 0)
+        {
+         GetActiveStructure(i_tf_enforce, i_pivotLen, ph_t, pl_t, t1, t2);
+         final_anchor = (sys_bias == "Long") ? pl_t : ph_t;
+         if(final_anchor != EMPTY_VALUE && MQLInfoInteger(MQL_TESTER) == 0)
+            Print("🔍 [RECURSIVE SL] M5 missing. Using M1 Micro-Structure floor: ", final_anchor);
+        }
+     
+      // 3. FINAL FALLBACK: AI Invalidation (The Safety Net)
+      if(final_anchor == EMPTY_VALUE || final_anchor == 0)
+        {
+         final_anchor = calc_inval;
+         if(final_anchor != EMPTY_VALUE && MQLInfoInteger(MQL_TESTER) == 0)
+            Print("🛡️ [FALLBACK SL] No structure found. Using AI Invalidation: ", final_anchor);
+        }
+
+      if(final_anchor != EMPTY_VALUE && final_anchor != 0)
+        {
+         double dynamic_pad = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point * i_slPadMult;
+         live_sl = (sys_bias == "Long") ? NormalizeDouble(final_anchor - dynamic_pad, _Digits) : NormalizeDouble(final_anchor + dynamic_pad, _Digits);
+         CalculateAutoRR(sys_bias, live_sl);
+         live_lots = CalculateLots(live_sl);
+        }
+      else
+        {
+         live_sl = 0.0;
+         live_lots = 0.0;
+        }
+     }
+
+   DrawBattlefieldZones(zoneHigh, zoneLow, calc_inval);
+
+   datetime current_bar = iTime(_Symbol, i_tf_enforce, 0);
+   if(current_bar != last_smc_bar)
+     {
+      bool render_success = true;
+      if(i_show_struct)
+         render_success = DrawSMCStructure();
+      else
+         ObjectsDeleteAll(0, "IFX_SMC_");
+     
+      if(render_success)
+         last_smc_bar = current_bar;
+     }
+
+   if(i_useEOD && TimeToString(TimeCurrent(), TIME_MINUTES) >= i_eodTime && !eod_closed_today)
+     {
+      if(CountOpenPositions() > 0)
+        {
+         for(int i = PositionsTotal() - 1; i >= 0; i--)
+           {
+            if(posn.SelectByIndex(i) && posn.Symbol() == _Symbol)
+              {
+               int m_id = (int)posn.Magic();
+               if(m_id >= i_base_magic && m_id <= i_base_magic + 50)
+                 {
+                  trade.PositionClose(posn.Ticket());
+                 }
+              }
+           }
+         SendDiscordAlert("EOD FORCE EXIT", "End of day time limit reached. Position closed.", 16753920, 0, 0, 0, 0, 0);
+        }
+      eod_closed_today = true;
+     }
+   
+   bool inSession = CheckTradingSessions();
+
+   // 🛡️ Position management MUST run every tick regardless of H1 data availability
+   CheckTradeExits();
+   ManageOpenPositions();
+
+   double boss_close[];
+   ArraySetAsSeries(boss_close, true);
+   
+   if(CopyClose(_Symbol, i_boss_tf, 1, 1, boss_close) <= 0)
+      return;
+   
+   isDead_Struct = false;
+   if(sys_bias == "Long" && boss_close[0] < calc_inval)
+      isDead_Struct = true;
+   if(sys_bias == "Short" && boss_close[0] > calc_inval)
+      isDead_Struct = true;
+
+   // 🛡️ BAR-CHANGE GUARD: Only evaluate BOS on the FIRST tick of a new bar.
+   // This prevents stale entries where a BOS happened candles ago but other conditions only aligned later.
+   datetime entry_bar_time = iTime(_Symbol, i_tf_enforce, 0);
+   if(CountOpenPositions() == 0 && daily_trades_count < i_maxTrades && !isDead_SL && !isDead_Struct && inSession && !eod_closed_today && sys_confidence >= i_min_confidence && entry_bar_time != last_entry_bar)
+     {
+      last_entry_bar = entry_bar_time; // 🔒 Lock immediately — this bar gets ONE shot
+     
+      double m1_close[];
+      ArraySetAsSeries(m1_close, true);
+     
+      if(CopyClose(_Symbol, i_tf_enforce, 0, 3, m1_close) < 3)
+         return;
+       
+      bool touchingZone = (iLow(_Symbol, i_tf_enforce, 0) <= zoneHigh && iHigh(_Symbol, i_tf_enforce, 0) >= zoneLow) ||
+                          (iLow(_Symbol, i_tf_enforce, 1) <= zoneHigh && iHigh(_Symbol, i_tf_enforce, 1) >= zoneLow);
+     
+      double bos_level_long  = CheckLiveBOS("Long", i_pivotLen);
+      double bos_level_short = CheckLiveBOS("Short", i_pivotLen);
+       
+      if(sys_bias == "Long" && bos_level_long > 0 && touchingZone && bos_level_long != last_traded_pivot)
+        {
+         last_traded_pivot = bos_level_long;
+         
+         double sl = live_sl;
+         double total_lots = live_lots;
+         if(sl > 0 && total_lots > 0.0)
+           {
+            // 🛡️ AUTO TP OVERRIDE: Calculate AutoRR targets before validating
+            double entry_price = symb.Ask();
+            if(i_useAutoRR)
+              {
+               double risk = MathAbs(entry_price - sl);
+               sys_tp1 = NormalizeDouble(entry_price + (risk * i_autoRR1), _Digits);
+               sys_tp2 = NormalizeDouble(entry_price + (risk * i_autoRR2), _Digits);
+              }
+
+            // 🛡️ TP DIRECTION GUARD: Sanitize AI TPs that land on the wrong side of entry
+            if(sys_tp1 > 0.0 && sys_tp1 <= entry_price) sys_tp1 = 0.0;
+            if(sys_tp2 > 0.0 && sys_tp2 <= entry_price) sys_tp2 = 0.0;
+           
+            // 🛡️ BROKER STOP LEVEL GUARD: Sanitize TPs that are too tight for the broker to accept
+            long stop_level = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+            long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+            double min_dist = MathMax(stop_level, spread) * _Point;
+            if(sys_tp1 > 0.0 && MathAbs(sys_tp1 - entry_price) <= min_dist) { Print("⚠️ TP1 too close to entry. Sanitizing to 0.0"); sys_tp1 = 0.0; }
+            if(sys_tp2 > 0.0 && MathAbs(sys_tp2 - entry_price) <= min_dist) { Print("⚠️ TP2 too close to entry. Sanitizing to 0.0"); sys_tp2 = 0.0; }
+            if(sl >= entry_price) { Print("⚠️ [ENTRY BLOCKED] Long SL (", sl, ") is above entry (", entry_price, ")."); return; }
+
+            // 🛡️ MINIMUM R:R GATE
+            double risk_dist = MathAbs(entry_price - sl);
+            // 🛑 RR HARDENING: Prioritize the first target (TP1) for the safety gate.
+            // If TP1 doesn't meet the min RR, the trade is blocked even if TP2 is far away.
+            double reward_dist = (sys_tp1 > 0) ? MathAbs(sys_tp1 - entry_price) : (sys_tp2 > 0 ? MathAbs(sys_tp2 - entry_price) : 0);
+            if(risk_dist > 0 && reward_dist > 0 && (reward_dist / risk_dist) < i_min_rr)
+              { Print("⚠️ [ENTRY BLOCKED] Long R:R too low: ", DoubleToString(reward_dist/risk_dist, 2), "R (min: ", DoubleToString(i_min_rr, 1), "R)"); return; }
+
+            // 🛑 MARGIN SAFETY CHECK
+            double req_margin = 0.0;
+            if(OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, total_lots, symb.Ask(), req_margin))
+              {
+               if(req_margin > acct.FreeMargin())
+                 {
+                  Print("Not enough money for Long Entry. Req: ", req_margin, " Free: ", acct.FreeMargin());
+                  return;
+                 }
+              }
+
+            int live_spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+            int dyn_dev = (live_spread > 0) ? live_spread * 2 : 50;
+            trade.SetDeviationInPoints(dyn_dev);
+            bool success = false;
+
+            if(i_usePartial && sys_tp1 > 0.0)
+              {
+               double step_lot = symb.LotsStep();
+               if(step_lot <= 0.0)
+                  step_lot = 0.01;
+               int lot_digits = (int)MathMax(0, MathCeil(-MathLog10(step_lot)));
+
+               // --- HARD-SPLIT ENFORCEMENT ---
+               if(total_lots < 0.02) total_lots = 0.02;
+
+               double lot_tp1 = NormalizeDouble(total_lots * (i_tp1_pct / 100.0), 2);
+               double lot_tp2 = NormalizeDouble(total_lots - lot_tp1, 2);
+   
+               // 🛡️ HARD-SPLIT SAFETY: If total is 0.02, force 0.01/0.01 to ensure two tickets exist.
+               if(total_lots == 0.02) { lot_tp1 = 0.01; lot_tp2 = 0.01; }
+               else if(lot_tp1 < 0.01) { lot_tp1 = 0.01; lot_tp2 = NormalizeDouble(total_lots - 0.01, 2); }
+               else if(lot_tp2 < 0.01) { lot_tp2 = 0.01; lot_tp1 = NormalizeDouble(total_lots - 0.01, 2); }
+
+               if(lot_tp1 >= symb.LotsMin() && lot_tp2 >= symb.LotsMin())
+                 {
+                  bool t1 = trade.Buy(lot_tp1, _Symbol, symb.Ask(), sl, sys_tp1, "IFX Long TP1");
+                  bool t2 = trade.Buy(lot_tp2, _Symbol, symb.Ask(), sl, sys_tp2, "IFX Long TP2");
+                  if(!t1) { Print("⚠️ TP1 Ticket Failed: ", trade.ResultRetcodeDescription()); sys_tp1 = 0.0; }
+                  if(!t2) { Print("⚠️ TP2 Ticket Failed: ", trade.ResultRetcodeDescription()); sys_tp2 = 0.0; }
+                  if(t1 || t2)
+                     success = true;
+                 }
+               else
+                 {
+                  // Fallback: If we still can't split, take the whole lot to TP2
+                  success = trade.Buy(total_lots, _Symbol, symb.Ask(), sl, sys_tp2, "IFX Long");
+                 }
+              }
+            else
+              {
+               success = trade.Buy(total_lots, _Symbol, symb.Ask(), sl, sys_tp2, "IFX Long");
+              }
+
+            if(success)
+              {
+               daily_trades_count++;
+                               SendDiscordAlert(_Symbol + " | 🚨 LIVE SNIPER ENTRY: LONG 🟢", sys_reasoning, 3447003, symb.Ask(), sl, sys_tp1, sys_tp2, total_lots);
+              }
+           }
+         else
+           {
+            Print("⚠️ [ENTRY BLOCKED] Long BOS detected but SL=", live_sl, " Lots=", live_lots, " — no structural anchor found.");
+           }
+        }
+      else
+         if(sys_bias == "Short" && bos_level_short > 0 && touchingZone && bos_level_short != last_traded_pivot)
+           {
+            last_traded_pivot = bos_level_short;
+           
+            double sl = live_sl;
+            double total_lots = live_lots;
+            if(sl > 0 && total_lots > 0.0)
+              {
+               // 🛡️ AUTO TP OVERRIDE: Calculate AutoRR targets before validating
+               double entry_price = symb.Bid();
+               if(i_useAutoRR)
+                 {
+                  double risk = MathAbs(sl - entry_price);
+                  sys_tp1 = NormalizeDouble(entry_price - (risk * i_autoRR1), _Digits);
+                  sys_tp2 = NormalizeDouble(entry_price - (risk * i_autoRR2), _Digits);
+                 }
+
+               // 🛡️ TP DIRECTION GUARD: Sanitize AI TPs that land on the wrong side of entry
+               if(sys_tp1 > 0.0 && sys_tp1 >= entry_price) sys_tp1 = 0.0;
+               if(sys_tp2 > 0.0 && sys_tp2 >= entry_price) sys_tp2 = 0.0;
+
+               // 🛡️ BROKER STOP LEVEL GUARD: Sanitize TPs that are too tight for the broker to accept
+               long stop_level = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+               long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+               double min_dist = MathMax(stop_level, spread) * _Point;
+               if(sys_tp1 > 0.0 && MathAbs(entry_price - sys_tp1) <= min_dist) { Print("⚠️ TP1 too close to entry. Sanitizing to 0.0"); sys_tp1 = 0.0; }
+               if(sys_tp2 > 0.0 && MathAbs(entry_price - sys_tp2) <= min_dist) { Print("⚠️ TP2 too close to entry. Sanitizing to 0.0"); sys_tp2 = 0.0; }
+               if(sl <= entry_price) { Print("⚠️ [ENTRY BLOCKED] Short SL (", sl, ") is below entry (", entry_price, ")."); return; }
+
+               // 🛡️ MINIMUM R:R GATE
+               double risk_dist = MathAbs(sl - entry_price);
+               // 🛑 RR HARDENING: Prioritize the first target (TP1) for the safety gate.
+               double reward_dist = (sys_tp1 > 0) ? MathAbs(entry_price - sys_tp1) : (sys_tp2 > 0 ? MathAbs(entry_price - sys_tp2) : 0);
+               if(risk_dist > 0 && reward_dist > 0 && (reward_dist / risk_dist) < i_min_rr)
+                 { Print("⚠️ [ENTRY BLOCKED] Short R:R too low: ", DoubleToString(reward_dist/risk_dist, 2), "R (min: ", DoubleToString(i_min_rr, 1), "R)"); return; }
+
+               // 🛑 MARGIN SAFETY CHECK
+               double req_margin = 0.0;
+               if(OrderCalcMargin(ORDER_TYPE_SELL, _Symbol, total_lots, symb.Bid(), req_margin))
+                 {
+                  if(req_margin > acct.FreeMargin())
+                    {
+                     Print("Not enough money for Short Entry. Req: ", req_margin, " Free: ", acct.FreeMargin());
+                     return;
+                    }
+                 }
+
+               int live_spread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+               int dyn_dev = (live_spread > 0) ? live_spread * 2 : 50;
+               trade.SetDeviationInPoints(dyn_dev);
+               bool success = false;
+
+               if(i_usePartial && sys_tp1 > 0.0)
+                 {
+                  double step_lot = symb.LotsStep();
+                  if(step_lot <= 0.0)
+                     step_lot = 0.01;
+                  int lot_digits = (int)MathMax(0, MathCeil(-MathLog10(step_lot)));
+
+                  // --- HARD-SPLIT ENFORCEMENT ---
+                  if(total_lots < symb.LotsMin() * 2)
+                     total_lots = symb.LotsMin() * 2;
+
+                  double lot_tp1 = NormalizeDouble(total_lots * (i_tp1_pct / 100.0), 2);
+                  double lot_tp2 = NormalizeDouble(total_lots - lot_tp1, 2);
+   
+                  // 🛡️ HARD-SPLIT SAFETY: If total is 0.02, force 0.01/0.01 to ensure two tickets exist.
+                  if(total_lots == 0.02) { lot_tp1 = 0.01; lot_tp2 = 0.01; }
+                  else if(lot_tp1 < 0.01) { lot_tp1 = 0.01; lot_tp2 = NormalizeDouble(total_lots - 0.01, 2); }
+                  else if(lot_tp2 < 0.01) { lot_tp2 = 0.01; lot_tp1 = NormalizeDouble(total_lots - 0.01, 2); }
+
+                  if(lot_tp1 >= symb.LotsMin() && lot_tp2 >= symb.LotsMin())
+                    {
+                     bool t1 = trade.Sell(lot_tp1, _Symbol, symb.Bid(), sl, sys_tp1, "IFX Short TP1");
+                     bool t2 = trade.Sell(lot_tp2, _Symbol, symb.Bid(), sl, sys_tp2, "IFX Short TP2");
+                     if(!t1) { Print("⚠️ TP1 Ticket Failed: ", trade.ResultRetcodeDescription()); sys_tp1 = 0.0; }
+                     if(!t2) { Print("⚠️ TP2 Ticket Failed: ", trade.ResultRetcodeDescription()); sys_tp2 = 0.0; }
+                     if(t1 || t2)
+                        success = true;
+                    }
+                  else
+                    {
+                     success = trade.Sell(total_lots, _Symbol, symb.Bid(), sl, sys_tp2, "IFX Short");
+                    }
+                 }
+               else
+                 {
+                  success = trade.Sell(total_lots, _Symbol, symb.Bid(), sl, sys_tp2, "IFX Short");
+                 }
+
+               if(success)
+                 {
+                  daily_trades_count++;
+                                     SendDiscordAlert(_Symbol + " | 🚨 LIVE SNIPER ENTRY: SHORT 🔴", sys_reasoning, 15548997, symb.Bid(), sl, sys_tp1, sys_tp2, total_lots);
+                 }
+              }
+           else
+             {
+              Print("⚠️ [ENTRY BLOCKED] Short BOS detected but SL=", live_sl, " Lots=", live_lots, " — no structural anchor found.");
+             }
+           }
+     }
+  }
+
+//+------------------------------------------------------------------+
+void ManageOpenPositions()
+  {
+   double total_open_lots = 0.0;
+   bool tp1_exists = false;
+   bool tp2_exists = false;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(posn.SelectByIndex(i) && posn.Symbol() == _Symbol)
+        {
+         int m_id = (int)posn.Magic();
+         if(m_id >= i_base_magic && m_id <= i_base_magic + 50)
+           {
+            double tp = posn.TakeProfit();
+            if(sys_tp1 > 0.0 && MathAbs(tp - sys_tp1) < _Point * 10)
+               tp1_exists = true;
+            if(sys_tp2 > 0.0 && MathAbs(tp - sys_tp2) < _Point * 10)
+               tp2_exists = true;
+            total_open_lots += posn.Volume();
+           }
+        }
+     }
+
+   if(tp2_exists && !tp1_exists && i_usePartial && sys_tp1 > 0.0 && !is_partial_taken)
+     {
+      if(i_notify_on_tp)
+         SendDiscordAlert(_Symbol + " | 🎯 PROFIT TARGET REACHED", "Institutional TP1 successfully executed. Position risk removed.", 5763719, 0, 0, 0, 0, 0);
+      is_partial_taken = true;
+     }
+
+   bool trigger_be = false;
+   if(i_be_after_tp1 && is_partial_taken)
+      trigger_be = true;
+
+   if(i_useBE && !trigger_be && tp2_exists)
+     {
+      double ref_entry = 0;
+      long ref_type = -1;
+      datetime ref_time = 0;
+       
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         if(posn.SelectByIndex(i) && posn.Symbol() == _Symbol && (int)posn.Magic() >= i_base_magic && (int)posn.Magic() <= i_base_magic + 50)
+           {
+            ref_entry = posn.PriceOpen();
+            ref_type = posn.PositionType();
+            ref_time = posn.Time();
+            break;
+           }
+        }
+
+      if(ref_type != -1)
+        {
+         double m10_close[];
+         ArraySetAsSeries(m10_close, true);
+         
+         if(CopyClose(_Symbol, i_be_tf, 0, 1, m10_close) > 0)
+           {
+            double be_ph, be_pl;
+            datetime t_ph, t_pl;
+            GetActiveStructure(i_be_tf, i_pivotLen, be_ph, be_pl, t_ph, t_pl);
+
+            if(ref_type == POSITION_TYPE_BUY && be_ph != EMPTY_VALUE && be_ph > ref_entry && m10_close[0] > ref_entry && t_ph > ref_time)
+               trigger_be = true;
+            if(ref_type == POSITION_TYPE_SELL && be_pl != EMPTY_VALUE && be_pl < ref_entry && m10_close[0] < ref_entry && t_pl > ref_time)
+               trigger_be = true;
+           }
+        }
+     }
+
+   if(trigger_be)
+      is_be_secured = true;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(posn.SelectByIndex(i) && posn.Symbol() == _Symbol)
+        {
+         int m_id = (int)posn.Magic();
+         if(m_id >= i_base_magic && m_id <= i_base_magic + 50)
+           {
+            double entry = posn.PriceOpen();
+            long type = posn.PositionType();
+            double sl = posn.StopLoss();
+            double tp = posn.TakeProfit();
+               
+            live_sl = sl;
+               
+            // AutoRR logic moved to entry only to prevent global variable overwriting.
+
+            if(is_be_secured)
+              {
+               double new_sl = NormalizeDouble(entry, _Digits);
+               if(MathAbs(sl - new_sl) > _Point * 2)
+                 {
+                  long stop_level_points = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+                  long freeze_level_points = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+                  long spread_points = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+                  long min_points = MathMax(MathMax(stop_level_points, freeze_level_points), MathMax(spread_points, 10));
+                  double required_buffer = min_points * _Point;
+                  double current_price = (type == POSITION_TYPE_BUY) ? symb.Bid() : symb.Ask();
+                       
+                  if(MathAbs(current_price - new_sl) > required_buffer && (tp == 0 || MathAbs(current_price - tp) > required_buffer))
+                    {
+                     trade.PositionModify(posn.Ticket(), new_sl, tp);
+                     if(!is_be_notified)
+                       {
+                        SendDiscordAlert(_Symbol + " | 🛡️ RISK REMOVED (Break-Even)", "Trade protection active. Stop Loss has been moved to your Entry Price.", 3447003, entry, new_sl, tp, 0, posn.Volume());
+                        is_be_notified = true;
+                       }
+                    }
+                 }
+              }
+           }
+        }
+     }
+   if(CountOpenPositions() > 0)
+      live_lots = total_open_lots;
+  }
+
+//+------------------------------------------------------------------+
+void CheckTradeExits()
+  {
+   if(HistorySelect(TimeCurrent() - 86400, TimeCurrent()))
+     {
+      for(int j = HistoryDealsTotal() - 1; j >= 0; j--)
+        {
+         ulong ticket = HistoryDealGetTicket(j);
+         if(ticket == last_loss_ticket)
+            break;
+           
+         if(HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT && HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol)
+           {
+            int m_id = (int)HistoryDealGetInteger(ticket, DEAL_MAGIC);
+            if(m_id >= i_base_magic && m_id <= i_base_magic + 50)
+              {
+               double pnl = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+               last_loss_ticket = ticket; // Track this exit to avoid double-notifying
+               
+               // 1. ⚖️ BREAK-EVEN EXIT (Profit near 0)
+               if(MathAbs(pnl) < 1.0)
+                 {
+                  SendDiscordAlert(_Symbol + " | ⚖️ BREAK-EVEN HIT (Exit)", "Position closed at entry price. No loss incurred.", 10855845, 0, 0, 0, 0, 0);
+                 }
+               // 2. 🛡️ REAL LOSS (Negative)
+               else if(pnl < 0.0)
+                 {
+                  if(i_useDeadSL)
+                    {
+                     isDead_SL = true;
+                     dead_SL_time = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+                    }
+                  if(i_notify_on_sl)
+                     SendDiscordAlert(_Symbol + " | 🛡️ RISK PROTECTION TRIGGERED", "Structural invalidation reached. Trade closed for protection.", 15548997, 0, 0, 0, 0, 0);
+                 }
+               break;
+              }
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool CheckTradingSessions()
+  {
+   string curr = TimeToString(TimeCurrent(), TIME_MINUTES);
+   bool active = false;
+   
+   if(i_useAsia)
+     {
+      if(i_sesAsiaStart < i_sesAsiaEnd)
+        {
+         if(curr >= i_sesAsiaStart && curr <= i_sesAsiaEnd)
+            active = true;
+        }
+      else
+        {
+         if(curr >= i_sesAsiaStart || curr <= i_sesAsiaEnd)
+            active = true;
+        }
+     }
+     
+   if(i_useLon)
+     {
+      if(i_sesLonStart < i_sesLonEnd)
+        {
+         if(curr >= i_sesLonStart && curr <= i_sesLonEnd)
+            active = true;
+        }
+      else
+        {
+         if(curr >= i_sesLonStart || curr <= i_sesLonEnd)
+            active = true;
+        }
+     }
+     
+   if(i_useNY)
+     {
+      if(i_sesNYStart < i_sesNYEnd)
+        {
+         if(curr >= i_sesNYStart && curr <= i_sesNYEnd)
+            active = true;
+        }
+      else
+        {
+         if(curr >= i_sesNYStart || curr <= i_sesNYEnd)
+            active = true;
+        }
+     }
+   
+   return active;
+  }
+
+//+------------------------------------------------------------------+
+void CalculateAutoRR(string dir, double sl)
+  {
+   if(!i_useAutoRR)
+      return;
+   double entry = (dir == "Long") ? symb.Ask() : symb.Bid();
+   double risk = MathAbs(entry - sl);
+   if(dir == "Long")
+     {
+      sys_tp1 = NormalizeDouble(entry + (risk * i_autoRR1), _Digits);
+      sys_tp2 = NormalizeDouble(entry + (risk * i_autoRR2), _Digits);
+     }
+   else
+     {
+      sys_tp1 = NormalizeDouble(entry - (risk * i_autoRR1), _Digits);
+      sys_tp2 = NormalizeDouble(entry - (risk * i_autoRR2), _Digits);
+     }
+  }
+
+//+------------------------------------------------------------------+
+double CalculateLots(double sl_price)
+  {
+   double risk_usd = acct.Equity() * (i_riskPct / 100.0);
+   double tick_size = symb.TickSize();
+   
+   if(tick_size <= 0.0)
+      return 0.0;
+   
+   double tick_value = symb.TickValue();
+   double current_price = (sys_bias == "Long") ? symb.Ask() : symb.Bid();
+   double sl_dist_points = MathAbs(current_price - sl_price) / tick_size;
+   
+   if (sl_dist_points == 0 || tick_value == 0)
+      return 0.0;
+   
+   double lots = risk_usd / (sl_dist_points * tick_value);
+   double min_lot = symb.LotsMin();
+   double max_lot = symb.LotsMax();
+   double step_lot = symb.LotsStep();
+   
+   if(step_lot <= 0.0)
+      step_lot = 0.01;
+   
+   lots = MathFloor((lots + 1e-8) / step_lot) * step_lot;
+   
+   if(lots < min_lot)
+      return i_strictRisk ? 0.0 : min_lot;
+   if(lots > max_lot)
+      return max_lot;
+   
+   int lot_digits = (int)MathMax(0, MathCeil(-MathLog10(step_lot)));
+   return NormalizeDouble(lots, lot_digits);
+  }
+
+//+------------------------------------------------------------------+
+void DrawBattlefieldZones(double high_price, double low_price, double inval_price)
+  {
+   if(sys_pivot == 0.0)
+      return;
+
+   string zName = "IFX_Entry_Zone";
+   if(ObjectFind(0, zName) < 0)
+      ObjectCreate(0, zName, OBJ_RECTANGLE, 0, 0, 0);
+   ObjectSetInteger(0, zName, OBJPROP_TIME, 0, iTime(_Symbol, PERIOD_D1, 0));
+   ObjectSetDouble(0, zName, OBJPROP_PRICE, 0, high_price);
+   ObjectSetInteger(0, zName, OBJPROP_TIME, 1, TimeCurrent() + (86400 * 2));    
+   ObjectSetDouble(0, zName, OBJPROP_PRICE, 1, low_price);
+   ObjectSetInteger(0, zName, OBJPROP_COLOR, clrDarkSlateGray);
+   ObjectSetInteger(0, zName, OBJPROP_BACK, true);
+   ObjectSetInteger(0, zName, OBJPROP_FILL, true);
+   
+   DrawLine("IFX_Zone_Top", high_price, clrDodgerBlue, STYLE_SOLID);
+   DrawLine("IFX_Zone_Bot", low_price, clrOrange, STYLE_SOLID);
+   DrawLine("IFX_Inval", inval_price, clrRed, STYLE_DOT);
+
+   datetime anchor_time = iTime(_Symbol, i_tf_enforce, 0) + (PeriodSeconds(i_tf_enforce) * 3);
+
+   if(sys_tp1 > 0)
+     {
+      DrawLine("IFX_TP1", sys_tp1, clrMediumSeaGreen, STYLE_DASH);
+      DrawText("IFX_TP1_TXT", "TP1", anchor_time, sys_tp1, clrMediumSeaGreen, ANCHOR_LOWER);
+     }
+   else
+     {
+      ObjectDelete(0, "IFX_TP1");
+      ObjectDelete(0, "IFX_TP1_TXT");
+     }
+   
+   if(sys_tp2 > 0)
+     {
+      DrawLine("IFX_TP2", sys_tp2, clrMediumSeaGreen, STYLE_DASH);
+      DrawText("IFX_TP2_TXT", "TP2", anchor_time, sys_tp2, clrMediumSeaGreen, ANCHOR_LOWER);
+     }
+   else
+     {
+      ObjectDelete(0, "IFX_TP2");
+      ObjectDelete(0, "IFX_TP2_TXT");
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DrawLine(string name, double price, color col, int style)
+  {
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, col);
+      ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+      ui_needs_redraw = true;
+     }
+   if(ObjectGetDouble(0, name, OBJPROP_PRICE, 0) != price)
+     {
+      ObjectSetDouble(0, name, OBJPROP_PRICE, 0, price);
+      ui_needs_redraw = true;
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DrawStructure()
+  {
+   // USER REQUEST: Hide the active PH and PL infinite anchor lines
+   ObjectDelete(0, "IFX_STR_PH");
+   ObjectDelete(0, "IFX_STR_PH_TXT");
+   ObjectDelete(0, "IFX_STR_PL");
+   ObjectDelete(0, "IFX_STR_PL_TXT");
+  }
+
+//+------------------------------------------------------------------+
+bool DrawSMCStructure()
+  {
+   DrawStructure();
+   
+   int lookback = i_smc_lookback;
+   double h[], l[], c[];
+   datetime t[];
+   
+   int copied_h = CopyHigh(_Symbol, i_tf_enforce, 0, lookback, h);
+   int copied_l = CopyLow(_Symbol, i_tf_enforce, 0, lookback, l);
+   int copied_c = CopyClose(_Symbol, i_tf_enforce, 0, lookback, c);
+   int copied_t = CopyTime(_Symbol, i_tf_enforce, 0, lookback, t);
+   
+   if(copied_h <= 10 || copied_l <= 10 || copied_c <= 10 || copied_t <= 10)
+      return false; // Force retry on next tick if MT5 is still downloading history
+     
+   ObjectsDeleteAll(0, "IFX_SMC_");
+   
+   int actual_lookback = (int)MathMin(copied_h, MathMin(copied_l, MathMin(copied_c, copied_t)));
+   if(actual_lookback < lookback)
+      lookback = actual_lookback;
+
+   ArraySetAsSeries(h, true);
+   ArraySetAsSeries(l, true);
+   ArraySetAsSeries(c, true);
+   ArraySetAsSeries(t, true);
+
+   int pLen = i_pivotLen;
+   int ph_bos_count = 0;
+   int pl_bos_count = 0;
+
+   for(int i = pLen; i < lookback - pLen; i++)
+     {
+      bool isPH = true;
+      for(int j = i - pLen; j <= i + pLen; j++)
+        {
+         if(i == j)
+            continue;
+         if(h[j] >= h[i])
+           {
+            isPH = false;
+            break;
+           }
+        }
+       
+      if(isPH)
+        {
+         for(int k = i - 1; k >= 0; k--)
+           {
+            if(c[k] > h[i])
+              {
+               string name = "IFX_SMC_PH_" + IntegerToString(t[i]);
+               DrawTrendLine(name, t[i], h[i], t[k], h[i], clrMediumSeaGreen, STYLE_DASH);
+               DrawText(name+"_txt", "BOS", t[k+(i-k)/2], h[i], clrMediumSeaGreen, ANCHOR_LOWER);
+               ph_bos_count++;
+               break;
+              }
+           }
+        }
+
+      bool isPL = true;
+      for(int j = i - pLen; j <= i + pLen; j++)
+        {
+         if(i == j)
+            continue;
+         if(l[j] <= l[i])
+           {
+            isPL = false;
+            break;
+           }
+        }
+       
+      if(isPL)
+        {
+         for(int k = i - 1; k >= 0; k--)
+           {
+            if(c[k] < l[i])
+              {
+               string name = "IFX_SMC_PL_" + IntegerToString(t[i]);
+               DrawTrendLine(name, t[i], l[i], t[k], l[i], clrCrimson, STYLE_DASH);
+               DrawText(name+"_txt", "BOS", t[k+(i-k)/2], l[i], clrCrimson, ANCHOR_UPPER);
+               pl_bos_count++;
+               break;
+              }
+           }
+        }
+     }
+     
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+void DrawTrendLine(string name, datetime t1, double p1, datetime t2, double p2, color col, int style)
+  {
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_TREND, 0, t1, p1, t2, p2);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, col);
+      ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+      ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+      ui_needs_redraw = true;
+     }
+   else
+     {
+      if(ObjectGetInteger(0, name, OBJPROP_TIME, 1) != t2)
+        {
+         ObjectSetInteger(0, name, OBJPROP_TIME, 1, t2);
+         ui_needs_redraw = true;
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DrawText(string name, string text, datetime t, double price, color col, ENUM_ANCHOR_POINT anchor)
+  {
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_TEXT, 0, t, price);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, col);
+      ObjectSetString(0, name, OBJPROP_TEXT, text);
+      ObjectSetInteger(0, name, OBJPROP_ANCHOR, anchor);
+      ui_needs_redraw = true;
+     }
+   else
+     {
+      if(ObjectGetInteger(0, name, OBJPROP_TIME, 0) != t)
+        {
+         ObjectSetInteger(0, name, OBJPROP_TIME, 0, t);
+         ui_needs_redraw = true;
+        }
+      if(ObjectGetDouble(0, name, OBJPROP_PRICE, 0) != price)
+        {
+         ObjectSetDouble(0, name, OBJPROP_PRICE, 0, price);
+         ui_needs_redraw = true;
+        }
+      if(ObjectGetString(0, name, OBJPROP_TEXT) != text)
+        {
+         ObjectSetString(0, name, OBJPROP_TEXT, text);
+         ui_needs_redraw = true;
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+void OnTimer()
+  {
+   ui_needs_redraw = false;
+   DrawMatrixHUD();
+   DrawTopLedger();
+   if(ui_needs_redraw)
+      ChartRedraw();
+  }
+
+//+------------------------------------------------------------------+
+void DrawMatrixHUD()
+  {
+   int start_x = 20;
+   int start_y = 30;
+   int row_h = 22;
+   int col1_w = 160;
+   int col2_w = 180;
+   
+   string statusTxt = "🔴 ASLEEP";
+   color statusCol = c_red;
+   
+   if(sys_pivot > 0.0)
+     {
+      double m1_close_curr = iClose(_Symbol, i_tf_enforce, 0);
+      bool inPurgatory = (sys_bias == "Long" && m1_close_curr < calc_inval && !isDead_Struct) ||
+                         (sys_bias == "Short" && m1_close_curr > calc_inval && !isDead_Struct);
+                           
+      if(CountOpenPositions() > 0)
+        {
+         statusTxt = "🚀 IN TRADE";
+         statusCol = c_purple;
+        }
+      else
+         if(isDead_Struct)
+           {
+            statusTxt = "💀 DEAD (Awaiting Zone)";
+            statusCol = c_red;
+           }
+         else
+            if(isDead_SL)
+              {
+               statusTxt = "🩸 BLEEDING (CD)";
+               statusCol = c_red;
+              }
+            else
+               if(daily_trades_count >= i_maxTrades)
+                 {
+                  statusTxt = "🛑 MAX TRADES";
+                  statusCol = c_red;
+                 }
+               else
+                  if(inPurgatory)
+                    {
+                     statusTxt = "⚠️ PURGATORY";
+                     statusCol = c_orange;
+                    }
+                  else
+                     if(CheckTradingSessions())
+                       {
+                        statusTxt = "🟢 STALKING";
+                        statusCol = c_green;
+                       }
+     }
+
+   DrawTableCell("hdr1", "FDM BOT: " + _Symbol, start_x, start_y, col1_w, row_h, c_dark, clrWhite);
+   DrawTableCell("hdr2", statusTxt, start_x + col1_w, start_y, col2_w, row_h, statusCol, clrWhite);
+   
+   int r = 1;
+   DrawTableCell("r1c1", "Engine Timeframe", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r1c2", EnumToString(i_tf_enforce), start_x + col1_w, start_y + (r*row_h), col2_w, row_h, c_purple, clrWhite);
+   
+   r = 2;
+   color biasCol = c_gray;
+   if(sys_bias == "Long") biasCol = c_green;
+   else if(sys_bias == "Short") biasCol = c_red;
+   
+   DrawTableCell("r2c1", "Master Bias", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   
+   if(sys_confidence < i_min_confidence)
+      DrawTableCell("r2c2", "⚠️ " + IntegerToString(sys_confidence) + "% (LOW)", start_x + col1_w, start_y + (r*row_h), col2_w, row_h, clrDarkOrange, clrWhite);
+   else if(sys_bias == "Long")
+      DrawTableCell("r2c2", "🐂 " + IntegerToString(sys_confidence) + "% BULLISH", start_x + col1_w, start_y + (r*row_h), col2_w, row_h, biasCol, clrWhite);
+   else if(sys_bias == "Short")
+      DrawTableCell("r2c2", "🐻 " + IntegerToString(sys_confidence) + "% BEARISH", start_x + col1_w, start_y + (r*row_h), col2_w, row_h, biasCol, clrWhite);
+   else
+      DrawTableCell("r2c2", "⚖️ " + IntegerToString(sys_confidence) + "% NEUTRAL", start_x + col1_w, start_y + (r*row_h), col2_w, row_h, biasCol, clrWhite);
+   
+   r = 3;
+   DrawTableCell("r3c1", "Invalidation ("+EnumToString(i_boss_tf)+")", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r3c2", DoubleToString(calc_inval, 5), start_x + col1_w, start_y + (r*row_h), col2_w, row_h, c_orange, clrWhite);
+   
+   r = 4;
+   string sl_txt = (live_sl > 0) ? DoubleToString(live_sl, 5) : "Pending Trigger";
+   DrawTableCell("r4c1", "Hard Stop Loss", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r4c2", sl_txt, start_x + col1_w, start_y + (r*row_h), col2_w, row_h, c_red, clrWhite);
+   
+   r = 5;
+   DrawTableCell("r5c1", "Origin Rule", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r5c2", is_inside_zone ? "Inside Zone" : "Outside Zone", start_x + col1_w, start_y + (r*row_h), col2_w, row_h, is_inside_zone ? c_green : c_red, clrWhite);
+   
+   r = 6;
+   string rr_txt = "";
+   if(i_useAutoRR) {
+      rr_txt = "TP1: "+DoubleToString(i_autoRR1,1)+"R | TP2: "+DoubleToString(i_autoRR2,1)+"R";
+   } else {
+      if(sys_tp1 > 0.0) {
+         double risk = (live_sl > 0) ? MathAbs(sys_pivot - live_sl) : 0;
+         double rr1 = (risk > 0) ? MathAbs(sys_tp1 - sys_pivot) / risk : 0;
+         double rr2 = (risk > 0) ? MathAbs(sys_tp2 - sys_pivot) / risk : 0;
+         rr_txt = "TP1: " + DoubleToString(rr1, 1) + "R | TP2: " + DoubleToString(rr2, 1) + "R";
+      } else {
+         rr_txt = "Waiting for Parameters...";
+      }
+   }
+   DrawTableCell("r6c1", "Expected RR", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r6c2", rr_txt, start_x + col1_w, start_y + (r*row_h), col2_w, row_h, c_green, clrWhite);
+   
+   r = 7;
+   DrawTableCell("r7c1", "Risk Status (BE Tracker)", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r7c2", is_be_secured ? "Free Ride" : "---", start_x + col1_w, start_y + (r*row_h), col2_w, row_h, is_be_secured ? c_purple : c_gray, clrWhite);
+   
+   r = 8;
+   DrawTableCell("r8c1", "Position Size ("+DoubleToString(i_riskPct,1)+"% Risk)", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r8c2", DoubleToString(live_lots, 2) + " Lots", start_x + col1_w, start_y + (r*row_h), col2_w, row_h, c_purple, clrWhite);
+   
+   r = 9;
+   DrawTableCell("r9c1", "Daily Trades ("+IntegerToString(i_maxTrades)+" Max)", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r9c2", IntegerToString(daily_trades_count) + " / " + IntegerToString(i_maxTrades), start_x + col1_w, start_y + (r*row_h), col2_w, row_h, (daily_trades_count>=i_maxTrades)?c_red:c_green, clrWhite);
+   
+   r = 10;
+   DrawTableCell("r10c1", "Report Status", start_x, start_y + (r*row_h), col1_w, row_h, c_gray, clrWhite);
+   DrawTableCell("r10c2", report_sent_today ? "✅ SENT" : "⏳ PENDING", start_x + col1_w, start_y + (r*row_h), col2_w, row_h, report_sent_today ? c_green : c_orange, clrWhite);
+   
+   int btn_y = start_y + ((r+1)*row_h) + 10;
+   CreateUIButton("IFX_BTN_LONG", "🟢 T-LONG", start_x, btn_y, clrDarkGreen);
+   CreateUIButton("IFX_BTN_SHORT", "🔴 T-SHORT", start_x + 80, btn_y, clrDarkRed);
+   CreateUIButton("IFX_BTN_REP", "🟦 T-REPORT", start_x + 160, btn_y, clrNavy);
+  }
+
+//+------------------------------------------------------------------+
+void DrawTopLedger()
+  {
+   if(HistorySelect(TimeCurrent() - 604800, TimeCurrent()))
+     {
+      int current_deals = HistoryDealsTotal();
+      if(current_deals == last_ledger_deals)
+         return;
+         
+      last_ledger_deals = current_deals;
+       
+      int start_y  = 30;
+      int row_h    = 20;
+      int margin_r = 120; // Distance from the right edge
+     
+      int w_pnl   = 70;
+      int w_entry = 75;
+      int w_dir   = 45;
+      int w_trade = 50;
+     
+      // Right-to-Left calculation for Corner alignment
+      int x_pnl   = margin_r;
+      int x_entry = x_pnl   + w_pnl;
+      int x_dir   = x_entry + w_entry;
+      int x_trade = x_dir   + w_dir;
+
+      DrawTableCornerCell("lg_h1", "Trade", x_trade, start_y, w_trade, row_h, c_dark, clrWhite);
+      DrawTableCornerCell("lg_h2", "Dir",   x_dir,   start_y, w_dir,   row_h, c_dark, clrWhite);
+      DrawTableCornerCell("lg_h3", "Entry", x_entry, start_y, w_entry, row_h, c_dark, clrWhite);
+      DrawTableCornerCell("lg_h4", "PnL",   x_pnl,   start_y, w_pnl,   row_h, c_dark, clrWhite);
+
+      double net_prof = 0.0;
+      int printed = 0;
+       
+      for(int i = current_deals-1; i >= 0 && printed < 4; i--)
+        {
+         ulong ticket = HistoryDealGetTicket(i);
+         if(HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol && HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
+           {
+            int m_id = (int)HistoryDealGetInteger(ticket, DEAL_MAGIC);
+            if(m_id >= i_base_magic && m_id <= i_base_magic + 50)
+              {
+               double pnl = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+               net_prof += pnl;
+                   
+               string dir = (HistoryDealGetInteger(ticket, DEAL_TYPE) == DEAL_TYPE_BUY) ? "Buy" : "Sell";
+               string pnl_str = (pnl >= 0 ? "+" : "-") + DoubleToString(MathAbs(pnl), 2);
+               color pnl_bg = (pnl >= 0) ? C'40,167,69' : C'220,53,69';
+                   
+               int r = printed + 1;
+               int y_pos = start_y + (r*row_h);
+                   
+               DrawTableCornerCell("lg_r"+IntegerToString(r)+"_1", "#"+IntegerToString(r), x_trade, y_pos, w_trade, row_h, c_gray, clrWhite);
+               DrawTableCornerCell("lg_r"+IntegerToString(r)+"_2", dir, x_dir, y_pos, w_dir, row_h, c_gray, clrWhite);
+               DrawTableCornerCell("lg_r"+IntegerToString(r)+"_3", DoubleToString(HistoryDealGetDouble(ticket, DEAL_PRICE), _Digits), x_entry, y_pos, w_entry, row_h, c_gray, clrWhite);
+               DrawTableCornerCell("lg_r"+IntegerToString(r)+"_4", pnl_str, x_pnl, y_pos, w_pnl, row_h, pnl_bg, clrWhite);
+               
+               printed++;
+              }
+           }
+        }
+       
+      while(printed < 4)
+        {
+         int r = printed + 1;
+         int y_pos = start_y + (r*row_h);
+         DrawTableCornerCell("lg_r"+IntegerToString(r)+"_1", "-", x_trade, y_pos, w_trade, row_h, c_gray, clrWhite);
+         DrawTableCornerCell("lg_r"+IntegerToString(r)+"_2", "-", x_dir, y_pos, w_dir, row_h, c_gray, clrWhite);
+         DrawTableCornerCell("lg_r"+IntegerToString(r)+"_3", "-", x_entry, y_pos, w_entry, row_h, c_gray, clrWhite);
+         DrawTableCornerCell("lg_r"+IntegerToString(r)+"_4", "-", x_pnl, y_pos, w_pnl, row_h, c_gray, clrWhite);
+         printed++;
+        }
+
+      int y_tot = start_y + (5*row_h);
+      int w_total_label = w_trade + w_dir + w_entry;
+      DrawTableCornerCell("lg_tot1", "TOTAL NET:", x_entry, y_tot, w_total_label, row_h, c_dark, clrWhite);
+      DrawTableCornerCell("lg_tot2", (net_prof>=0?"+":"-")+DoubleToString(MathAbs(net_prof), 2), x_pnl, y_tot, w_pnl, row_h, (net_prof>=0)?c_green:c_red, clrWhite);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DrawTableCell(string id, string text, int x, int y, int w, int h, color bgCol, color txtCol)
+  {
+   string bg = "HUD_BG_" + id;
+   string txt = "HUD_TXT_" + id;
+   
+   if(ObjectFind(0, bg) < 0)
+     {
+      ObjectCreate(0, bg, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, bg, OBJPROP_XSIZE, w);
+      ObjectSetInteger(0, bg, OBJPROP_YSIZE, h);
+      ui_needs_redraw = true;
+     }
+     
+   if(ObjectGetInteger(0, bg, OBJPROP_BGCOLOR) != bgCol)
+     {
+      ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, bgCol);
+      ui_needs_redraw = true;
+     }
+
+   if(ObjectFind(0, txt) < 0)
+     {
+      ObjectCreate(0, txt, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, txt, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, txt, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, 8);
+      ObjectSetString(0, txt, OBJPROP_FONT, "Arial");
+      ObjectSetInteger(0, txt, OBJPROP_XDISTANCE, x + (w/2));
+      ObjectSetInteger(0, txt, OBJPROP_YDISTANCE, y + (h/2)); // Removed the -6 to bring it to the middle
+      ui_needs_redraw = true;
+     }
+   
+   if(ObjectGetString(0, txt, OBJPROP_TEXT) != text)
+     {
+      ObjectSetString(0, txt, OBJPROP_TEXT, text);
+      ui_needs_redraw = true;
+     }
+     
+   if(ObjectGetInteger(0, txt, OBJPROP_COLOR) != txtCol)
+     {
+      ObjectSetInteger(0, txt, OBJPROP_COLOR, txtCol);
+      ui_needs_redraw = true;
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DrawTableCornerCell(string id, string text, int x_dist, int y_dist, int w, int h, color bgCol, color txtCol)
+  {
+   string bg = "LDG_BG_" + id;
+   string txt = "LDG_TXT_" + id;
+   
+   if(ObjectFind(0, bg) < 0)
+     {
+      ObjectCreate(0, bg, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+      ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, x_dist);
+      ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, y_dist);
+      ObjectSetInteger(0, bg, OBJPROP_XSIZE, w);
+      ObjectSetInteger(0, bg, OBJPROP_YSIZE, h);
+      ui_needs_redraw = true;
+     }
+     
+   if(ObjectGetInteger(0, bg, OBJPROP_BGCOLOR) != bgCol)
+     {
+      ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, bgCol);
+      ui_needs_redraw = true;
+     }
+
+   if(ObjectFind(0, txt) < 0)
+     {
+      ObjectCreate(0, txt, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, txt, OBJPROP_ANCHOR, ANCHOR_CENTER);
+      ObjectSetInteger(0, txt, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+      ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, 8);
+      ObjectSetString(0, txt, OBJPROP_FONT, "Arial");
+      ObjectSetInteger(0, txt, OBJPROP_XDISTANCE, x_dist + (w/2));
+      ObjectSetInteger(0, txt, OBJPROP_YDISTANCE, y_dist + (h/2)); // Removed the -6 to bring it to the middle
+      ui_needs_redraw = true;
+     }
+   
+   if(ObjectGetString(0, txt, OBJPROP_TEXT) != text)
+     {
+      ObjectSetString(0, txt, OBJPROP_TEXT, text);
+      ui_needs_redraw = true;
+     }
+     
+   if(ObjectGetInteger(0, txt, OBJPROP_COLOR) != txtCol)
+     {
+      ObjectSetInteger(0, txt, OBJPROP_COLOR, txtCol);
+      ui_needs_redraw = true;
+     }
+  }
+
+//+------------------------------------------------------------------+
+void SendDailyReport()
+  {
+   int wins = 0, losses = 0, break_evens = 0;
+   double net_pnl = 0.0;
+   
+   if(HistorySelect(iTime(_Symbol, PERIOD_D1, 0), TimeCurrent()))
+     {
+      for(int i = 0; i < HistoryDealsTotal(); i++)
+        {
+         ulong ticket = HistoryDealGetTicket(i);
+         if(HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol && HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
+           {
+            int m_id = (int)HistoryDealGetInteger(ticket, DEAL_MAGIC);
+            if(m_id >= i_base_magic && m_id <= i_base_magic + 50)
+              {
+               double pnl = HistoryDealGetDouble(ticket, DEAL_PROFIT) + HistoryDealGetDouble(ticket, DEAL_COMMISSION) + HistoryDealGetDouble(ticket, DEAL_SWAP);
+               double be_threshold = 2.0;
+               
+               if(pnl > be_threshold)
+                  wins++;
+               else
+                  if (pnl < -be_threshold)
+                     losses++;
+                  else
+                     break_evens++;
+                     
+               net_pnl += pnl;
+              }
+           }
+        }
+     }
+     
+   string sign = (net_pnl >= 0) ? "+$" : "-$";
+   string desc = "Total Trades: " + IntegerToString(wins + losses + break_evens) + "\\nWins: " + IntegerToString(wins) + "\\nLosses: " + IntegerToString(losses) + "\\nBreak-Evens: " + IntegerToString(break_evens) + "\\nNet PnL: " + sign + DoubleToString(MathAbs(net_pnl), 2);
+   if(i_notify_daily)
+      SendDiscordAlert("📊 DAILY TRADE REPORT", desc, (net_pnl >= 0) ? 5763719 : 16711680, 0, 0, 0, 0, 0);
+  }
+
+// ============================================================================
+// 🚀 DISCORD DIAGNOSTIC FIX ONLY
+// ============================================================================
+// --- Removed Duplicate Inputs ---
+
+void SendDiscordAlert(string title, string description, int embed_color, double pivot=0, double sl=0, double tp1=0, double tp2=0, double lots=0)
+  {
+   // --- MQL5 VALIDATOR SAFETY CHECK ---
+   // If the user (or the validator) has disabled Discord, exit immediately.
+   if(!i_enable_discord)
+      return;
+
+   if(i_discord_url == "" || i_discord_url == "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID_HERE")
+     {
+      Print("❌ DISCORD ERROR: Webhook URL is empty or using the default placeholder.");
+      return;
+     }
+   
+   StringReplace(title, "\"", "'");
+   StringReplace(description, "\\", "\\\\"); // Escape backslashes first
+   StringReplace(description, "\"", "'");
+   StringReplace(description, "\n", "\\n");
+   char post[], result[];
+   string result_headers;
+   
+   string req_headers = "Content-Type: application/json\r\n";
+   string bridge_url = "http://127.0.0.1:8000/discord";
+   string json = "{" +
+                 "\"url\": \"" + i_discord_url + "\", " +
+                 "\"title\": \"" + title + "\", " +
+                 "\"description\": \"" + description + "\", " +
+                 "\"color\": " + IntegerToString(embed_color) + ", " +
+                 "\"asset\": \"" + _Symbol + "\", " +
+                 "\"entry\": \"" + DoubleToString(pivot, _Digits) + "\", " +
+                 "\"sl\": \"" + DoubleToString(sl, _Digits) + "\", " +
+                 "\"tp1\": \"" + DoubleToString(tp1, _Digits) + "\", " +
+                 "\"tp2\": \"" + DoubleToString(tp2, _Digits) + "\", " +
+                 "\"calc_vol\": \"" + DoubleToString(lots, 2) + "\", " +
+                 "\"challenge_size\": \"$1,000.00\"" +
+                 "}";
+   
+   // We must EXPLICITLY specify StringLen(json) to avoid sending the hidden Null Terminator (\0)
+   StringToCharArray(json, post, 0, StringLen(json), CP_UTF8);
+   ResetLastError();
+   
+   int res = WebRequest("POST", bridge_url, req_headers, 500, post, result, result_headers);
+   
+   if(res == -1)
+     {
+      Print("🛑 MT5 FIREWALL BLOCKED IT. MT5 Error Code: ", GetLastError());
+      Print("👉 You MUST add this exact domain to Tools -> Options -> Expert Advisors: https://discord.com");
+     }
+   else
+      if(res == 200 || res == 204)
+        {
+         Print("✅ DISCORD SUCCESS: Message delivered beautifully.");
+        }
+      else
+        {
+         string error_body = CharArrayToString(result);
+         Print("⚠️ DISCORD REJECTED IT. HTTP Status Code: ", res);
+         Print("👉 Discord Server Reply: ", error_body);
+        }
+  }
+
+//+------------------------------------------------------------------+
+void CreateUIButton(string name, string text, int x, int y, color bg_col)
+  {
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_BUTTON, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, name, OBJPROP_XSIZE, 75);
+      ObjectSetInteger(0, name, OBJPROP_YSIZE, 25);
+      ObjectSetString(0, name, OBJPROP_TEXT, text);
+      ObjectSetInteger(0, name, OBJPROP_BGCOLOR, bg_col);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(0, name, OBJPROP_STATE, false);
+     }
+  }
+
+

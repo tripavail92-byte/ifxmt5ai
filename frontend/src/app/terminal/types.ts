@@ -48,6 +48,28 @@ export type TerminalPreferences = {
   notifyOnSL: boolean;
   notifyOnTP: boolean;
   notifyDaily: boolean;
+  // EA Structure timeframes
+  engineTf: string;
+  bossTimeframe: string;
+  slTimeframe: string;
+  beTimeframe: string;
+  // Session times
+  londonStart: string;
+  londonEnd: string;
+  nyStart: string;
+  nyEnd: string;
+  asiaStart: string;
+  asiaEnd: string;
+  // Trade execution
+  baseMagic: number;
+  tp1Pct: number;
+  usePartial: boolean;
+  useBE: boolean;
+  breakEvenAfterTp1: boolean;
+  closeEod: boolean;
+  eodTime: string;
+  // Discord
+  discordWebhookUrl: string;
 };
 
 export type PersistedTerminalSettings = {

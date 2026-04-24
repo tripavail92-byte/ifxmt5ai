@@ -105,7 +105,9 @@ def _startup_symbol() -> str:
     explicit = (os.getenv("MT5_STARTUP_SYMBOL") or "").strip()
     if explicit:
         return explicit
-    return "BTCUSDm"
+    # EURUSD is universally available on all MT5 brokers (Exness, Vantage, XM, etc.)
+    # The EA resolves all other symbols dynamically via ResolveBrokerSymbol().
+    return "EURUSD"
 
 
 def _startup_period() -> str:

@@ -297,23 +297,23 @@ export async function assertConnectionOwnership(admin: AdminClient, userId: stri
   return connection;
 }
 
-function buildSessionsPayload(raw: unknown) {
+function buildSessionsPayload(raw: unknown, prefs?: Record<string, unknown>) {
   const sessions = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   return {
     asia: {
       enabled: Boolean(sessions.asia ?? false),
-      start: "19:00",
-      end: "03:00",
+      start: typeof prefs?.asiaStart === "string" && prefs.asiaStart ? prefs.asiaStart : "19:00",
+      end: typeof prefs?.asiaEnd === "string" && prefs.asiaEnd ? prefs.asiaEnd : "03:00",
     },
     london: {
       enabled: Boolean(sessions.london ?? true),
-      start: "03:00",
-      end: "11:00",
+      start: typeof prefs?.londonStart === "string" && prefs.londonStart ? prefs.londonStart : "03:00",
+      end: typeof prefs?.londonEnd === "string" && prefs.londonEnd ? prefs.londonEnd : "11:00",
     },
     new_york: {
       enabled: Boolean(sessions.newYork ?? sessions.new_york ?? true),
-      start: "08:00",
-      end: "17:00",
+      start: typeof prefs?.nyStart === "string" && prefs.nyStart ? prefs.nyStart : "08:00",
+      end: typeof prefs?.nyEnd === "string" && prefs.nyEnd ? prefs.nyEnd : "17:00",
     },
   };
 }
@@ -399,7 +399,7 @@ export async function buildEaConfigForConnection(admin: AdminClient, connectionI
       },
       structure: {
         ...currentConfig.structure,
-        timeframe: typeof setup?.timeframe === "string" && setup.timeframe.trim() ? setup.timeframe.trim() : currentConfig.structure.timeframe,
+        timeframe: readStringPref(prefs, "engineTf", "engine_tf") ?? (typeof setup?.timeframe === "string" && setup.timeframe.trim() ? setup.timeframe.trim() : currentConfig.structure.timeframe),
         boss_timeframe: readStringPref(prefs, "bossTimeframe", "boss_timeframe") ?? currentConfig.structure.boss_timeframe,
         sl_timeframe: readStringPref(prefs, "slTimeframe", "sl_timeframe") ?? currentConfig.structure.sl_timeframe,
         be_timeframe: readStringPref(prefs, "beTimeframe", "be_timeframe") ?? currentConfig.structure.be_timeframe,
@@ -432,7 +432,7 @@ export async function buildEaConfigForConnection(admin: AdminClient, connectionI
           : currentConfig.risk.max_position_size_lots,
         min_confidence: readNumberPref(prefs, "minConfidence", "min_confidence") ?? currentConfig.risk.min_confidence,
       },
-      sessions: buildSessionsPayload(prefs.sessions),
+      sessions: buildSessionsPayload(prefs.sessions, prefs),
       execution: {
         ...currentConfig.execution,
         allow_market_orders: readBooleanPref(prefs, "allowMarketOrders", "allow_market_orders") ?? currentConfig.execution.allow_market_orders,
@@ -467,6 +467,7 @@ export async function buildEaConfigForConnection(admin: AdminClient, connectionI
       },
       discord: {
         ...currentConfig.discord,
+        webhook_url: readStringPref(prefs, "discordWebhookUrl", "discord_webhook_url") ?? currentConfig.discord.webhook_url,
         enable_discord: readBooleanPref(prefs, "enableDiscord", "enable_discord") ?? currentConfig.discord.enable_discord,
         notify_on_sl: readBooleanPref(prefs, "notifyOnSL", "notify_on_sl") ?? currentConfig.discord.notify_on_sl,
         notify_on_tp: readBooleanPref(prefs, "notifyOnTP", "notify_on_tp") ?? currentConfig.discord.notify_on_tp,

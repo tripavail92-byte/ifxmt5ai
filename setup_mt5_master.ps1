@@ -2,8 +2,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $MasterDir = 'C:\MT5_MASTER'
-$PreferredSource = 'C:\Program Files\MetaTrader 5 EXNESS'
-$FallbackSource = 'C:\Program Files\MetaTrader 5'
+# Prefer the generic MetaQuotes MT5 so the master works with every broker.
+# The Exness-branded install is accepted as a fallback only when the generic
+# build is not present — but for multi-broker support you should install
+# the generic MetaQuotes MT5 from https://www.metatrader5.com/en/download
+$PreferredSource = 'C:\Program Files\MetaTrader 5'
+$FallbackSource = 'C:\Program Files\MetaTrader 5 EXNESS'
 
 function Resolve-SourceDir {
     foreach ($candidate in @($PreferredSource, $FallbackSource)) {
