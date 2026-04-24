@@ -2632,7 +2632,7 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
                   )}
                 </div>
 
-                {/* Account-level guardrails */
+                {/* Account-level guardrails */}
                 <div className="space-y-2 pt-1">
                   <p className="text-[10px] uppercase tracking-[0.18em] text-gray-600">Account Guardrails <span className="text-gray-700">(0 = disabled)</span></p>
                   <div className="grid grid-cols-2 gap-2">
