@@ -42,7 +42,7 @@ input int     StructurePivotWindow = 2;                          // Fractal conf
 input int     StructureBarsToScan = 120;                         // Closed candles fetched per symbol for structure analysis
 input bool    LogFractalSignals = true;                          // Print local bullish/bearish fractal breaks to Experts log
 
-const ulong IFX_COMMAND_MAGIC = 918041;
+ulong IFX_COMMAND_MAGIC = 918041;   // overridden at runtime from config execution.base_magic
 CTrade g_trade;
 
 //==========================================================================
@@ -117,6 +117,12 @@ string   g_armed_notes = "";
 bool     g_session_london_enabled = true;
 bool     g_session_ny_enabled     = true;
 bool     g_session_asia_enabled   = false;
+string   g_session_london_start   = "03:00";
+string   g_session_london_end     = "11:00";
+string   g_session_ny_start       = "08:00";
+string   g_session_ny_end         = "17:00";
+string   g_session_asia_start     = "19:00";
+string   g_session_asia_end       = "03:00";
 bool     g_close_eod              = false;
 string   g_eod_time_str           = "23:50";     // "HH:MM" server time
 bool     g_eod_closed_today       = false;
@@ -125,7 +131,17 @@ double   g_sl_pad_mult            = 0.2;
 ENUM_TIMEFRAMES g_engine_tf       = PERIOD_M1;
 bool     g_min_confidence_gate    = false;
 double   g_min_confidence         = 0.0;
-
+// ── Execution management ─────────────────────────────────────────────────
+bool     g_use_partial_tp         = false;
+double   g_tp1_pct                = 75.0;         // % of volume to close at TP1
+bool     g_use_break_even         = false;
+bool     g_break_even_after_tp1   = true;
+// ── Discord alerts ───────────────────────────────────────────────────────
+bool     g_discord_enabled        = false;
+string   g_discord_webhook_url    = "";
+bool     g_discord_notify_sl      = true;
+bool     g_discord_notify_tp      = true;
+bool     g_discord_notify_daily   = false;
 void AppendDiagLog(const string message)
 {
    int handle = FileOpen("ifx\\diag.log", FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
@@ -728,6 +744,36 @@ bool ControlPlaneGet(const string url, string &response, int timeout_ms)
    return false;
 }
 
+// ── Discord webhook helper (no install token required) ────────────────────
+bool DiscordPost(const string message)
+{
+   if(!g_discord_enabled || StringLen(g_discord_webhook_url) < 20) return false;
+   string safe = message;
+   StringReplace(safe, "\"", "'");
+   string json = "{\"content\":\"" + safe + "\"}";
+
+   string headers = "Content-Type: application/json\r\n";
+   uchar post[];
+   StringToCharArray(json, post, 0, WHOLE_ARRAY, CP_UTF8);
+   if(ArraySize(post) > 0) ArrayResize(post, ArraySize(post) - 1);
+
+   uchar result[];
+   string resultHeaders = "";
+   ResetLastError();
+   int status = WebRequest("POST", g_discord_webhook_url, headers, 5000, post, result, resultHeaders);
+   return (status >= 200 && status < 300);
+}
+
+void SendDiscordAlert(const string event, const string sym, const string side, double price, double pnl)
+{
+   if(!g_discord_enabled) return;
+   string acc   = IntegerToString((int)AccountInfoInteger(ACCOUNT_LOGIN));
+   string emoji = (pnl >= 0) ? "✅" : "❌";
+   string msg   = StringFormat("%s IFX | %s | %s %s @ %.5f | PnL: %.2f USD | Acc: %s",
+                               emoji, event, sym, side, price, pnl, acc);
+   DiscordPost(msg);
+}
+
 bool SendAccountHeartbeat()
 {
    if(!EnableAccountHeartbeat || !g_control_plane_ready)
@@ -914,6 +960,7 @@ void RunControlPlaneLoop(const ulong now_ms)
    MaybeSendAccountHeartbeat(now_ms);
    MaybeRunOneShotFullHistoryReseed(now_ms);
    MaybeCloseEod();
+   MaybeManageOpenPositions();
 }
 
 void MaybeCloseEod()
@@ -946,6 +993,95 @@ void MaybeCloseEod()
    {
       SendEaRuntimeEvent("eod_close", StringFormat("{\"closed\":%d,\"eod_time\":\"%s\"}", closed, EscapeJson(g_eod_time_str)));
       Print("⏰ [EOD] Closed ", closed, " position(s) at ", g_eod_time_str, " server time");
+   }
+}
+
+// ── Per-position partial TP1 close + break-even promotion ────────────────
+// Runs on every timer tick.  We only act on positions opened by our magic.
+void MaybeManageOpenPositions()
+{
+   if(!g_use_partial_tp && !g_use_break_even) return;
+   if(PositionsTotal() == 0) return;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != IFX_COMMAND_MAGIC) continue;
+
+      string sym   = PositionGetString(POSITION_SYMBOL);
+      long   ptype = PositionGetInteger(POSITION_TYPE);   // 0=buy 1=sell
+      double vol   = PositionGetDouble(POSITION_VOLUME);
+      double open  = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl    = PositionGetDouble(POSITION_SL);
+      double tp    = PositionGetDouble(POSITION_TP);      // this is TP2 (final)
+      int    digs  = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+
+      MqlTick tick;
+      if(!SymbolInfoTick(sym, tick)) continue;
+      double price = (ptype == POSITION_TYPE_BUY) ? tick.bid : tick.ask;
+
+      // ── Partial TP1 close ─────────────────────────────────────────────
+      // TP1 is g_setup_tp1 if set; otherwise not applicable
+      if(g_use_partial_tp && g_setup_tp1 > 0.0 && tp > 0.0 && vol > 0.0)
+      {
+         bool hit_tp1 = (ptype == POSITION_TYPE_BUY)  ? (price >= g_setup_tp1)
+                                                       : (price <= g_setup_tp1);
+         // Check comment to avoid double-closing (we tag partials)
+         string comment = PositionGetString(POSITION_COMMENT);
+         bool already_partial = (StringFind(comment, "ifx_partial") >= 0);
+
+         if(hit_tp1 && !already_partial)
+         {
+            double close_vol = NormalizeVolumeForSymbol(sym, vol * (g_tp1_pct / 100.0));
+            if(close_vol > 0.0 && close_vol < vol)
+            {
+               MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); ZeroMemory(res);
+               req.action   = TRADE_ACTION_DEAL;
+               req.position = ticket;
+               req.symbol   = sym;
+               req.volume   = close_vol;
+               req.magic    = IFX_COMMAND_MAGIC;
+               req.deviation= 20;
+               req.comment  = "ifx_partial_tp1";
+               req.type     = (ptype == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+               req.price    = price;
+               SendTradeRequestWithFallback(req, res);
+               if(res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_PLACED)
+               {
+                  SendEaRuntimeEvent("partial_tp1_closed", StringFormat(
+                     "{\"ticket\":%I64u,\"symbol\":\"%s\",\"closed_vol\":%.2f,\"price\":%.5f}",
+                     ticket, EscapeJson(sym), close_vol, price));
+                  Print("✅ [PARTIAL] TP1 partial close ", close_vol, " lots @ ", price);
+
+                  // ── Promote SL to break-even after partial ─────────────
+                  if(g_use_break_even && g_break_even_after_tp1 && sl != open)
+                  {
+                     // Reselect after partial close (ticket unchanged, volume reduced)
+                     if(PositionSelectByTicket(ticket))
+                     {
+                        MqlTradeRequest be_req; MqlTradeResult be_res;
+                        ZeroMemory(be_req); ZeroMemory(be_res);
+                        be_req.action   = TRADE_ACTION_SLTP;
+                        be_req.position = ticket;
+                        be_req.symbol   = sym;
+                        be_req.sl       = NormalizeDouble(open, digs);
+                        be_req.tp       = PositionGetDouble(POSITION_TP);
+                        be_req.magic    = IFX_COMMAND_MAGIC;
+                        OrderSend(be_req, be_res);
+                        if(be_res.retcode == TRADE_RETCODE_DONE)
+                        {
+                           SendEaRuntimeEvent("break_even_set", StringFormat(
+                              "{\"ticket\":%I64u,\"symbol\":\"%s\",\"sl_moved_to\":%.5f}",
+                              ticket, EscapeJson(sym), open));
+                           Print("✅ [BE] SL moved to break-even @ ", open, " for ", sym);
+                        }
+                     }
+                  }
+               }
+            }
+         }
+      }
    }
 }
 
@@ -1045,16 +1181,50 @@ bool ApplyControlPlaneConfig(const string response)
    string new_eod = JsonExtractStringAfter(execution, 0, "eod_time");
    if(StringLen(new_eod) >= 4) { g_eod_time_str = new_eod; g_eod_closed_today = false; }
 
-   // ── Sessions (enabled flags) ─────────────────────────────────────────
+   // ── Magic number ───────────────────────────────────────────────────────
+   int new_magic = JsonExtractIntAfter(execution, 0, "base_magic", -1);
+   if(new_magic > 0) IFX_COMMAND_MAGIC = (ulong)new_magic;
+
+   // ── Partial TP / Break-Even ────────────────────────────────────────────
+   g_use_partial_tp       = JsonExtractBoolAfter(execution, 0, "partial_take_profit_enabled", g_use_partial_tp);
+   g_tp1_pct              = MathMax(10.0, MathMin(100.0, JsonExtractDoubleAfter(execution, 0, "tp1_pct", g_tp1_pct)));
+   g_use_break_even       = JsonExtractBoolAfter(execution, 0, "break_even_enabled", g_use_break_even);
+   g_break_even_after_tp1 = JsonExtractBoolAfter(execution, 0, "break_even_after_tp1", g_break_even_after_tp1);
+
+   // ── Sessions (enabled flags + times) ─────────────────────────────────
    string sessions = JsonExtractObjectAfter(config, 0, "sessions");
    if(StringLen(sessions) > 0)
    {
-      string lon = JsonExtractObjectAfter(sessions, 0, "london");
-      string ny  = JsonExtractObjectAfter(sessions, 0, "new_york");
+      string lon  = JsonExtractObjectAfter(sessions, 0, "london");
+      string ny   = JsonExtractObjectAfter(sessions, 0, "new_york");
       string asia = JsonExtractObjectAfter(sessions, 0, "asia");
-      if(StringLen(lon)  > 0) g_session_london_enabled = JsonExtractBoolAfter(lon,  0, "enabled", g_session_london_enabled);
-      if(StringLen(ny)   > 0) g_session_ny_enabled     = JsonExtractBoolAfter(ny,   0, "enabled", g_session_ny_enabled);
-      if(StringLen(asia) > 0) g_session_asia_enabled   = JsonExtractBoolAfter(asia, 0, "enabled", g_session_asia_enabled);
+      if(StringLen(lon) > 0) {
+         g_session_london_enabled = JsonExtractBoolAfter(lon, 0, "enabled", g_session_london_enabled);
+         string s = JsonExtractStringAfter(lon, 0, "start"); if(StringLen(s) >= 4) g_session_london_start = s;
+         string e = JsonExtractStringAfter(lon, 0, "end");   if(StringLen(e) >= 4) g_session_london_end   = e;
+      }
+      if(StringLen(ny) > 0) {
+         g_session_ny_enabled = JsonExtractBoolAfter(ny, 0, "enabled", g_session_ny_enabled);
+         string s = JsonExtractStringAfter(ny, 0, "start"); if(StringLen(s) >= 4) g_session_ny_start = s;
+         string e = JsonExtractStringAfter(ny, 0, "end");   if(StringLen(e) >= 4) g_session_ny_end   = e;
+      }
+      if(StringLen(asia) > 0) {
+         g_session_asia_enabled = JsonExtractBoolAfter(asia, 0, "enabled", g_session_asia_enabled);
+         string s = JsonExtractStringAfter(asia, 0, "start"); if(StringLen(s) >= 4) g_session_asia_start = s;
+         string e = JsonExtractStringAfter(asia, 0, "end");   if(StringLen(e) >= 4) g_session_asia_end   = e;
+      }
+   }
+
+   // ── Discord ────────────────────────────────────────────────────────────
+   string discord = JsonExtractObjectAfter(config, 0, "discord");
+   if(StringLen(discord) > 0)
+   {
+      g_discord_enabled      = JsonExtractBoolAfter(discord, 0, "enable_discord", g_discord_enabled);
+      g_discord_notify_sl    = JsonExtractBoolAfter(discord, 0, "notify_on_sl", g_discord_notify_sl);
+      g_discord_notify_tp    = JsonExtractBoolAfter(discord, 0, "notify_on_tp", g_discord_notify_tp);
+      g_discord_notify_daily = JsonExtractBoolAfter(discord, 0, "notify_daily", g_discord_notify_daily);
+      string wh = JsonExtractStringAfter(discord, 0, "webhook_url");
+      if(StringLen(wh) > 10) g_discord_webhook_url = wh;
    }
 
    // ── Risk gates ────────────────────────────────────────────────────────
@@ -1066,7 +1236,7 @@ bool ApplyControlPlaneConfig(const string response)
    string tf_str = JsonExtractStringAfter(structure, 0, "timeframe");
    if(StringLen(tf_str) > 0)
    {
-      if(tf_str == "M1")  g_engine_tf = PERIOD_M1;
+      if(tf_str == "M1")       g_engine_tf = PERIOD_M1;
       else if(tf_str == "M5")  g_engine_tf = PERIOD_M5;
       else if(tf_str == "M15") g_engine_tf = PERIOD_M15;
       else if(tf_str == "M30") g_engine_tf = PERIOD_M30;
@@ -1670,7 +1840,12 @@ bool ExecuteManualTradeCommand(
    SendTradeAudit(audit_reason, resolved_sym, side, request.price, sl, tp, volume, result.order, (int)result.retcode, auditStatus, result.comment, ack_payload);
 
    if(result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED)
+   {
+      // Discord: trade opened
+      if(g_discord_enabled && g_discord_notify_tp)
+         SendDiscordAlert("TRADE OPEN", resolved_sym, side, request.price, 0.0);
       return true;
+   }
 
    reason = result.comment;
    if(StringLen(reason) == 0)
@@ -1770,6 +1945,18 @@ bool ArmTradeCommand(const string setup_id, const string symbol, const string si
       return false;
    }
 
+   // ── Min-confidence gate ────────────────────────────────────────────────
+   // ai_sensitivity is 1-100; g_min_confidence is 0-1 (e.g. 0.6 = 60%)
+   if(g_min_confidence_gate && g_min_confidence > 0.0)
+   {
+      double threshold = g_min_confidence * 100.0;
+      if(ai_sensitivity > 0 && (double)ai_sensitivity < threshold)
+      {
+         reason = StringFormat("min_confidence_not_met:ai_sens=%d<%.0f", ai_sensitivity, threshold);
+         return false;
+      }
+   }
+
    g_armed_trade_active = true;
    g_armed_setup_id = setup_id;
    g_armed_symbol = symbol;
@@ -1816,24 +2003,22 @@ bool IsInAllowedTradingSession()
    TimeToStruct(TimeCurrent(), now_struct);
    int now_min = now_struct.hour * 60 + now_struct.min;
 
-   // Helper lambda-equivalent: parse "HH:MM" to minutes
    #define PARSE_HM(s) (((int)StringToInteger(StringSubstr(s,0,2)))*60 + (int)StringToInteger(StringSubstr(s,3,2)))
 
-   // London  03:00–11:00 default
    if(g_session_london_enabled) {
-      int s = PARSE_HM("03:00"), e = PARSE_HM("11:00");
-      if(now_min >= s && now_min < e) return true;
+      int s = PARSE_HM(g_session_london_start), e = PARSE_HM(g_session_london_end);
+      if(s <= e) { if(now_min >= s && now_min < e) return true; }
+      else       { if(now_min >= s || now_min < e) return true; }
    }
-   // New York  08:00–17:00 default
    if(g_session_ny_enabled) {
-      int s = PARSE_HM("08:00"), e = PARSE_HM("17:00");
-      if(now_min >= s && now_min < e) return true;
+      int s = PARSE_HM(g_session_ny_start), e = PARSE_HM(g_session_ny_end);
+      if(s <= e) { if(now_min >= s && now_min < e) return true; }
+      else       { if(now_min >= s || now_min < e) return true; }
    }
-   // Asia  19:00–03:00 (overnight)
    if(g_session_asia_enabled) {
-      int s = PARSE_HM("19:00"), e = PARSE_HM("03:00");
-      if(s > e) { if(now_min >= s || now_min < e) return true; }
-      else       { if(now_min >= s && now_min < e) return true; }
+      int s = PARSE_HM(g_session_asia_start), e = PARSE_HM(g_session_asia_end);
+      if(s <= e) { if(now_min >= s && now_min < e) return true; }
+      else       { if(now_min >= s || now_min < e) return true; }
    }
    return false;
 }
@@ -2226,6 +2411,36 @@ void OnTimer()
    Print("[TRACE] OnTimer exit symbol=", _Symbol,
       " cursor=", g_last_command_sequence,
       " registered=", g_registration_complete);
+}
+
+// ── SL/TP hit detection via deal history ─────────────────────────────────
+// Called when a deal is closed so we can fire Discord alerts.
+void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &req, const MqlTradeResult &res)
+{
+   if(!g_discord_enabled) return;
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
+
+   ulong deal = trans.deal;
+   if(!HistoryDealSelect(deal)) return;
+   if((ulong)HistoryDealGetInteger(deal, DEAL_MAGIC) != IFX_COMMAND_MAGIC) return;
+
+   long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
+   if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_INOUT) return;
+
+   string sym  = HistoryDealGetString(deal, DEAL_SYMBOL);
+   long   dt   = HistoryDealGetInteger(deal, DEAL_TYPE);    // 0=buy 1=sell (closing side)
+   string side = (dt == DEAL_TYPE_BUY) ? "buy" : "sell";   // the closing deal's direction
+   double pnl  = HistoryDealGetDouble(deal, DEAL_PROFIT);
+   double price = HistoryDealGetDouble(deal, DEAL_PRICE);
+   long   reason = HistoryDealGetInteger(deal, DEAL_REASON);
+
+   bool is_sl = (reason == DEAL_REASON_SL);
+   bool is_tp = (reason == DEAL_REASON_TP);
+
+   if(is_sl && g_discord_notify_sl)
+      SendDiscordAlert("SL HIT", sym, side, price, pnl);
+   else if(is_tp && g_discord_notify_tp)
+      SendDiscordAlert("TP HIT", sym, side, price, pnl);
 }
 
 //==========================================================================

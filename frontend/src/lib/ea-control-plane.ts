@@ -443,9 +443,9 @@ export async function buildEaConfigForConnection(admin: AdminClient, connectionI
         use_dead_sl: readBooleanPref(prefs, "useDeadSl", "use_dead_sl") ?? currentConfig.execution.use_dead_sl,
         sl_cooldown_min: readNumberPref(prefs, "slCooldownMin", "sl_cooldown_min") ?? currentConfig.execution.sl_cooldown_min,
         base_magic: readNumberPref(prefs, "baseMagic", "base_magic") ?? currentConfig.execution.base_magic,
-        partial_take_profit_enabled: readBooleanPref(prefs, "partialTakeProfitEnabled", "partial_take_profit_enabled") ?? currentConfig.execution.partial_take_profit_enabled,
+        partial_take_profit_enabled: readBooleanPref(prefs, "partialTakeProfitEnabled", "partial_take_profit_enabled", "usePartial") ?? currentConfig.execution.partial_take_profit_enabled,
         tp1_pct: readNumberPref(prefs, "tp1Pct", "tp1_pct") ?? currentConfig.execution.tp1_pct,
-        break_even_enabled: readBooleanPref(prefs, "breakEvenEnabled", "break_even_enabled") ?? currentConfig.execution.break_even_enabled,
+        break_even_enabled: readBooleanPref(prefs, "breakEvenEnabled", "break_even_enabled", "useBE") ?? currentConfig.execution.break_even_enabled,
         break_even_after_tp1: readBooleanPref(prefs, "breakEvenAfterTp1", "break_even_after_tp1") ?? currentConfig.execution.break_even_after_tp1,
         use_auto_rr: typeof setup?.use_auto_rr === "boolean"
           ? setup.use_auto_rr
