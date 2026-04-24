@@ -142,6 +142,11 @@ string   g_discord_webhook_url    = "";
 bool     g_discord_notify_sl      = true;
 bool     g_discord_notify_tp      = true;
 bool     g_discord_notify_daily   = false;
+// ── EA Visuals (SMC structure lines on chart) ─────────────────────────────
+bool     g_show_struct            = false;
+int      g_smc_lookback           = 400;          // candles to scan for swing H/L
+// ── AI Brain text (parsed to override setup globals) ─────────────────────
+string   g_setup_ai_text          = "";
 void AppendDiagLog(const string message)
 {
    int handle = FileOpen("ifx\\diag.log", FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
@@ -963,6 +968,131 @@ void RunControlPlaneLoop(const ulong now_ms)
    MaybeManageOpenPositions();
 }
 
+// ── AI Brain text parser ──────────────────────────────────────────────────
+// Extracts a labelled numeric value from freeform text, e.g. "TP1: 2680.5"
+double ExtractLabelledDouble(const string upper_text, const string label, double fallback)
+{
+   int pos = StringFind(upper_text, label);
+   if(pos < 0) return fallback;
+   pos += StringLen(label);
+   // skip whitespace, colons, equals
+   while(pos < StringLen(upper_text))
+   {
+      ushort c = StringGetCharacter(upper_text, pos);
+      if(c == ' ' || c == ':' || c == '=' || c == '\t') pos++;
+      else break;
+   }
+   string num = "";
+   while(pos < StringLen(upper_text))
+   {
+      ushort c = StringGetCharacter(upper_text, pos);
+      if((c >= '0' && c <= '9') || c == '.') { num += ShortToString(c); pos++; }
+      else break;
+   }
+   if(StringLen(num) == 0) return fallback;
+   return StringToDouble(num);
+}
+
+void ApplyAiTextOverrides(const string ai_text)
+{
+   if(StringLen(ai_text) < 3) return;
+   string upper = ai_text; StringToUpper(upper);
+
+   // BIAS — only update if keyword found
+   if(StringFind(upper, "BIAS") >= 0)
+   {
+      if(StringFind(upper, "LONG") >= 0 || StringFind(upper, "BUY") >= 0)
+         g_setup_bias = "long";
+      else if(StringFind(upper, "SHORT") >= 0 || StringFind(upper, "SELL") >= 0)
+         g_setup_bias = "short";
+      else if(StringFind(upper, "NEUTRAL") >= 0 || StringFind(upper, "FLAT") >= 0)
+         g_setup_bias = "neutral";
+   }
+
+   // PIVOT / ENTRY
+   double v = ExtractLabelledDouble(upper, "PIVOT", -1.0);
+   if(v <= 0.0) v = ExtractLabelledDouble(upper, "ENTRY", -1.0);
+   if(v > 0.0) g_setup_pivot = v;
+
+   // TP1 / TARGET 1
+   v = ExtractLabelledDouble(upper, "TP1", -1.0);
+   if(v <= 0.0) v = ExtractLabelledDouble(upper, "TARGET 1", -1.0);
+   if(v <= 0.0) v = ExtractLabelledDouble(upper, "TARGET1", -1.0);
+   if(v > 0.0) g_setup_tp1 = v;
+
+   // TP2 / TARGET 2
+   v = ExtractLabelledDouble(upper, "TP2", -1.0);
+   if(v <= 0.0) v = ExtractLabelledDouble(upper, "TARGET 2", -1.0);
+   if(v <= 0.0) v = ExtractLabelledDouble(upper, "TARGET2", -1.0);
+   if(v > 0.0) g_setup_tp2 = v;
+
+   Print("🧠 [AI BRAIN] applied: bias=", g_setup_bias,
+         " pivot=", DoubleToString(g_setup_pivot, 5),
+         " tp1=", DoubleToString(g_setup_tp1, 5),
+         " tp2=", DoubleToString(g_setup_tp2, 5));
+}
+
+// ── EA Visuals: SMC structure horizontal lines on chart ───────────────────
+void DeleteStructureLines()
+{
+   for(int i = ObjectsTotal(0, -1, OBJ_HLINE) - 1; i >= 0; i--)
+   {
+      string name = ObjectName(0, i, -1, OBJ_HLINE);
+      if(StringFind(name, "IFX_struct_") == 0)
+         ObjectDelete(0, name);
+   }
+   ChartRedraw(0);
+}
+
+void DrawStructureLines()
+{
+   if(!g_show_struct)
+   {
+      DeleteStructureLines();
+      return;
+   }
+
+   // find the index for the current chart symbol
+   int sym_idx = -1;
+   for(int i = 0; i < g_sym_count; i++)
+      if(g_sym_names[i] == _Symbol) { sym_idx = i; break; }
+   if(sym_idx < 0) return;
+
+   double sh  = g_sym_last_structure_high[sym_idx];
+   double sl_l = g_sym_last_structure_low[sym_idx];
+   int    digs = g_sym_digits[sym_idx];
+
+   // Draw / update swing high line
+   if(sh > 0.0)
+   {
+      string name = "IFX_struct_high";
+      if(ObjectFind(0, name) < 0)
+         ObjectCreate(0, name, OBJ_HLINE, 0, 0, sh);
+      ObjectSetDouble(0,  name, OBJPROP_PRICE,   sh);
+      ObjectSetInteger(0, name, OBJPROP_COLOR,   clrDodgerBlue);
+      ObjectSetInteger(0, name, OBJPROP_STYLE,   STYLE_DASH);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH,   1);
+      ObjectSetInteger(0, name, OBJPROP_BACK,    true);
+      ObjectSetString(0,  name, OBJPROP_TOOLTIP, "IFX Struct High: " + DoubleToString(sh, digs));
+   }
+
+   // Draw / update swing low line
+   if(sl_l > 0.0)
+   {
+      string name = "IFX_struct_low";
+      if(ObjectFind(0, name) < 0)
+         ObjectCreate(0, name, OBJ_HLINE, 0, 0, sl_l);
+      ObjectSetDouble(0,  name, OBJPROP_PRICE,   sl_l);
+      ObjectSetInteger(0, name, OBJPROP_COLOR,   clrOrangeRed);
+      ObjectSetInteger(0, name, OBJPROP_STYLE,   STYLE_DASH);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH,   1);
+      ObjectSetInteger(0, name, OBJPROP_BACK,    true);
+      ObjectSetString(0,  name, OBJPROP_TOOLTIP, "IFX Struct Low: " + DoubleToString(sl_l, digs));
+   }
+
+   ChartRedraw(0);
+}
+
 void MaybeCloseEod()
 {
    if(!g_close_eod) return;
@@ -1248,6 +1378,28 @@ bool ApplyControlPlaneConfig(const string response)
    g_effective_config_refresh_sec = config_poll_sec;
    g_effective_command_poll_sec = MathMax(5, JsonExtractIntAfter(telemetry, 0, "command_poll_sec", config_poll_sec));
    g_effective_account_heartbeat_sec = MathMax(5, JsonExtractIntAfter(telemetry, 0, "heartbeat_sec", g_effective_account_heartbeat_sec));
+
+   // ── Visuals (SMC structure lines on chart) ────────────────────────────
+   string visuals_cfg = JsonExtractObjectAfter(config, 0, "visuals");
+   if(StringLen(visuals_cfg) > 0)
+   {
+      bool new_show = JsonExtractBoolAfter(visuals_cfg, 0, "show_struct", g_show_struct);
+      if(new_show != g_show_struct)
+      {
+         g_show_struct = new_show;
+         if(!g_show_struct) DeleteStructureLines(); // clean up immediately when turned off
+      }
+      g_smc_lookback = MathMax(50, MathMin(5000, JsonExtractIntAfter(visuals_cfg, 0, "smc_lookback", g_smc_lookback)));
+   }
+
+   // ── AI Brain text override (applied last, on top of explicit setup) ───
+   string ai_text_raw = JsonExtractStringAfter(setup, 0, "ai_text");
+   if(StringLen(ai_text_raw) > 3 && ai_text_raw != g_setup_ai_text)
+   {
+      g_setup_ai_text = ai_text_raw;
+      ApplyAiTextOverrides(ai_text_raw);
+   }
+
    g_last_config_version = version;
 
    Print("✅ [CONFIG] control-plane config version ", version, " applied for ", activeCount, " symbols | sessions: L=", (string)g_session_london_enabled, " NY=", (string)g_session_ny_enabled, " AS=", (string)g_session_asia_enabled, " EOD=", (string)g_close_eod, "@", g_eod_time_str);
@@ -2167,7 +2319,9 @@ int LoadClosedStructureBars(const string symbol, MqlRates &bars[])
    MqlRates seriesBars[];
    ArraySetAsSeries(seriesBars, true);
 
-   int copied = CopyRates(symbol, StructureTimeframe, 1, SanitizedStructureBarsToScan(), seriesBars);
+   // use config-driven lookback (g_smc_lookback) when set, else fall back to input-derived value
+   int bars_to_scan = (g_smc_lookback > 0) ? g_smc_lookback : SanitizedStructureBarsToScan();
+   int copied = CopyRates(symbol, StructureTimeframe, 1, bars_to_scan, seriesBars);
    if(copied <= 0)
       return 0;
 
@@ -2243,6 +2397,10 @@ void MaybeProcessLocalFractalSignal(const int sym_idx)
 
    g_sym_last_structure_high[sym_idx] = swingHigh;
    g_sym_last_structure_low[sym_idx] = swingLow;
+
+   // Redraw structure lines on chart if enabled
+   if(g_sym_names[sym_idx] == _Symbol)
+      DrawStructureLines();
 
    if(!LogFractalSignals)
       return;
@@ -2361,6 +2519,7 @@ void OnDeinit(const int reason)
 {
    EventKillTimer();
    Comment("");
+   DeleteStructureLines();
 }
 
 //==========================================================================

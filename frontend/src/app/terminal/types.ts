@@ -70,6 +70,9 @@ export type TerminalPreferences = {
   eodTime: string;
   // Discord
   discordWebhookUrl: string;
+  // EA Visuals (SMC structure lines on chart)
+  showStruct: boolean;
+  smcLookback: number;
 };
 
 export type PersistedTerminalSettings = {

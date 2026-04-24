@@ -972,6 +972,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     if (typeof mergedPrefs.breakEvenAfterTp1 === "boolean") setBreakEvenAfterTp1(mergedPrefs.breakEvenAfterTp1);
     if (typeof mergedPrefs.closeEod === "boolean") setCloseEod(mergedPrefs.closeEod);
     if (typeof mergedPrefs.eodTime === "string" && mergedPrefs.eodTime) setEodTime(mergedPrefs.eodTime);
+    if (typeof mergedPrefs.showStruct === "boolean") setShowStruct(mergedPrefs.showStruct);
+    if (typeof mergedPrefs.smcLookback === "number") setSmcLookback(mergedPrefs.smcLookback);
     if (mergedPrefs.sessions) {
       setSessions({
         london: Boolean(mergedPrefs.sessions.london),
@@ -1043,6 +1045,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
       breakEvenAfterTp1,
       closeEod,
       eodTime,
+      showStruct,
+      smcLookback,
     });
   }, [
     dailyLossLimitUsd,
@@ -1088,6 +1092,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     breakEvenAfterTp1,
     closeEod,
     eodTime,
+    showStruct,
+    smcLookback,
   ]);
 
   useEffect(() => {
