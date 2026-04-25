@@ -1176,6 +1176,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
           breakEvenAfterTp1,
           closeEod,
           eodTime,
+          showStruct,
+          smcLookback,
         },
         termsVersion: TERMS_VERSION,
         termsAccepted,
@@ -1238,6 +1240,8 @@ export function TerminalWorkspace({ initialConnections, initialSettings, isAuthe
     breakEvenAfterTp1,
     closeEod,
     eodTime,
+    showStruct,
+    smcLookback,
     isAuthenticated,
     termsAccepted,
   ]);
